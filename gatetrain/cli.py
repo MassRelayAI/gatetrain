@@ -221,6 +221,11 @@ def cmd_flaky(a):
     return 0
 
 
+def cmd_lanes(a):
+    from . import lanes
+    return lanes.cmd_lanes(a)
+
+
 def build():
     ap = argparse.ArgumentParser(prog="gatetrain")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -246,6 +251,9 @@ def build():
     p.set_defaults(f=cmd_doctor)
     p = sub.add_parser("stop"); p.add_argument("pattern"); p.add_argument("--follower", action="append")
     p.add_argument("--yes", action="store_true"); p.add_argument("--config"); p.add_argument("--host"); p.set_defaults(f=cmd_stop)
+    p = sub.add_parser("lanes"); p.add_argument("--repo", default="."); p.add_argument("--main", required=True)
+    p.add_argument("lane_ref", nargs="+"); p.add_argument("--json", action="store_true"); p.add_argument("--shared-files")
+    p.add_argument("--resource-regex", action="append"); p.set_defaults(f=cmd_lanes)
     return ap
 
 

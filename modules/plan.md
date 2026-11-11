@@ -2,6 +2,22 @@
 
 Detect which work can run in parallel, and schedule it across the hosts.
 
+## Built now: `gatetrain lanes`
+
+`gatetrain lanes --repo PATH --main REF LANE_REF... [--json] [--shared-files PATTERNS] [--resource-regex NAME=REGEX ...]` is a read-only radar
+over git (it shells out to `git` only; exit 0 unless git fails). It reports: bases and containment (a lane whose tip is inside another's is
+listed once; lanes sharing unmerged commits are told to stack from that tip; stacking passes per base), collision hotspots per file
+(SAME-LINES, DELETE-EDIT, CODE-BOTH, SHARED-HUB, ranked), doubled-line risk, resource clashes (default: a 5xxxx port added in a file whose
+path contains `gate`), paired counts, and a parallel plan (lanes grouped so no group has a conflict edge; the summary line).
+
+Heuristic, not proof: SAME-LINES compares old-side line ranges of two diffs taken from possibly different bases; hub patterns are globs;
+doubled-line risk is "one-line hunks at the same line"; paired counts only pair a removed and an added line in one hunk and look for the old
+number next to the same name elsewhere at the lane tip; the groups are a greedy colouring, not an optimal schedule. A quiet report is not a
+guarantee of a clean stack; the pre-flight remains the check.
+
+Still planned (not built): declared owned files per lane and the out-of-set warning, hidden coupling through a code graph, host scheduling,
+critical path from the ledger, per-lane build folders and container names as resources, and the Measure section.
+
 ## Detect
 
 - **Owned files.** Every lane declares the files it owns. Two lanes may run at once only when their owned sets are disjoint; a lane whose
