@@ -173,6 +173,20 @@ def _ranges_linux(runner):
     return [(int(n[0]), int(n[1]), "ephemeral range")] if rc == 0 and len(n) >= 2 else None
 
 
+def _kernel_reserved_linux(runner):
+    """Ports the kernel keeps out of the ephemeral pool (net.ipv4.ip_local_reserved_ports, e.g. "55400-58399,6000"):
+    a fixed test port inside the ephemeral range is safe when it is reserved here (L21)."""
+    rc, o = runner.run("cat /proc/sys/net/ipv4/ip_local_reserved_ports")
+    if rc != 0:
+        return []
+    out = []
+    for part in o.strip().split(","):
+        m = re.fullmatch(r"\s*(\d+)(?:\s*-\s*(\d+))?\s*", part)
+        if m:
+            a = int(m[1]); out.append((a, int(m[2]) if m[2] else a))
+    return out
+
+
 def _ranges_windows(runner):
     rc, o = runner.run("netsh int ipv4 show dynamicport tcp")
     s = re.search(r"Start Port\s*:\s*(\d+)", o)
@@ -201,8 +215,12 @@ def check_ports(h, runner):
         out.append(Result(h.name, "ports", "WARN", ["L21"], "cannot read the OS port ranges; only reserved ranges and duplicates checked",
                           "check the ephemeral and excluded ranges by hand"))
         ranges = []
+    kernel_reserved = [] if host_os(h) == "windows" else _kernel_reserved_linux(runner)
     for p in h.ports:
         hit = next(((a, b, w) for a, b, w in ranges + extra if a <= p <= b), None)
+        if hit and hit[2] == "ephemeral range" and any(a <= p <= b for a, b in kernel_reserved):
+            out.append(Result(h.name, "ports", "PASS", ["L21"], f"port {p} is inside the ephemeral range but reserved by the kernel (ip_local_reserved_ports)"))
+            continue
         if hit:
             out.append(Result(h.name, "ports", "FAIL", ["L21"], f"port {p} is inside the {hit[2]} {hit[0]}-{hit[1]}",
                               f"move port {p} outside {hit[0]}-{hit[1]}"))

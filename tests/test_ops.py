@@ -199,6 +199,14 @@ class TestDoctorChecks(unittest.TestCase):
         r = check_ports(host(ports=[5500, 6001], reserved_port_ranges=["6000-6100"]), rng)
         self.assertEqual(status_of(r), ["PASS", "FAIL"])
 
+    def test_ports_kernel_reserved_inside_ephemeral(self):
+        # a fixed gate port inside the Linux ephemeral range is safe when the kernel reserves it (found on a real build host)
+        from gatetrain.doctor import check_ports
+        rng = FakeRunner([("ip_local_port_range", 0, "32768\t60999\n"), ("ip_local_reserved_ports", 0, "55400-58399,6000\n")])
+        r = check_ports(host(ports=[57901, 40000]), rng)
+        self.assertEqual(status_of(r), ["PASS", "FAIL"])
+        self.assertIn("reserved by the kernel", r[0].message)
+
     def test_ports_windows(self):
         from gatetrain.doctor import check_ports
         w = FakeRunner([("show dynamicport tcp", 0, "Protocol tcp Dynamic Port Range\n---\nStart Port      : 49152\nNumber of Ports : 16384\n"),
