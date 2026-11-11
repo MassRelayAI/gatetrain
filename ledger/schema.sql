@@ -1,4 +1,4 @@
--- tickfleet ledger: append-only. SQLite or Postgres. One row per thing that happened; nothing is updated in place.
+-- gatetrain ledger: append-only. SQLite or Postgres. One row per thing that happened; nothing is updated in place.
 
 CREATE TABLE IF NOT EXISTS runs (
   id           TEXT PRIMARY KEY,           -- e.g. "<batch>-<n>" or "<lane>-gates-<n>"

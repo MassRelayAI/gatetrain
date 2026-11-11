@@ -1,4 +1,4 @@
-# tickfleet hosts - copy to hosts.yaml (git-ignored) and edit. Names are yours; nothing here is a real machine.
+# gatetrain hosts - copy to hosts.yaml (git-ignored) and edit. Names are yours; nothing here is a real machine.
 profile: mixed            # zero-cost | budget | speed | mixed
 
 budget:

@@ -1,9 +1,9 @@
-# tickfleet
+# gatetrain
 
 Run coding agents and long build chains across several machines — local PCs, home servers, cloud runners — and keep the whole thing honest:
 every run measured, every red explained, every cleanup safe, and the money (or the zero-money) visible.
 
-tickfleet is a method plus small tested scripts. It grew out of running a large monorepo with many parallel agent lanes, one long
+gatetrain is a method plus small tested scripts. It grew out of running a large monorepo with many parallel agent lanes, one long
 verification chain per batch, and two to three machines. Every module here exists because something went wrong without it.
 
 ## The idea in one paragraph
