@@ -157,6 +157,83 @@ class LanesTest(unittest.TestCase):
         self.assertEqual(sorted(rep["groups"][0]), ["X", "Y", "Z"])
         self.assertEqual(rep["summary_line"], "3 lanes: 1 independent groups; 0 certain conflicts; 0 shared hubs; 0 resource clashes")
 
+    # ---- drift against main, carried files, noise
+    def test_i_drift_same_lines_vs_main(self):
+        r = base_repo({"m.js": "import a from 'a'\nimport b from 'b'\nimport c from 'c'\n"})
+        r.branch("L1"); r.commit_files("1", {"m.js": "import a from 'a'\nimport b, {x} from 'b'\nimport c from 'c'\n"})
+        sh(r.p, "checkout", "-q", "main"); r.commit_files("m", {"m.js": "import a from 'a'\nimport b, {y} from 'b'\nimport c from 'c'\n"})
+        rep = lanes(r, "L1")
+        h = [x for x in rep["hotspots"] if x["file"] == "m.js"]
+        self.assertEqual([(x["kind"], x["lanes"]) for x in h], [("SAME-LINES", ["L1", "main"])])
+        self.assertTrue(rep["doubled_line_risk"])
+        self.assertIn("L1 x main", text(r, "L1"))
+
+    def test_j_drift_code_both_and_hub_vs_main(self):
+        body = "".join(f"line{i}\n" for i in range(1, 41))
+        r = base_repo({"code.py": body, "package.json": '{\n"t": "a"\n}\n'})
+        r.branch("L1"); r.commit_files("1", {"code.py": body.replace("line3\n", "LINE3\n"), "package.json": '{\n"t": "a b"\n}\n'})
+        sh(r.p, "checkout", "-q", "main"); r.commit_files("m", {"code.py": body.replace("line30\n", "LINE30\n"), "package.json": '{\n"t": "a c"\n}\n'})
+        rep = lanes(r, "L1")
+        self.assertEqual({(x["kind"], x["file"], tuple(x["lanes"])) for x in rep["hotspots"]},
+                         {("CODE-BOTH", "code.py", ("L1", "main")), ("SHARED-HUB", "package.json", ("L1", "main"))})
+
+    def test_k_carried_files_collide(self):
+        r = base_repo({"main.rs": "a\nb\nc\n"})
+        r.branch("S"); r.commit_files("s", {"main.rs": "a\nB1\nc\n"})
+        r.branch("A", "S"); r.commit_files("a", {"a.txt": "x\n"})
+        r.branch("C", "S"); r.commit_files("c", {"c.txt": "x\n"})
+        r.branch("B", "main"); r.commit_files("b", {"main.rs": "a\nB2\nc\n"})
+        rep = lanes(r, "A", "C", "B")
+        h = [x for x in rep["hotspots"] if x["kind"] == "SAME-LINES"]
+        self.assertEqual(len(h), 1)
+        self.assertEqual(h[0]["file"], "main.rs")
+        self.assertTrue(h[0]["lanes"][0].startswith("carried "))
+        self.assertIn("B", h[0]["lanes"])
+        self.assertIn("carried ", text(r, "A", "C", "B"))
+
+    def test_l_carried_already_on_main(self):
+        r = base_repo({"a.txt": "1\n"})
+        r.branch("S"); r.commit_files("s", {"s.txt": "side\n"})
+        sha = sh(r.p, "rev-parse", "S")
+        r.branch("A", "S"); r.commit_files("a", {"a1.txt": "x\n"})
+        r.branch("C", "S"); r.commit_files("c", {"c1.txt": "x\n"})
+        sh(r.p, "checkout", "-q", "main"); r.commit_files("other", {"o.txt": "o\n"}); sh(r.p, "cherry-pick", sha)
+        rep = lanes(r, "A", "C")
+        self.assertTrue(rep["carried"][0]["on_main"])
+        t = text(r, "A", "C")
+        self.assertIn("already on main (by patch)", t)
+        self.assertIn("do NOT re-apply", t)
+        self.assertNotIn("stack the carried commits", t)
+
+    def test_l2_carried_not_on_main_flag_false(self):
+        r = base_repo({"a.txt": "1\n"})
+        r.branch("S"); r.commit_files("s", {"s.txt": "side\n"})
+        r.branch("A", "S"); r.commit_files("a", {"a1.txt": "x\n"})
+        r.branch("C", "S"); r.commit_files("c", {"c1.txt": "x\n"})
+        self.assertFalse(lanes(r, "A", "C")["carried"][0]["on_main"])
+
+    def test_m_locale_is_hub(self):
+        r = base_repo({"web/locales/en.json": '{\n"a": 1\n}\n', "w.py": "x\n"})
+        r.branch("L1"); r.commit_files("1", {"web/locales/en.json": '{\n"a": 1,\n"b": 2\n}\n'})
+        r.branch("L2"); r.commit_files("2", {"web/locales/en.json": '{\n"a": 1,\n"c": 3\n}\n'})
+        self.assertEqual(kinds(lanes(r, "L1", "L2")), {("SHARED-HUB", "web/locales/en.json")})
+
+    def test_n_paired_counts_only_in_tests(self):
+        r = base_repo({"gate.mjs": "const EXPECTED = 13\n", "docs/notes.md": "EXPECTED = 13\n",
+                       "_archive/old.txt": "EXPECTED = 13\n", "gate.test.mjs": "assert.equal(EXPECTED, 13)\n"})
+        r.branch("L1"); r.commit_files("1", {"gate.mjs": "const EXPECTED = 12\n"})
+        got = [p["stale_in"] for p in lanes(r, "L1")["paired_counts"]]
+        self.assertEqual(got, ["gate.test.mjs"])
+
+    def test_o_code_both_grouped_by_file(self):
+        body = "".join(f"line{i}\n" for i in range(1, 61))
+        r = base_repo({"lib.rs": body})
+        for n, ln in (("L1", 3), ("L2", 25), ("L3", 50)):
+            r.branch(n, "main"); r.commit_files(n, {"lib.rs": body.replace(f"line{ln}\n", f"X{ln}\n")})
+        t = text(r, "L1", "L2", "L3")
+        self.assertIn("lib.rs: lanes L1, L2, L3", t)
+        self.assertEqual(t.count("CODE-BOTH"), 1)
+
     def test_bad_ref_fails(self):
         r = base_repo({"a.txt": "1\n"})
         p = subprocess.run([sys.executable, "-m", "gatetrain", "lanes", "--repo", r.p, "--main", "main", "nope"],

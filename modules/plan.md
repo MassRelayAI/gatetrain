@@ -10,10 +10,16 @@ listed once; lanes sharing unmerged commits are told to stack from that tip; sta
 (SAME-LINES, DELETE-EDIT, CODE-BOTH, SHARED-HUB, ranked), doubled-line risk, resource clashes (default: a 5xxxx port added in a file whose
 path contains `gate`), paired counts, and a parallel plan (lanes grouped so no group has a conflict edge; the summary line).
 
+Beyond lane against lane, it also reports **drift** (`lane x main`: the lane's files that main changed since the lane's merge-base,
+classified the same way), **carried files** (a commit range two lanes share takes part as `carried <sha>` against the other lanes and main,
+so a collision inside the carried part is visible), and whether the carried commits are **already on main by patch** (`git cherry`; then use
+the tip as base and do not re-apply). Locale catalogues (`locales/*.json`, `i18n/*.json`, `*.po`) are shared hubs by default; paired counts
+only look in test files and never in `docs/`, `_archive/` or `*.md`; CODE-BOTH is printed once per file with all its lanes.
+
 Heuristic, not proof: SAME-LINES compares old-side line ranges of two diffs taken from possibly different bases; hub patterns are globs;
 doubled-line risk is "one-line hunks at the same line"; paired counts only pair a removed and an added line in one hunk and look for the old
 number next to the same name elsewhere at the lane tip; the groups are a greedy colouring, not an optimal schedule. A quiet report is not a
-guarantee of a clean stack; the pre-flight remains the check.
+guarantee of a clean stack (drift and carried hunks are compared in old-side coordinates from different bases, so they can miss or invent an overlap; the on-main check needs every carried commit to have a patch-equal twin on main); the pre-flight remains the check.
 
 Still planned (not built): declared owned files per lane and the out-of-set warning, hidden coupling through a code graph, host scheduling,
 critical path from the ledger, per-lane build folders and container names as resources, and the Measure section.

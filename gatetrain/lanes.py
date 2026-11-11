@@ -5,9 +5,12 @@ import re
 import subprocess
 import sys
 
-DEFAULT_SHARED = ["package.json", "package-lock.json", "*.lock", "*.csv", "docs/*.md", "*routes*.json", "*registry*.json"]
+DEFAULT_SHARED = ["package.json", "package-lock.json", "*.lock", "*.csv", "docs/*.md", "*routes*.json", "*registry*.json",
+                  "locales/*.json", "*/locales/*.json", "i18n/*.json", "*/i18n/*.json", "*.po"]
 DEFAULT_RESOURCE = {"port": r"\b(5[0-9]{4})\b"}
 PAIRED_LINE = re.compile(r"EXPECTED|expected exactly|const [A-Z_]+ = \d+")
+TEST_FILE = ["*test*", "*spec*", "tests/*"]
+NOT_CHECKS = ["docs/*", "*/docs/*", "_archive/*", "*/_archive/*", "*.md"]
 RANK = {"SAME-LINES": 0, "DELETE-EDIT": 0, "CODE-BOTH": 1, "SHARED-HUB": 2}
 ACTION = {
     "SAME-LINES": "certain conflict, merge by hand",
@@ -116,7 +119,8 @@ def analyse(repo, main, refs, shared=None, resources=None):
                 ps.update(L[a]["parents"].get(c, []))
             tips = [c for c in common if c not in ps]
             tip = sorted(tips)[0]
-            e = carried.setdefault(tip, {"tip": tip, "commits": len(common), "lanes": set()})
+            e = carried.setdefault(tip, {"tip": tip, "commits": len(common), "lanes": set(), "common": set()})
+            e["common"].update(common)
             e["lanes"].update((a, b))
     for e in carried.values():
         for ln in e["lanes"]:
@@ -124,7 +128,11 @@ def analyse(repo, main, refs, shared=None, resources=None):
             if L[ln]["carries"] == [] or e["commits"] > max(c["commits"] for c in L[ln]["carries"]):
                 L[ln]["base"] = e["tip"]
             L[ln]["carries"].append(e)
-    carried_out = [{"tip": e["tip"], "commits": e["commits"], "lanes": sorted(e["lanes"], key=order.index)}
+    for e in carried.values():
+        out, _ = g.run("cherry", mainsha, e["tip"])
+        marks = {ln.split()[1]: ln.split()[0] for ln in out.splitlines() if len(ln.split()) == 2}
+        e["on_main"] = bool(e["common"]) and all(marks.get(c) == "-" for c in e["common"])
+    carried_out = [{"tip": e["tip"], "commits": e["commits"], "lanes": sorted(e["lanes"], key=order.index), "on_main": e["on_main"]}
                    for e in carried.values()]
     # passes
     groups = {}
@@ -133,60 +141,71 @@ def analyse(repo, main, refs, shared=None, resources=None):
     passes = []
     p1 = [{"base": b, "lanes": ls} for b, ls in groups.items() if b not in carried]
     for t, e in carried.items():
-        p1.append({"base": g.out("merge-base", mainsha, t), "lanes": [], "carry_tip": t, "carried_by": sorted(e["lanes"], key=order.index)})
+        if not e["on_main"]:
+            p1.append({"base": g.out("merge-base", mainsha, t), "lanes": [], "carry_tip": t, "carried_by": sorted(e["lanes"], key=order.index)})
     p2 = [{"base": b, "lanes": ls, "carried": True} for b, ls in groups.items() if b in carried]
     if p1:
         passes.append(p1)
     if p2:
         passes.append(p2)
-    # own diffs
-    D = {}
-    for r in live:
-        base, tip = L[r]["base"], L[r]["tip"]
+    # own diffs, carried ranges and main since each merge-base, all as entities
+    def diffinfo(base, tip):
         hunks = parse_diff(g.run("diff", "-U0", "--no-color", "--no-renames", "--no-ext-diff", base, tip)[0])
         deleted, touched = set(), set(hunks)
         for ln in g.run("diff", "--name-status", "-M", "--no-ext-diff", base, tip)[0].splitlines():
-            parts = ln.split("\t")
+            parts = ln.split("	")
             if parts[0].startswith("D"):
                 deleted.add(parts[1]); touched.add(parts[1])
             elif parts[0].startswith("R"):
                 deleted.add(parts[1]); touched.update(parts[1:3])
             elif len(parts) > 1:
                 touched.add(parts[-1])
-        D[r] = {"hunks": hunks, "deleted": deleted, "touched": touched}
-    # hotspots
-    byfile = {}
+        return {"hunks": hunks, "deleted": deleted, "touched": touched}
+
+    D = {r: diffinfo(L[r]["base"], L[r]["tip"]) for r in live}
+    owners = {}  # pseudo entity -> real lanes it stands for
+    pairs = [(a, b) for i, a in enumerate(live) for b in live[i + 1:]]
+    for e in carried.values():
+        if e["on_main"]:
+            continue
+        name = "carried " + e["tip"][:9]
+        D[name] = diffinfo(g.out("merge-base", mainsha, e["tip"]), e["tip"])
+        owners[name] = sorted(e["lanes"], key=order.index)
+        pairs += [(name, r) for r in live if r not in e["lanes"]]
+        pairs.append((name, "main"))
+        D.setdefault("main@" + name, diffinfo(g.out("merge-base", mainsha, e["tip"]), mainsha))
     for r in live:
-        for f in D[r]["touched"]:
-            byfile.setdefault(f, []).append(r)
+        D["main@" + r] = diffinfo(L[r]["merge_base"], mainsha)
+        pairs.append((r, "main"))
+
     hot, doubled = [], []
-    for f in sorted(byfile):
-        ls = byfile[f]
-        for i, a in enumerate(ls):
-            for b in ls[i + 1:]:
-                kind, detail = None, None
-                da, db = f in D[a]["deleted"], f in D[b]["deleted"]
-                if matches(f, shared):
-                    kind = "SHARED-HUB"
-                elif da != db:
-                    kind = "DELETE-EDIT"
-                    detail = f"{a if da else b} deletes or renames it"
-                else:
-                    ov = [(x, y) for x in D[a]["hunks"].get(f, []) for y in D[b]["hunks"].get(f, [])
-                          if max(span(x)[0], span(y)[0]) <= min(span(x)[1], span(y)[1])
-                          and (x["added"], x["removed"]) != (y["added"], y["removed"])]
-                    if ov:
-                        kind = "SAME-LINES"
-                        detail = "lines " + ", ".join(sorted({f"{x['old_start']}" + (f"-{x['old_start'] + x['old_count'] - 1}" if x["old_count"] > 1 else "") for x, _ in ov}, key=lambda s: int(s.split("-")[0])))
-                        for x, y in ov:
-                            if (x["old_count"] <= 1 and y["old_count"] <= 1 and len(x["added"]) <= 1 and len(y["added"]) <= 1
-                                    and x["old_start"] == y["old_start"]):
-                                doubled.append({"file": f, "line": x["old_start"], "lanes": [a, b],
-                                                "action": "likely doubled line after stacking: keep one, check it appears once"})
-                    elif not da:
-                        kind = "CODE-BOTH"
-                if kind:
-                    hot.append({"kind": kind, "file": f, "lanes": [a, b], "detail": detail, "action": ACTION[kind]})
+    for a, b in pairs:
+        Da = D[a]
+        Db = D["main@" + a] if b == "main" else D[b]
+        for f in sorted(Da["touched"] & Db["touched"]):
+            kind, detail = None, None
+            da, db = f in Da["deleted"], f in Db["deleted"]
+            if matches(f, shared):
+                kind = "SHARED-HUB"
+            elif da != db:
+                kind = "DELETE-EDIT"
+                detail = f"{a if da else b} deletes or renames it"
+            else:
+                ov = [(x, y) for x in Da["hunks"].get(f, []) for y in Db["hunks"].get(f, [])
+                      if max(span(x)[0], span(y)[0]) <= min(span(x)[1], span(y)[1])
+                      and (x["added"], x["removed"]) != (y["added"], y["removed"])]
+                if ov:
+                    kind = "SAME-LINES"
+                    detail = "lines " + ", ".join(sorted({f"{x['old_start']}" + (f"-{x['old_start'] + x['old_count'] - 1}" if x["old_count"] > 1 else "") for x, _ in ov}, key=lambda t: int(t.split("-")[0])))
+                    for x, y in ov:
+                        if (x["old_count"] <= 1 and y["old_count"] <= 1 and len(x["added"]) <= 1 and len(y["added"]) <= 1
+                                and x["old_start"] == y["old_start"]):
+                            doubled.append({"file": f, "line": x["old_start"], "lanes": [a, b],
+                                            "action": "likely doubled line after stacking: keep one, check it appears once"})
+                elif not da:
+                    kind = "CODE-BOTH"
+            if kind:
+                hot.append({"kind": kind, "file": f, "lanes": [a, b], "detail": detail, "action": ACTION[kind]})
     hot.sort(key=lambda h: (RANK[h["kind"]], h["file"], h["lanes"]))
     # resource clashes and paired counts
     found = {}
@@ -226,7 +245,7 @@ def analyse(repo, main, refs, shared=None, resources=None):
                     seen = set()
                     for gl in out.splitlines():
                         parts = gl.split(":", 3)
-                        if len(parts) < 4 or parts[1] == f or parts[1] in seen:
+                        if len(parts) < 4 or parts[1] == f or parts[1] in seen or not matches(parts[1], TEST_FILE) or matches(parts[1], NOT_CHECKS):
                             continue
                         if re.search(rf"(?<!\d){o}(?!\d)", parts[3]):
                             seen.add(parts[1])
@@ -236,9 +255,10 @@ def analyse(repo, main, refs, shared=None, resources=None):
     # plan: greedy colouring of the conflict graph
     edges = {r: set() for r in live}
     for h in hot:
-        if h["kind"] != "SHARED-HUB":
-            a, b = h["lanes"]
-            edges[a].add(b); edges[b].add(a)
+        if h["kind"] != "SHARED-HUB" and "main" not in h["lanes"]:
+            for a in owners.get(h["lanes"][0], [h["lanes"][0]]):
+                for b in owners.get(h["lanes"][1], [h["lanes"][1]]):
+                    edges[a].add(b); edges[b].add(a)
     colour = {}
     for r in sorted(live, key=lambda x: (-len(edges[x]), live.index(x))):
         used = {colour[n] for n in edges[r] if n in colour}
@@ -272,8 +292,12 @@ def render(rep):
                      + (f", base for stacking {s(l['base'])}" if l["base"] != l["merge_base"] else "")
                      + ("  (no own commits: nothing to stack)" if l["own_commits"] == 0 else ""))
     for c in rep["carried"]:
-        o.append(f"   both carry {c['commits']} commits up to {s(c['tip'])} ({' and '.join(c['lanes'])}): "
-                 f"stack with that tip as lane base")
+        if c["on_main"]:
+            o.append(f"   carried commits up to {s(c['tip'])} are already on main (by patch) ({' and '.join(c['lanes'])}): "
+                     f"use {s(c['tip'])} as lane base and do NOT re-apply them")
+        else:
+            o.append(f"   both carry {c['commits']} commits up to {s(c['tip'])} ({' and '.join(c['lanes'])}): "
+                     f"stack with that tip as lane base")
     for i, p in enumerate(rep["passes"], 1):
         for x in p:
             if x.get("carry_tip"):
@@ -284,7 +308,18 @@ def render(rep):
     o += ["", "2. collision hotspots"]
     if not rep["hotspots"]:
         o.append("   none")
+    cb = {}
     for h in rep["hotspots"]:
+        if h["kind"] == "CODE-BOTH":
+            ls = cb.setdefault(h["file"], [])
+            ls += [x for x in h["lanes"] if x not in ls]
+    shown = set()
+    for h in rep["hotspots"]:
+        if h["kind"] == "CODE-BOTH":
+            if h["file"] not in shown:
+                shown.add(h["file"])
+                o.append(f"   CODE-BOTH   {h['file']}: lanes {', '.join(cb[h['file']])} -> {h['action']}")
+            continue
         o.append(f"   {h['kind']:<11} {h['file']}  [{' x '.join(h['lanes'])}]" + (f" {h['detail']}" if h["detail"] else "")
                  + f" -> {h['action']}")
     o += ["", "3. doubled-line risk"]

@@ -125,40 +125,41 @@ next look: 5 min (run-partial-red: a red appeared in the last 5 minutes: look ag
 `gatetrain stop PATTERN [--follower PATTERN] [--yes]` is a dry run until `--yes`, and works on Linux only. The ssh runner and the Linux
 checks are covered by tests with canned outputs, not yet by a run against a real host.
 
-Before stacking, `gatetrain lanes` reads only git and tells you which lanes will collide. Real output from a throwaway repo with
-three lanes (`auth` and `billing` branched from an unmerged side branch, `ui` from main; `side` is the branch they share):
+Before stacking, `gatetrain lanes` reads only git and tells you which lanes will collide, with each other, with a commit they both
+carry, and with main itself. Real output from a throwaway repo (`auth` and `billing` branched from an unmerged side branch that edits
+`server.rs`; `ui` from main and edits the same line; main has since moved on and edited the same import line as `ui`):
 
 ```text
-$ gatetrain lanes --repo . --main main auth billing ui side
+$ gatetrain lanes --repo . --main main auth billing ui
 lanes against main
 
 1. bases and containment
-   auth: merge-base 696be899e, 2 own commits, base for stacking 36fc02c55
-   billing: merge-base 696be899e, 2 own commits, base for stacking 36fc02c55
-   ui: merge-base 696be899e, 1 own commits
-   side: contained in auth: list only auth
-   both carry 1 commits up to 36fc02c55 (auth and billing): stack with that tip as lane base
-   pass 1: base 696be899e (on main): ui
-   pass 1: stack the carried commits up to 36fc02c55 (base 696be899e) on main, once, for auth and billing
-   pass 2: base 36fc02c55 (carried tip, after pass 1): auth, billing
+   auth: merge-base 00e23bdd6, 2 own commits, base for stacking a18ea88c1
+   billing: merge-base 00e23bdd6, 2 own commits, base for stacking a18ea88c1
+   ui: merge-base 00e23bdd6, 1 own commits
+   both carry 1 commits up to a18ea88c1 (auth and billing): stack with that tip as lane base
+   pass 1: base 00e23bdd6 (on main): ui
+   pass 1: stack the carried commits up to a18ea88c1 (base 00e23bdd6) on main, once, for auth and billing
+   pass 2: base a18ea88c1 (carried tip, after pass 1): auth, billing
 
 2. collision hotspots
-   SAME-LINES  app.js  [auth x billing] lines 2 -> certain conflict, merge by hand
-   SHARED-HUB  package.json  [auth x billing] -> rebuild, never text-merge; check entries survive
+   SAME-LINES  app.js  [ui x main] lines 2 -> certain conflict, merge by hand
+   SAME-LINES  server.rs  [carried a18ea88c1 x ui] lines 2 -> certain conflict, merge by hand
 
 3. doubled-line risk
-   app.js:2 [auth x billing] -> likely doubled line after stacking: keep one, check it appears once
+   server.rs:2 [carried a18ea88c1 x ui] -> likely doubled line after stacking: keep one, check it appears once
+   app.js:2 [ui x main] -> likely doubled line after stacking: keep one, check it appears once
 
 4. resource clashes
-   port=57901 introduced by auth and billing (gate_auth.mjs, gate_bill.mjs) -> give each lane its own value before the gates run in parallel
+   none
 
 5. paired counts (heuristic)
-   auth: EXPECTED 13 -> 12 in gate.mjs; count changed here but its check still says 13 in gate.test.mjs:1 -> update it
+   ui: EXPECTED 13 -> 12 in gate.mjs; count changed here but its check still says 13 in gate.test.mjs:1 -> update it
 
 6. parallel plan
-   group 1: auth, ui
-   group 2: billing  (after the groups above; conflicts with them)
-3 lanes: 2 independent groups; 1 certain conflicts; 1 shared hubs; 1 resource clashes
+   group 1: ui
+   group 2: auth, billing  (after the groups above; conflicts with them)
+3 lanes: 2 independent groups; 2 certain conflicts; 0 shared hubs; 0 resource clashes
 ```
 
 It is advice (exit 0 unless git fails); the same data with `--json`. Heuristics are listed in [`modules/plan.md`](modules/plan.md).
