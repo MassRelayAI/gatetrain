@@ -1,7 +1,21 @@
-# gatetrain
+<p align="center">
+  <img src="docs/assets/hero.svg" alt="gatetrain - lanes are stacked into a train, proven at the gates, and merged only when green" width="100%">
+</p>
 
-Run coding agents and long build chains across several machines — local PCs, home servers, cloud runners — and keep the whole thing honest:
-every run measured, every red explained, every cleanup safe, and the money (or the zero-money) visible.
+<p align="center">
+  <b>Run coding agents and long build chains across many machines.</b><br>
+  Local PCs, home servers, cloud runners - every run measured, every red explained, nothing merges unproven.
+</p>
+
+<p align="center">
+  <a href="docs/method.md">Method</a> &middot;
+  <a href="#modules">Modules</a> &middot;
+  <a href="#profiles">Profiles</a> &middot;
+  <a href="docs/lessons.md">Lessons</a> &middot;
+  <a href="ledger/schema.sql">Ledger</a>
+</p>
+
+---
 
 gatetrain is a method plus small tested scripts. It grew out of running a large monorepo with many parallel agent lanes, one long
 verification chain per batch, and two to three machines. Every module here exists because something went wrong without it.
@@ -14,6 +28,8 @@ green on exactly the tested commit **merges**. A cheap recurring **tick** watche
 covers, and reports in a few lines. Risky lanes get an independent **review** before they are stacked. Everything that happens is a row in
 the **ledger**, so bottlenecks, flaky steps, agent quality and cost are measured, not guessed. Every failure that happened twice becomes a
 **lesson**: a rule plus a test that proves it.
+
+<p align="center"><img src="docs/assets/flow.svg" alt="The flow: plan, lanes, review, stack, pre-flight, chain, merge on proof, tidy; the tick watches every host; the ledger records every run" width="100%"></p>
 
 ## Modules
 

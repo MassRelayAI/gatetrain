@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-label="gatetrain: lanes are stacked into a train, proven at the gates, and merged only when green">
+  <style>
+    .bg{fill:#F6F5F1}.ink{fill:#1F2226}.sub{fill:#5A5F66}.rail{stroke:#C9C6BE}.car{fill:#FFFFFF;stroke:#1F2226}.carg{fill:#2E6F69}.gate{stroke:#1F2226}.ok{fill:#2E6F69}.lamp{fill:#E0B25B}.t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.h{font:700 56px Inter,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:-1.5px}.s{font:400 19px Inter,Segoe UI,Helvetica,Arial,sans-serif}
+    @media (prefers-color-scheme: dark){.bg{fill:#15171A}.ink{fill:#E9E7E1}.sub{fill:#A9A6A0}.rail{stroke:#3A3E44}.car{fill:#1F2226;stroke:#E9E7E1}.gate{stroke:#E9E7E1}.ok{fill:#4AA39A}.carg{fill:#4AA39A}}
+  </style>
+  <rect class="bg" width="960" height="300" rx="16"/>
+  <text class="h ink" x="48" y="96">gatetrain</text>
+  <text class="s sub" x="50" y="132">Run coding agents and long build chains across many machines.</text>
+  <text class="s sub" x="50" y="160">Every run measured, every red explained, nothing merges unproven.</text>
+  <!-- rails -->
+  <line class="rail" x1="40" y1="252" x2="920" y2="252" stroke-width="3"/>
+  <line class="rail" x1="40" y1="262" x2="920" y2="262" stroke-width="3"/>
+  <!-- the train: three lane cars -->
+  <g>
+    <rect class="car" x="70" y="200" width="96" height="44" rx="8" stroke-width="2"/>
+    <rect class="carg" x="82" y="212" width="20" height="20" rx="4"/>
+    <text class="t ink" x="110" y="228">lane</text>
+    <rect class="car" x="176" y="200" width="96" height="44" rx="8" stroke-width="2"/>
+    <rect class="carg" x="188" y="212" width="20" height="20" rx="4"/>
+    <text class="t ink" x="216" y="228">lane</text>
+    <rect class="car" x="282" y="200" width="96" height="44" rx="8" stroke-width="2"/>
+    <rect class="carg" x="294" y="212" width="20" height="20" rx="4"/>
+    <text class="t ink" x="322" y="228">lane</text>
+  </g>
+  <!-- gate 1: pre-flight -->
+  <g>
+    <line class="gate" x1="452" y1="194" x2="452" y2="250" stroke-width="3"/>
+    <line class="gate" x1="452" y1="198" x2="520" y2="198" stroke-width="3"/>
+    <circle class="ok" cx="452" cy="188" r="7"/>
+    <text class="t sub" x="462" y="228">pre-flight</text>
+  </g>
+  <!-- gate 2: chain -->
+  <g>
+    <line class="gate" x1="612" y1="194" x2="612" y2="250" stroke-width="3"/>
+    <line class="gate" x1="612" y1="198" x2="680" y2="198" stroke-width="3"/>
+    <circle class="ok" cx="612" cy="188" r="7"/>
+    <text class="t sub" x="622" y="228">chain</text>
+  </g>
+  <!-- gate 3: merge -->
+  <g>
+    <line class="gate" x1="772" y1="194" x2="772" y2="250" stroke-width="3"/>
+    <line class="gate" x1="772" y1="198" x2="840" y2="198" stroke-width="3"/>
+    <circle class="lamp" cx="772" cy="188" r="7"/>
+    <text class="t sub" x="782" y="228">merge</text>
+  </g>
+  <text class="t ink" x="856" y="236">main</text>
+</svg>

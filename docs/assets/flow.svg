@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" role="img" aria-label="The gatetrain flow: plan and dispatch lanes, stack, pre-flight on a free host, chain on the builder, merge on proof, tidy; the tick watches every host and the ledger records every run">
+  <style>
+    .bg{fill:#F6F5F1}.box{fill:#FFFFFF;stroke:#1F2226}.ink{fill:#1F2226}.sub{fill:#5A5F66}.ln{stroke:#1F2226;fill:none}.band{fill:#E6EFEE}.band2{fill:#F1EADB}.acc{fill:#2E6F69}
+    .t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.s{font:400 13px Inter,Segoe UI,Helvetica,Arial,sans-serif}
+    @media (prefers-color-scheme: dark){.bg{fill:#15171A}.box{fill:#1F2226;stroke:#E9E7E1}.ink{fill:#E9E7E1}.sub{fill:#A9A6A0}.ln{stroke:#E9E7E1}.band{fill:#20302E}.band2{fill:#2E2A22}.acc{fill:#4AA39A}}
+  </style>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="ink"/></marker></defs>
+  <rect class="bg" width="960" height="420" rx="16"/>
+  <!-- tick band -->
+  <rect class="band" x="24" y="20" width="912" height="44" rx="10"/>
+  <text class="t ink" x="44" y="48">tick</text>
+  <text class="s sub" x="90" y="48">every N minutes, on every host: chains, merges, queues, reviews due, branches, disk, leftovers  ->  3-6 line report</text>
+  <!-- pipeline -->
+  <g>
+    <rect class="box" x="24" y="110" width="128" height="76" rx="10" stroke-width="2"/><text class="t ink" x="40" y="140">plan</text><text class="s sub" x="40" y="162">independent lanes,</text><text class="s sub" x="40" y="178">owned files</text>
+    <rect class="box" x="176" y="110" width="128" height="76" rx="10" stroke-width="2"/><text class="t ink" x="192" y="140">lanes</text><text class="s sub" x="192" y="162">agents build in</text><text class="s sub" x="192" y="178">parallel, red first</text>
+    <rect class="box" x="328" y="110" width="128" height="76" rx="10" stroke-width="2"/><text class="t ink" x="344" y="140">review</text><text class="s sub" x="344" y="162">independent read</text><text class="s sub" x="344" y="178">for risky lanes</text>
+    <rect class="box" x="480" y="110" width="128" height="76" rx="10" stroke-width="2"/><text class="t ink" x="496" y="140">stack</text><text class="s sub" x="496" y="162">passes per base,</text><text class="s sub" x="496" y="178">artefact repair</text>
+    <rect class="box" x="632" y="110" width="128" height="76" rx="10" stroke-width="2"/><text class="t ink" x="648" y="140">pre-flight</text><text class="s sub" x="648" y="162">cheap checks on</text><text class="s sub" x="648" y="178">a free host</text>
+    <rect class="box" x="784" y="110" width="152" height="76" rx="10" stroke-width="2"/><text class="t ink" x="800" y="140">chain</text><text class="s sub" x="800" y="162">the full run on the</text><text class="s sub" x="800" y="178">builder, all reds</text>
+  </g>
+  <g stroke-width="2">
+    <line class="ln" x1="152" y1="148" x2="174" y2="148" marker-end="url(#a)"/>
+    <line class="ln" x1="304" y1="148" x2="326" y2="148" marker-end="url(#a)"/>
+    <line class="ln" x1="456" y1="148" x2="478" y2="148" marker-end="url(#a)"/>
+    <line class="ln" x1="608" y1="148" x2="630" y2="148" marker-end="url(#a)"/>
+    <line class="ln" x1="760" y1="148" x2="782" y2="148" marker-end="url(#a)"/>
+    <path class="ln" d="M860 186 V226 H732" marker-end="url(#a)"/>
+  </g>
+  <g>
+    <rect class="box" x="480" y="206" width="248" height="64" rx="10" stroke-width="2"/><text class="t ink" x="496" y="232">merge on proof</text><text class="s sub" x="496" y="254">zero red, tested commit == tip, health</text>
+    <rect class="box" x="264" y="206" width="192" height="64" rx="10" stroke-width="2"/><text class="t ink" x="280" y="232">tidy</text><text class="s sub" x="280" y="254">archive tags, links first</text>
+    <line class="ln" x1="480" y1="238" x2="458" y2="238" stroke-width="2" marker-end="url(#a)"/>
+  </g>
+  <!-- ledger band -->
+  <rect class="band2" x="24" y="300" width="912" height="96" rx="10"/>
+  <text class="t ink" x="44" y="330">ledger</text>
+  <text class="s sub" x="44" y="354">every run, step, review and hand-back is a row: critical path, waiting time, flaky steps, cost per batch, agent first-try-green rate</text>
+  <text class="s sub" x="44" y="378">hosts: local PCs and servers (zero-cost) · cloud runners (metered) · models (local or API)  -  one profile decides what runs where</text>
+</svg>
