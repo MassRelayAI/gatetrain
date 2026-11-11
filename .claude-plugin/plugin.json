@@ -2,8 +2,19 @@
   "name": "gatetrain",
   "description": "Run coding agents and long build chains across many machines: plan independent lanes, stack them into batches, pre-flight on a free host, prove with one chain, merge only on proof, tidy safely, and measure everything.",
   "version": "0.1.0",
-  "author": { "name": "MassRelayAI" },
+  "author": {
+    "name": "MassRelayAI"
+  },
   "homepage": "https://github.com/MassRelayAI/gatetrain",
   "repository": "https://github.com/MassRelayAI/gatetrain",
-  "keywords": ["skills", "orchestration", "merge-queue", "ci", "multi-machine", "agents", "workflows"]
+  "keywords": [
+    "skills",
+    "orchestration",
+    "merge-queue",
+    "ci",
+    "multi-machine",
+    "agents",
+    "workflows"
+  ],
+  "license": "Apache-2.0"
 }

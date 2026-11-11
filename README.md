@@ -193,4 +193,4 @@ The gatetrain mark: a train of lanes passing under a gate with a green signal. S
 
 ## Licence
 
-To be decided (Apache-2.0 proposed). Until then, all rights reserved.
+[Apache License 2.0](LICENSE) - use it, change it, ship it, commercially too; keep the notice, and the patent grant protects everyone who uses it.
