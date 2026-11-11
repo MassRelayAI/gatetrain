@@ -8,15 +8,15 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> &middot;
+  <a href="#installation">Install</a> &middot;
   <a href="#how-it-works">How it works</a> &middot;
-  <a href="#skills">Skills</a> &middot;
+  <a href="#the-basic-workflow">Workflow</a> &middot;
   <a href="#profiles-from-zero-cost-to-cloud">Profiles</a> &middot;
   <a href="docs/lessons.md">Lessons</a> &middot;
   <a href="#roadmap">Roadmap</a>
 </p>
 
-<p align="center"><sub>Status: early. The method runs every day on a large monorepo; the scripts are being extracted and made generic. Skills and docs are usable today.</sub></p>
+<p align="center"><sub>Status: early. The method runs every day on a large monorepo; the scripts are being extracted and made generic. Skills, plugin and docs are usable today.</sub></p>
 
 ---
 
@@ -34,34 +34,35 @@ line moving without lying to yourself.
 | Machines sit idle while work queues; the bill or the disk surprises you. | One **ledger** of every run and step: waiting time, idle hosts, flaky steps, cost per batch, agent quality. |
 | Cleanup deletes real work. | **Tidy** that cannot: archive tags first, links unlinked first, exact names only, never the main checkout. |
 
-## Quick start
+## Installation
 
-Adopt it in layers; each one is useful on its own.
+Installation differs by harness. The skills are plain Markdown, so any coding agent that reads files can use them.
 
-**1. Read the method (5 minutes).** [`docs/method.md`](docs/method.md) &mdash; roles, a lane, a batch, the tick, measurement.
+### Claude Code (plugin)
 
-**2. Give your coding agent the skills.** They are plain Markdown any agent can read; for Claude Code, copy them into your project:
+```bash
+/plugin marketplace add MassRelayAI/gatetrain
+/plugin install gatetrain@gatetrain
+```
+
+### Any other agent (Codex, Cursor, Gemini CLI, OpenCode, ...)
+
+Copy the skills where your agent reads instructions, and point its rules file at `skills/using-gatetrain/SKILL.md`:
 
 ```bash
 git clone https://github.com/MassRelayAI/gatetrain
-mkdir -p .claude/skills && cp -r gatetrain/skills/* .claude/skills/
+cp -r gatetrain/skills ./.agents/gatetrain-skills     # or your agent's skills or rules folder
 ```
 
-Then ask your agent to "run the tick", "plan these lanes", "pre-flight this batch" or "review this lane".
-
-**3. Describe your machines and pick a profile.**
+### Your machines and the ledger
 
 ```bash
-cp gatetrain/config/hosts.example.yaml gatetrain/config/hosts.yaml   # git-ignored; name your machines, roles, disks, cost
+cp gatetrain/config/hosts.example.yaml gatetrain/config/hosts.yaml   # git-ignored: your machines, roles, disks, cost, profile
+sqlite3 gatetrain.db < gatetrain/ledger/schema.sql                   # or Postgres: the numbers exist from day one
 ```
 
-**4. Start the ledger** (SQLite or Postgres) so the numbers exist from day one:
-
-```bash
-sqlite3 gatetrain.db < gatetrain/ledger/schema.sql
-```
-
-The command-line scripts (`gatetrain tick`, `gatetrain stack`, `gatetrain chain stop` ...) follow on the [roadmap](#roadmap).
+Works alongside single-branch development skill sets (brainstorming, plans, test-driven development, code review, such as
+[Superpowers](https://github.com/obra/superpowers)): those make one lane good; gatetrain runs many lanes on many machines and proves the batch.
 
 ## How it works
 
@@ -83,15 +84,29 @@ tick 14:53  batch-42 run 2: 255/440 steps, 0 red, merger armed
             waits on you: nothing
 ```
 
-## Skills
+## The basic workflow
 
-| skill | use it to |
-|---|---|
-| [`tick`](skills/tick/SKILL.md) | run the recurring check across hosts, chains, lanes and disks, and report in a few lines |
-| [`plan-lanes`](skills/plan-lanes/SKILL.md) | split work into independent lanes with owned files, and decide what can run in parallel |
-| [`preflight-and-chain`](skills/preflight-and-chain/SKILL.md) | stack a batch, pre-flight it on a free machine, run the chain, stop it safely |
-| [`review-lane`](skills/review-lane/SKILL.md) | brief a worker, then get an independent adversarial review of a risky lane |
-| [`tidy`](skills/tidy/SKILL.md) | clean up finished lanes, build outputs and containers without touching real work |
+1. **using-gatetrain** - Activates when a session runs more than one lane, more than one machine, or a long verification run. Introduces the rest.
+2. **plan-lanes** - Activates before work is split. Maps the code first, cuts lanes with owned files, finds hidden coupling, marks risky lanes, schedules the longest first across free machines.
+3. **review-lane** - Activates when a lane is handed to a worker and when a risky lane is finished. A brief with red-first proof; an independent reviewer who gets the diff, not your conclusion.
+4. **preflight-and-chain** - Activates when lanes are finished. Stacks by base, repairs known artefacts only, pre-flights on a free machine, runs the full chain on the builder, stops safely.
+5. **tick** - Activates on a timer. Chains, merges, queues, reviews due, branches, disk; acts only on written rules; reports in a few lines.
+6. **tidy** - Activates after a merge. Archive tags first, links unlinked first, exact names only, never the main checkout.
+
+**Mandatory, not suggestions:** claims carry counts, tests fail before they pass, nothing merges unless the tested commit is the merged one.
+
+## When something goes wrong
+
+A batch went red three times, a run is slower than it should be, an agent claimed green and was not, the bill jumped. Ask your agent to
+"diagnose this run": the **diagnose-run** skill collects the evidence lines, classifies the red (stacking artefact, flaky, real defect,
+environment, process), names the fix, and turns anything seen twice into a lesson with a check that enforces it.
+
+## What's inside
+
+- **Orchestration** - `using-gatetrain`, `plan-lanes`, `preflight-and-chain`, `tick`
+- **Quality** - `review-lane`, `diagnose-run`
+- **Hygiene** - `tidy`
+- **Reference** - the [method](docs/method.md), the [module pages](#modules), the [lessons](docs/lessons.md), the [ledger schema](ledger/schema.sql), [example hosts](config/hosts.example.yaml)
 
 ## Modules
 
@@ -138,10 +153,20 @@ Fifteen so far, each with the rule and what enforces it ([`docs/lessons.md`](doc
 - Database tests that run as a superuser pass while the real application role is denied. **Every database lane runs one step as the application role.**
 - Three long runs stopped on reds a ten-minute check would have found. **Pre-flight first.**
 
+## Philosophy
+
+- **Proof over claims.** A number and the command that produced it, or it did not happen.
+- **Cheap before expensive.** Ten minutes on a free machine before three hours on the builder.
+- **Repair only what you understand.** Known artefacts are fixed automatically; everything else stays red for a person.
+- **Independent eyes on risk.** Whoever wrote it does not review it.
+- **Nothing is lost in cleanup.** Archive, unlink, then remove.
+- **Zero cost is a first-class mode.** Your own machines are a fleet.
+
 ## Roadmap
 
 - [x] Method, lessons, module pages, host profiles, ledger schema
-- [x] Agent skills: tick, plan-lanes, preflight-and-chain, review-lane, tidy
+- [x] Agent skills: using-gatetrain, plan-lanes, review-lane, preflight-and-chain, tick, diagnose-run, tidy
+- [x] Claude Code plugin manifest and marketplace
 - [ ] `gatetrain tick` and `gatetrain watch` (generic, host-aware)
 - [ ] `gatetrain chain` (holder, step runner, stop) and the ledger writer
 - [ ] `gatetrain stack` with base detection, artefact repair and pre-flight on a free host

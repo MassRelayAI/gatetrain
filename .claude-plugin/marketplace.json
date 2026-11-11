@@ -1,0 +1,14 @@
+{
+  "name": "gatetrain",
+  "description": "gatetrain skills for coding agents",
+  "owner": { "name": "MassRelayAI" },
+  "plugins": [
+    {
+      "name": "gatetrain",
+      "description": "Plan lanes, stack batches, pre-flight, chain, merge on proof, tidy, and the recurring tick across many machines.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": { "name": "MassRelayAI" }
+    }
+  ]
+}
