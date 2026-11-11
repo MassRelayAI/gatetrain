@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 250" width="960" height="250" role="img" aria-label="Without pre-flight a cheap mistake stops a three-hour run late and the batch needs a second full run; with pre-flight the mistake is caught in ten minutes on a free machine and the full run passes once">
+  <style>
+    .bg{fill:#F6F5F1}.ink{fill:#1F2226}.sub{fill:#5A5F66}.run{fill:#D9D6CE}.pre{fill:#2E6F69}.red{fill:#C2553A}.ok{fill:#2E6F69}.axis{stroke:#C9C6BE}
+    .t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.s{font:400 13px Inter,Segoe UI,Helvetica,Arial,sans-serif}
+    @media (prefers-color-scheme: dark){.bg{fill:#15171A}.ink{fill:#E9E7E1}.sub{fill:#A9A6A0}.run{fill:#3A3E44}.pre{fill:#4AA39A}.red{fill:#E07A5F}.ok{fill:#4AA39A}.axis{stroke:#3A3E44}}
+  </style>
+  <rect class="bg" width="960" height="250" rx="16"/>
+  <text class="t ink" x="32" y="40">Cheap before expensive</text>
+  <text class="s sub" x="32" y="62">The same mistake, found at two moments: late in the full run, or in ten minutes on a free machine (fix, re-check, then one full run).</text>
+  <!-- without -->
+  <text class="t ink" x="32" y="108">without pre-flight</text>
+  <rect class="run" x="200" y="92" width="300" height="24" rx="6"/>
+  <rect class="red" x="488" y="92" width="12" height="24" rx="3"/>
+  <text class="s sub" x="210" y="109">full run #1 (3 h)</text>
+  
+  <rect class="run" x="520" y="92" width="300" height="24" rx="6"/>
+  <text class="s sub" x="530" y="109">full run #2 (3 h)</text><text class="s ink" x="830" y="109">6 h 10 m</text>
+  <!-- with -->
+  <text class="t ink" x="32" y="168">with pre-flight</text>
+  <rect class="pre" x="200" y="152" width="18" height="24" rx="6"/>
+  <rect class="red" x="214" y="152" width="6" height="24" rx="3"/>
+  
+  <rect class="pre" x="246" y="152" width="18" height="24" rx="6"/>
+  <rect class="run" x="270" y="152" width="300" height="24" rx="6"/>
+  <text class="s sub" x="280" y="169">one full run (3 h), green</text><text class="s ink" x="600" y="169">3 h 40 m</text>
+  <circle class="ok" cx="584" cy="164" r="7"/>
+  <!-- axis -->
+  <line class="axis" x1="200" y1="206" x2="920" y2="206" stroke-width="2"/>
+  <text class="s sub" x="200" y="226">0 h</text>
+  <text class="s sub" x="492" y="226">3 h</text>
+  <text class="s sub" x="692" y="226">5 h</text>
+  <text class="s sub" x="792" y="226">6 h</text>
+</svg>

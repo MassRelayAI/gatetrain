@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160" role="img" aria-label="gatetrain logo: a train passing under a gate with a green signal">
+  <style>
+    .tile{fill:#1F2226}.fg{stroke:#F6F5F1;fill:none}.car{fill:#F6F5F1}.sig{fill:#4AA39A}
+    @media (prefers-color-scheme: dark){.tile{fill:#E9E7E1}.fg{stroke:#15171A}.car{fill:#15171A}.sig{fill:#2E6F69}}
+  </style>
+  <rect class="tile" x="4" y="4" width="152" height="152" rx="36"/>
+  <!-- gate: two posts and a crossbar -->
+  <path class="fg" d="M42 118 V52 H118 V118" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- signal -->
+  <circle class="sig" cx="80" cy="36" r="9"/>
+  <!-- the train: three cars -->
+  <rect class="car" x="50" y="86" width="18" height="18" rx="4"/>
+  <rect class="car" x="71" y="86" width="18" height="18" rx="4"/>
+  <rect class="car" x="92" y="86" width="18" height="18" rx="4"/>
+  <!-- rail -->
+  <line class="fg" x1="28" y1="122" x2="132" y2="122" stroke-width="6" stroke-linecap="round"/>
+</svg>

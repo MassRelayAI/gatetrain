@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-label="A fleet of machines: a workstation for pre-flight and lane checks, a build server for the chain and merges, an optional cloud runner, and models local or by API; the profile decides what may run where and what it may cost">
+  <style>
+    .bg{fill:#F6F5F1}.card{fill:#FFFFFF;stroke:#1F2226}.ink{fill:#1F2226}.sub{fill:#5A5F66}.ln{stroke:#1F2226;fill:none}.free{fill:#2E6F69}.paid{fill:#E0B25B}.chip{fill:#E6EFEE}.chip2{fill:#F1EADB}.dash{stroke:#5A5F66}
+    .t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.s{font:400 13px Inter,Segoe UI,Helvetica,Arial,sans-serif}.c{font:600 12px Inter,Segoe UI,Helvetica,Arial,sans-serif}
+    @media (prefers-color-scheme: dark){.bg{fill:#15171A}.card{fill:#1F2226;stroke:#E9E7E1}.ink{fill:#E9E7E1}.sub{fill:#A9A6A0}.ln{stroke:#E9E7E1}.free{fill:#4AA39A}.chip{fill:#20302E}.chip2{fill:#2E2A22}.dash{stroke:#A9A6A0}}
+  </style>
+  <rect class="bg" width="960" height="300" rx="16"/>
+  <!-- workstation -->
+  <rect class="card" x="32" y="40" width="200" height="200" rx="12" stroke-width="2"/>
+  <rect class="ln" x="72" y="64" width="120" height="74" rx="6" stroke-width="2"/>
+  <line class="ln" x1="132" y1="138" x2="132" y2="152" stroke-width="2"/><line class="ln" x1="108" y1="152" x2="156" y2="152" stroke-width="2"/>
+  <text class="t ink" x="52" y="182">workstation</text>
+  <text class="s sub" x="52" y="202">pre-flight, lane checks</text>
+  <rect class="chip" x="52" y="212" width="58" height="20" rx="10"/><text class="c ink" x="62" y="226">free</text>
+  <!-- server -->
+  <rect class="card" x="264" y="40" width="200" height="200" rx="12" stroke-width="2"/>
+  <rect class="ln" x="304" y="62" width="120" height="22" rx="4" stroke-width="2"/>
+  <rect class="ln" x="304" y="90" width="120" height="22" rx="4" stroke-width="2"/>
+  <rect class="ln" x="304" y="118" width="120" height="22" rx="4" stroke-width="2"/>
+  <circle class="free" cx="412" cy="73" r="4"/><circle class="free" cx="412" cy="101" r="4"/><circle class="free" cx="412" cy="129" r="4"/>
+  <text class="t ink" x="284" y="182">build server</text>
+  <text class="s sub" x="284" y="202">the chain, merges, deploy</text>
+  <rect class="chip" x="284" y="212" width="58" height="20" rx="10"/><text class="c ink" x="294" y="226">free</text>
+  <!-- cloud -->
+  <rect class="card" x="496" y="40" width="200" height="200" rx="12" stroke-width="2" stroke-dasharray="6 5"/>
+  <path class="ln" d="M548 128 h88 a22 22 0 0 0 -6 -43 a30 30 0 0 0 -56 -6 a24 24 0 0 0 -26 49 z" stroke-width="2"/>
+  <text class="t ink" x="516" y="182">cloud runner</text>
+  <text class="s sub" x="516" y="202">only when the wait is long</text>
+  <rect class="chip2" x="516" y="212" width="74" height="20" rx="10"/><text class="c ink" x="526" y="226">metered</text>
+  <!-- models -->
+  <rect class="card" x="728" y="40" width="200" height="200" rx="12" stroke-width="2"/>
+  <circle class="ln" cx="770" cy="96" r="16" stroke-width="2"/><circle class="ln" cx="828" cy="78" r="12" stroke-width="2"/><circle class="ln" cx="836" cy="122" r="14" stroke-width="2"/><circle class="ln" cx="884" cy="96" r="10" stroke-width="2"/>
+  <line class="ln" x1="786" y1="92" x2="816" y2="81" stroke-width="2"/><line class="ln" x1="784" y1="104" x2="822" y2="118" stroke-width="2"/><line class="ln" x1="840" y1="80" x2="874" y2="92" stroke-width="2"/><line class="ln" x1="850" y1="118" x2="876" y2="102" stroke-width="2"/>
+  <text class="t ink" x="748" y="182">models</text>
+  <text class="s sub" x="748" y="202">local, or by API per lane</text>
+  <rect class="chip" x="748" y="212" width="58" height="20" rx="10"/><text class="c ink" x="758" y="226">local</text>
+  <rect class="chip2" x="812" y="212" width="40" height="20" rx="10"/><text class="c ink" x="821" y="226">API</text>
+  <text class="s sub" x="32" y="274">One profile decides what may run where and what it may cost: zero-cost uses only the solid cards; budget and speed may start the dashed one.</text>
+</svg>

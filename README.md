@@ -34,6 +34,8 @@ line moving without lying to yourself.
 | Machines sit idle while work queues; the bill or the disk surprises you. | One **ledger** of every run and step: waiting time, idle hosts, flaky steps, cost per batch, agent quality. |
 | Cleanup deletes real work. | **Tidy** that cannot: archive tags first, links unlinked first, exact names only, never the main checkout. |
 
+<p align="center"><img src="docs/assets/preflight.svg" alt="Cheap before expensive: the same mistake costs 6 hours 10 minutes without a pre-flight, and 3 hours 40 minutes with one" width="100%"></p>
+
 ## Installation
 
 Installation differs by harness. The skills are plain Markdown, so any coding agent that reads files can use them.
@@ -73,6 +75,8 @@ on whatever machine has a free slot. Finished lanes are **stacked** into a **bat
 **chain** (the full verification run) on the builder. Only a chain that is green on exactly the tested commit **merges**. A cheap recurring
 **tick** watches every machine, chain, lane and disk, acts only where a written rule covers it, and reports in a few lines. Everything is a row
 in the **ledger**. Every failure that happened twice becomes a **lesson**: a rule plus a test that proves it.
+
+<p align="center"><img src="docs/assets/stack.svg" alt="Stack by base, in passes: lanes from different bases are stacked pass by pass; known artefacts are repaired, everything else stays red" width="100%"></p>
 
 ### What a tick looks like (example)
 
@@ -124,6 +128,8 @@ environment, process), names the fix, and turns anything seen twice into a lesso
 | [`tidy`](modules/tidy.md) | cleanup that cannot destroy work |
 
 ## Profiles: from zero cost to cloud
+
+<p align="center"><img src="docs/assets/fleet.svg" alt="A fleet: workstation for pre-flight and lane checks, build server for the chain and merges, an optional metered cloud runner, and models local or by API" width="100%"></p>
 
 | profile | where work runs | spend |
 |---|---|---|
@@ -177,6 +183,13 @@ Fifteen so far, each with the rule and what enforces it ([`docs/lessons.md`](doc
 ## Contributing
 
 Issues and lessons are welcome: a failure you hit twice, the rule you wrote for it, and the test that proves it.
+
+## Brand
+
+<img src="docs/assets/logo.svg" alt="gatetrain logo" width="72" align="left">
+
+The gatetrain mark: a train of lanes passing under a gate with a green signal. SVG in [`docs/assets/logo.svg`](docs/assets/logo.svg), light and dark.
+<br clear="left">
 
 ## Licence
 

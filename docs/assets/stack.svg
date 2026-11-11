@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-label="Stacking by base: lanes branched from different points are stacked in passes, each pass on the previous one; known artefacts are repaired, anything else stays red for a person">
+  <style>
+    .bg{fill:#F6F5F1}.ink{fill:#1F2226}.sub{fill:#5A5F66}.main{stroke:#1F2226}.lane{stroke:#2E6F69}.lane2{stroke:#3E5C76}.lane3{stroke:#9A4F2C}.dot{fill:#1F2226}.ldot{fill:#2E6F69}.ldot2{fill:#3E5C76}.ldot3{fill:#9A4F2C}.pass{fill:#FFFFFF;stroke:#1F2226}.fix{fill:#E6EFEE}.keep{fill:#F6E1DA}
+    .t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.s{font:400 13px Inter,Segoe UI,Helvetica,Arial,sans-serif}
+    @media (prefers-color-scheme: dark){.bg{fill:#15171A}.ink{fill:#E9E7E1}.sub{fill:#A9A6A0}.main{stroke:#E9E7E1}.dot{fill:#E9E7E1}.lane{stroke:#4AA39A}.ldot{fill:#4AA39A}.lane2{stroke:#7FA3C4}.ldot2{fill:#7FA3C4}.lane3{stroke:#E0956B}.ldot3{fill:#E0956B}.pass{fill:#1F2226;stroke:#E9E7E1}.fix{fill:#20302E}.keep{fill:#3A2622}}
+  </style>
+  <rect class="bg" width="960" height="300" rx="16"/>
+  <text class="t ink" x="32" y="40">Stack by base, in passes</text>
+  <!-- main line -->
+  <line class="main" x1="40" y1="200" x2="560" y2="200" stroke-width="4"/>
+  <circle class="dot" cx="100" cy="200" r="7"/><text class="s sub" x="84" y="226">base A</text>
+  <circle class="dot" cx="220" cy="200" r="7"/><text class="s sub" x="204" y="226">base B</text>
+  <circle class="dot" cx="340" cy="200" r="7"/><text class="s sub" x="324" y="226">base C</text>
+  <circle class="dot" cx="520" cy="200" r="7"/><text class="s sub" x="508" y="226">main</text>
+  <!-- lanes -->
+  <path class="lane" d="M100 200 C120 130 150 120 180 120 H260" stroke-width="3" fill="none"/><circle class="ldot" cx="260" cy="120" r="6"/>
+  <path class="lane" d="M100 200 C120 160 150 150 180 150 H240" stroke-width="3" fill="none"/><circle class="ldot" cx="240" cy="150" r="6"/>
+  <path class="lane2" d="M220 200 C240 110 270 96 300 96 H380" stroke-width="3" fill="none"/><circle class="ldot2" cx="380" cy="96" r="6"/>
+  <path class="lane3" d="M340 200 C360 140 390 132 420 132 H470" stroke-width="3" fill="none"/><circle class="ldot3" cx="470" cy="132" r="6"/>
+  <text class="s sub" x="40" y="264">lanes branch from different points; a lane that already carries another is listed once</text>
+  <!-- passes -->
+  <rect class="pass" x="610" y="64" width="310" height="44" rx="10" stroke-width="2"/><text class="t ink" x="626" y="91">pass 1</text><text class="s sub" x="690" y="91">base A lanes on main</text>
+  <rect class="pass" x="610" y="118" width="310" height="44" rx="10" stroke-width="2"/><text class="t ink" x="626" y="145">pass 2</text><text class="s sub" x="690" y="145">base B lanes on pass 1</text>
+  <rect class="pass" x="610" y="172" width="310" height="44" rx="10" stroke-width="2"/><text class="t ink" x="626" y="199">pass 3</text><text class="s sub" x="690" y="199">base C lanes on pass 2</text>
+  <rect class="fix" x="610" y="232" width="150" height="40" rx="10"/><text class="s ink" x="622" y="250">repaired: known</text><text class="s ink" x="622" y="266">artefacts only</text>
+  <rect class="keep" x="770" y="232" width="150" height="40" rx="10"/><text class="s ink" x="782" y="250">everything else</text><text class="s ink" x="782" y="266">stays red</text>
+</svg>

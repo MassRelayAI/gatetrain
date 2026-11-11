@@ -1,10 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-label="gatetrain: lanes are stacked into a train, proven at the gates, and merged only when green">
   <style>
-    .bg{fill:#F6F5F1}.ink{fill:#1F2226}.sub{fill:#5A5F66}.rail{stroke:#C9C6BE}.car{fill:#FFFFFF;stroke:#1F2226}.carg{fill:#2E6F69}.gate{stroke:#1F2226}.ok{fill:#2E6F69}.lamp{fill:#E0B25B}.t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.h{font:700 56px Inter,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:-1.5px}.s{font:400 19px Inter,Segoe UI,Helvetica,Arial,sans-serif}
-    @media (prefers-color-scheme: dark){.bg{fill:#15171A}.ink{fill:#E9E7E1}.sub{fill:#A9A6A0}.rail{stroke:#3A3E44}.car{fill:#1F2226;stroke:#E9E7E1}.gate{stroke:#E9E7E1}.ok{fill:#4AA39A}.carg{fill:#4AA39A}}
+    .bg{fill:#F6F5F1}.ink{fill:#1F2226}.sub{fill:#5A5F66}.rail{stroke:#C9C6BE}.car{fill:#FFFFFF;stroke:#1F2226}.carg{fill:#2E6F69}.gate{stroke:#1F2226}.ok{fill:#2E6F69}.lamp{fill:#E0B25B}.mk{stroke:#F6F5F1}.mkf{fill:#F6F5F1}.t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.h{font:700 56px Inter,Segoe UI,Helvetica,Arial,sans-serif;letter-spacing:-1.5px}.s{font:400 19px Inter,Segoe UI,Helvetica,Arial,sans-serif}
+    @media (prefers-color-scheme: dark){.bg{fill:#15171A}.ink{fill:#E9E7E1}.sub{fill:#A9A6A0}.rail{stroke:#3A3E44}.car{fill:#1F2226;stroke:#E9E7E1}.gate{stroke:#E9E7E1}.ok{fill:#4AA39A}.carg{fill:#4AA39A}.mk{stroke:#15171A}.mkf{fill:#15171A}}
   </style>
   <rect class="bg" width="960" height="300" rx="16"/>
-  <text class="h ink" x="48" y="96">gatetrain</text>
+  <g transform="translate(48 40) scale(0.45)">
+    <rect class="ink" x="4" y="4" width="152" height="152" rx="36"/>
+    <path class="mk" d="M42 118 V52 H118 V118" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <circle class="ok" cx="80" cy="36" r="9"/>
+    <rect class="mkf" x="50" y="86" width="18" height="18" rx="4"/><rect class="mkf" x="71" y="86" width="18" height="18" rx="4"/><rect class="mkf" x="92" y="86" width="18" height="18" rx="4"/>
+    <line class="mk" x1="28" y1="122" x2="132" y2="122" stroke-width="6" stroke-linecap="round"/>
+  </g>
+  <text class="h ink" x="132" y="96">gatetrain</text>
   <text class="s sub" x="50" y="132">Run coding agents and long build chains across many machines.</text>
   <text class="s sub" x="50" y="160">Every run measured, every red explained, nothing merges unproven.</text>
   <!-- rails -->
