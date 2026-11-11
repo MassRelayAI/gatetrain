@@ -1,0 +1,41 @@
+# tickfleet hosts - copy to hosts.yaml (git-ignored) and edit. Names are yours; nothing here is a real machine.
+profile: mixed            # zero-cost | budget | speed | mixed
+
+budget:
+  monthly_cap_usd: 0      # 0 = never start a paid resource (zero-cost)
+  cloud_when_queue_wait_over_min: 30
+
+hosts:
+  - name: builder-1
+    kind: server          # local | server | cloud
+    roles: [chain, merge, deploy]
+    reach: ssh builder-1
+    cores: 40
+    max_parallel_steps: 8
+    disks:
+      - { path: /srv/build, min_free_gb: 100, fast: true }
+    cost_per_hour_usd: 0
+
+  - name: workstation-1
+    kind: local
+    roles: [preflight, lane-gates]
+    reach: local
+    cores: 16
+    max_parallel_steps: 4
+    disks:
+      - { path: "F:/build", min_free_gb: 80, fast: true }
+    awake_hours: "08:00-02:00"
+    cost_per_hour_usd: 0
+
+  - name: cloud-runner
+    kind: cloud
+    roles: [chain]
+    reach: api            # started on demand, stopped after the run
+    max_parallel_steps: 16
+    cost_per_hour_usd: 1.20
+    enabled: false        # only used in budget/speed profiles
+
+models:                   # agent spend, measured per lane and per review
+  - { name: local-coder, kind: local, cost_per_mtok_usd: 0 }
+  - { name: cloud-implementer, kind: api, cost_per_mtok_usd: 3 }
+  - { name: cloud-reviewer, kind: api, cost_per_mtok_usd: 15 }
