@@ -19,6 +19,7 @@ the **ledger**, so bottlenecks, flaky steps, agent quality and cost are measured
 
 | module | what it does |
 |---|---|
+| [`plan`](modules/plan.md) | detect which work is independent (owned files, shared hubs, hidden coupling, resources) and schedule it in parallel across hosts, critical path first |
 | [`hosts`](modules/hosts.md) | the registry of machines (local, server, cloud), their roles, limits and cost; profiles (zero-cost, budget, speed, mixed) |
 | [`tick`](modules/tick.md) | the recurring check across all hosts; acts only on written rules; 3-6 line report |
 | [`watch`](modules/watch.md) | safe watchers on remote logs: bounded, failure-aware, re-armable, no stale lines |
