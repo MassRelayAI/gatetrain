@@ -1,0 +1,95 @@
+# gatetrain hosts - copy to hosts.toml (git-ignored) and edit. Names are yours; nothing here is a real machine.
+# Read with the Python standard library (tomllib): no YAML library needed.
+profile = "mixed"            # zero-cost | budget | speed | mixed
+
+[budget]
+monthly_cap_usd = 0          # 0 = never start a paid resource (zero-cost)
+cloud_when_queue_wait_over_min = 30
+
+# What each kind of run needs from ONE disk. A disk takes a run kind when it is present, allowed for it
+# (use = [...]), has the free space, and (for chains, when chain_needs_fast) is fast.
+[needs]
+preflight_gb = 20
+lane_gates_gb = 40
+chain_gb = 120
+chain_needs_fast = true
+
+[[hosts]]
+name = "builder-1"
+kind = "server"             # local | server | cloud
+roles = ["chain", "merge", "deploy"]
+reach = "ssh builder-1"     # "local", or "ssh <target>"
+cores = 40
+max_parallel_steps = 8
+max_pollers = 4             # concurrent ssh sessions allowed before doctor fails (L25)
+cost_per_hour_usd = 0
+tools = ["git", "node", "cargo"]            # must resolve and print a version (L29)
+ports = [5500, 5501]                         # fixed test ports: outside the ephemeral range, unique (L21, L22)
+reserved_port_ranges = ["55400-58399"]
+container_prefix = "gate-"                   # leftover exited containers with this prefix are listed (L31)
+watcher_max_age_min = 30                     # a tail -F older than this is a stray watcher (L24)
+chain_pattern = "run-chain"                  # a process matching this means a chain is running (L26)
+lock_file = "/run/gatetrain/chain.lock"      # older than lock_max_age_hours with no "released" line fails (L32)
+lock_max_age_hours = 6
+cache_server_check = "cachectl --show-stats" # exit 0 = the shared cache server is alive (L20)
+
+  [[hosts.disks]]
+  path = "/srv/build"
+  min_free_gb = 100
+  fast = true
+  use = ["chain", "cache"]  # what this disk may hold: preflight | lane-gates | chain | cache | archive
+
+  [[hosts.worktrees]]       # two worktrees must not share a build output folder (L17)
+  name = "lane-a"
+  build_dir = "/srv/build/lane-a/target"
+
+  [[hosts.worktrees]]
+  name = "lane-b"
+  build_dir = "/srv/build/lane-b/target"
+
+[[hosts]]
+name = "workstation-1"
+kind = "local"
+roles = ["preflight", "lane-gates"]
+reach = "local"
+cores = 16
+max_parallel_steps = 4
+awake_hours = "08:00-02:00"
+cost_per_hour_usd = 0
+
+  [[hosts.disks]]
+  path = "F:/build"
+  min_free_gb = 80
+  fast = true
+  use = ["preflight", "lane-gates", "cache"]
+
+  [[hosts.disks]]           # an external SSD that may be absent: when unmounted, what it enabled drops (a WARN)
+  path = "E:/external-ssd"
+  min_free_gb = 30
+  fast = true
+  removable = true
+  use = ["preflight"]
+
+[[hosts]]
+name = "cloud-runner"
+kind = "cloud"
+roles = ["chain"]
+reach = "api"               # started on demand, stopped after the run; doctor does not reach it
+max_parallel_steps = 16
+cost_per_hour_usd = 1.20
+enabled = false             # only used in budget/speed profiles
+
+[[models]]                  # agent spend, measured per lane and per review
+name = "local-coder"
+kind = "local"
+cost_per_mtok_usd = 0
+
+[[models]]
+name = "cloud-implementer"
+kind = "api"
+cost_per_mtok_usd = 3
+
+[[models]]
+name = "cloud-reviewer"
+kind = "api"
+cost_per_mtok_usd = 15

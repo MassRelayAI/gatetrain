@@ -59,7 +59,7 @@ cp -r gatetrain/skills ./.agents/gatetrain-skills     # or your agent's skills o
 ### Your machines and the ledger
 
 ```bash
-cp gatetrain/config/hosts.example.yaml gatetrain/config/hosts.yaml   # git-ignored: your machines, roles, disks, cost, profile
+cp gatetrain/config/hosts.example.toml gatetrain/config/hosts.toml   # git-ignored: your machines, roles, disks, cost, profile
 sqlite3 gatetrain.db < gatetrain/ledger/schema.sql                   # or Postgres: the numbers exist from day one
 ```
 
@@ -96,6 +96,34 @@ dominant remaining steps: db-gate-264 (~9m31s), db-gate-318 (~6m02s), db-gate-40
 $ gatetrain next-tick --log tests/fixtures/run-partial-red.log --db gatetrain.db --now 2026-11-11T18:15:00+07:00
 5 min - a red appeared in the last 5 minutes: look again at the minimum
 ```
+
+Pre-run checks and a one-table view of several runs. Real output, from `doctor` on a Windows workstation with a small local config
+(`reach = "local"`; the ps-based checks for watchers and locks are skipped there and say so; the duplicate port, the missing tool and the
+unmounted removable disk are planted on purpose):
+
+```text
+$ gatetrain doctor --config local.toml
+PASS  L18,L30  this-pc disk: F:/: 195 GB free >= 20
+WARN  L18      this-pc disk: E:/external-ssd: removable disk is not mounted  -> fix: attach and mount E:/external-ssd; what it enables is dropped meanwhile
+PASS  L18,L19  this-pc capacity: can run now: preflight
+PASS  L31      this-pc containers: no exited container with prefix gate-
+WARN  L24      this-pc watchers: skipped on windows: needs ps with elapsed time  -> fix: run this check on a host where it is supported
+PASS  L29      this-pc toolchain: python: Python 3.12.10
+FAIL  L29      this-pc toolchain: no-such-tool: does not resolve or prints no version  -> fix: install no-such-tool or fix the PATH or version file the chain uses
+FAIL  L22      this-pc ports: duplicate port(s): 5500  -> fix: give every gate its own port
+WARN  L32      this-pc lock: skipped on windows: needs stat and date  -> fix: run this check on a host where it is supported
+PASS  L26      this-pc chain: no chain running
+$ gatetrain status --log tests/fixtures/run-one-red.log --log tests/fixtures/run-partial-red.log --log tests/fixtures/run-stopped.log --now 2026-11-11T18:15:00+07:00
+run              host       steps    reds  state    eta    band         next look (min)
+run-one-red      builder-1  466/466  1     red      -      -            -
+run-partial-red  builder-1  250/465  6     running  20:33  20:04-21:14  5
+run-stopped      builder-1  31/465   1     stopped  -      -            -
+next look: 5 min (run-partial-red: a red appeared in the last 5 minutes: look again at the minimum)
+```
+
+(The doctor output above is trimmed to one line per distinct check; the port lines for single ports are omitted.)
+`gatetrain stop PATTERN [--follower PATTERN] [--yes]` is a dry run until `--yes`, and works on Linux only. The ssh runner and the Linux
+checks are covered by tests with canned outputs, not yet by a run against a real host.
 
 Run the tests with `python -m unittest discover -s tests -v`.
 
@@ -146,7 +174,7 @@ environment, process), names the fix, and turns anything seen twice into a lesso
 - **Orchestration** - `using-gatetrain`, `plan-lanes`, `preflight-and-chain`, `tick`
 - **Quality** - `review-lane`, `diagnose-run`
 - **Hygiene** - `tidy`
-- **Reference** - the [method](docs/method.md), the [module pages](#modules), the [lessons](docs/lessons.md), the [ledger schema](ledger/schema.sql), [example hosts](config/hosts.example.yaml)
+- **Reference** - the [method](docs/method.md), the [module pages](#modules), the [lessons](docs/lessons.md), the [ledger schema](ledger/schema.sql), [example hosts](config/hosts.example.toml)
 
 ## Modules
 
@@ -189,7 +217,7 @@ gatetrain is not a CI service or a workflow engine; it sits on top of whatever r
 
 ## Lessons it is built on
 
-Fifteen so far, each with the rule and what enforces it ([`docs/lessons.md`](docs/lessons.md)). Three of them:
+Forty-two so far, each with the rule and what enforces it ([`docs/lessons.md`](docs/lessons.md)). Three of them:
 
 - A stop that kills the run but not the merger scheduled five minutes later lets that merger attach to the next run. **A stop cancels queued follow-ups too.**
 - Database tests that run as a superuser pass while the real application role is denied. **Every database lane runs one step as the application role.**
@@ -209,7 +237,8 @@ Fifteen so far, each with the rule and what enforces it ([`docs/lessons.md`](doc
 - [x] Method, lessons, module pages, host profiles, ledger schema
 - [x] Agent skills: using-gatetrain, plan-lanes, review-lane, preflight-and-chain, tick, diagnose-run, tidy
 - [x] Claude Code plugin manifest and marketplace
-- [ ] `gatetrain tick` and `gatetrain watch` (generic, host-aware)
+- [x] `gatetrain doctor` (pre-run checks per host, disks as resources) and `gatetrain stop` (chain plus queued followers)
+- [ ] `gatetrain tick` and `gatetrain watch` (generic, host-aware); `status` and multi-log `next-tick` are built
 - [ ] `gatetrain chain` (holder, step runner, stop)
 - [x] Ledger writer: `gatetrain ingest` (chain logs into runs and steps), `report`, `trace` (Perfetto timeline)
 - [x] `gatetrain eta` (prediction from the ledger) and `gatetrain next-tick` (adaptive cadence)

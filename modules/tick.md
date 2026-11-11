@@ -27,4 +27,13 @@ Prints `<minutes> min - <reason>`. Rules in order, result clamped to `--min`..`-
 3. predicted time left (needs history) of 15 minutes or less: the minimum;
 4. otherwise a third of the predicted time left (a third of the elapsed time when there is no history), capped at 30 once any red exists.
 
-Status: `eta` and `next-tick` built; the tick as a whole is still the written order above. See docs/method.md and docs/lessons.md for the rules this module carries.
+## Several runs: `gatetrain next-tick --log A --log B` and `gatetrain status`
+
+`next-tick` accepts `--log` more than once, returns the earliest suggestion and names the run that decided it
+(`<min> min - <reason> (decided by <run>)`); a finished run never decides while another is live. With one log the output is unchanged.
+
+`gatetrain status --log A --log B [--db LEDGER] [--now T]` ingests each log (replacing a running or stopped run, never a finished one)
+into an in-memory or the given ledger and prints one row per run: run, host, steps done / known, reds so far, state, eta, band, next look.
+Then `next look: <min> min (<run>: <reason>)` for the earliest. The other finished runs in the set serve as history for the predictions.
+
+Status: `eta`, `next-tick` and `status` built; the tick as a whole is still the written order above. See docs/method.md and docs/lessons.md for the rules this module carries.

@@ -1,4 +1,6 @@
-# gatetrain hosts - copy to hosts.yaml (git-ignored) and edit. Names are yours; nothing here is a real machine.
+# DOCUMENTATION ONLY. The loader reads TOML (standard library, no YAML library): use config/hosts.example.toml,
+# which has the same content plus the disk `use`, `[needs]`, tools, ports and doctor fields.
+# gatetrain hosts - copy to hosts.toml (git-ignored) and edit. Names are yours; nothing here is a real machine.
 profile: mixed            # zero-cost | budget | speed | mixed
 
 budget:
