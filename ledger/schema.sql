@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS runs (
   commit_sha   TEXT,
   started_at   TEXT NOT NULL,              -- ISO 8601 with zone
   ended_at     TEXT,
-  outcome      TEXT,                       -- green | red | stopped | error
+  outcome      TEXT,                       -- green | red | running | stopped | error
   stop_reason  TEXT,
   cost_usd     REAL DEFAULT 0
 );
@@ -17,8 +17,9 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS steps (
   run_id       TEXT NOT NULL REFERENCES runs(id),
   name         TEXT NOT NULL,
-  started_at   TEXT NOT NULL,
+  started_at   TEXT,                       -- NULL when the log never printed STEP_START (unknown, never invented)
   ended_at     TEXT,
+  duration_sec REAL,
   exit_code    INTEGER,
   cached       INTEGER DEFAULT 0,
   waited_sec   REAL DEFAULT 0,             -- time queued for a lock, a slot or a port
@@ -51,10 +52,12 @@ CREATE TABLE IF NOT EXISTS host_samples (
   PRIMARY KEY (host, at)
 );
 
--- flaky: the same step on the same commit, red once and green once
+-- flaky: the same step on the same commit, red in one finished run and green in another
 CREATE VIEW IF NOT EXISTS flaky_steps AS
-SELECT s.name, r.commit_sha, COUNT(DISTINCT s.exit_code) AS outcomes
+SELECT s.name, r.commit_sha,
+       SUM(s.exit_code = 0) AS green_runs,
+       SUM(s.exit_code <> 0) AS red_runs
 FROM steps s JOIN runs r ON r.id = s.run_id
-WHERE r.kind = 'chain'
+WHERE r.kind = 'chain' AND r.commit_sha IS NOT NULL AND s.exit_code IS NOT NULL
 GROUP BY s.name, r.commit_sha
-HAVING COUNT(DISTINCT CASE WHEN s.exit_code = 0 THEN 0 ELSE 1 END) > 1;
+HAVING SUM(s.exit_code = 0) > 0 AND SUM(s.exit_code <> 0) > 0;

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Run gatetrain from a checkout, no install.
+here="$(cd "$(dirname "$0")/.." && pwd)"
+py=python3; command -v python3 >/dev/null 2>&1 || py=python
+PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" exec "$py" -m gatetrain "$@"

@@ -1,0 +1,127 @@
+branch batch-a at 0a1b2c3d4 on builder-1
+CHAIN_MODE full
+STEP_START step-001 2026-11-11T08:03:29+07:00
+=== step-001
+STEP_TIME step-001 0s
+STEP_EXIT step-001 0
+STEP_START step-002 2026-11-11T08:03:29+07:00
+=== step-002
+STEP_TIME step-002 2s
+STEP_EXIT step-002 0
+STEP_START build-packages 2026-11-11T08:03:31+07:00
+=== build-packages
+STEP_TIME build-packages 30s
+STEP_EXIT build-packages 0
+STEP_START step-003 2026-11-11T08:04:01+07:00
+=== step-003
+STEP_TIME step-003 0s
+STEP_EXIT step-003 0
+STEP_START step-004 2026-11-11T08:04:01+07:00
+=== step-004
+STEP_TIME step-004 20s
+STEP_EXIT step-004 0
+STEP_START step-005 2026-11-11T08:04:21+07:00
+=== step-005
+STEP_TIME step-005 20s
+STEP_EXIT step-005 0
+STEP_START step-006 2026-11-11T08:04:41+07:00
+=== step-006
+STEP_TIME step-006 2s
+STEP_EXIT step-006 0
+STEP_START step-007 2026-11-11T08:04:43+07:00
+=== step-007
+STEP_TIME step-007 0s
+STEP_EXIT step-007 0
+STEP_START step-008 2026-11-11T08:04:43+07:00
+=== step-008
+STEP_TIME step-008 0s
+STEP_EXIT step-008 0
+STEP_START step-009 2026-11-11T08:04:43+07:00
+=== step-009
+STEP_TIME step-009 20s
+STEP_EXIT step-009 0
+STEP_START step-010 2026-11-11T08:05:03+07:00
+=== step-010
+STEP_TIME step-010 0s
+STEP_EXIT step-010 0
+STEP_START step-011 2026-11-11T08:05:03+07:00
+=== step-011
+STEP_TIME step-011 1s
+STEP_EXIT step-011 0
+STEP_START step-012 2026-11-11T08:05:04+07:00
+=== step-012
+STEP_TIME step-012 2s
+STEP_EXIT step-012 0
+STEP_START step-013 2026-11-11T08:05:06+07:00
+=== step-013
+STEP_TIME step-013 1s
+STEP_EXIT step-013 0
+STEP_START step-014 2026-11-11T08:05:07+07:00
+=== step-014
+STEP_TIME step-014 0s
+STEP_EXIT step-014 0
+STEP_START step-015 2026-11-11T08:05:07+07:00
+=== step-015
+STEP_TIME step-015 234s
+STEP_EXIT step-015 0
+STEP_START step-016 2026-11-11T08:09:01+07:00
+=== step-016
+STEP_TIME step-016 60s
+STEP_EXIT step-016 0
+STEP_START step-017 2026-11-11T08:10:01+07:00
+=== step-017
+STEP_TIME step-017 138s
+STEP_EXIT step-017 0
+STEP_START typecheck 2026-11-11T08:12:19+07:00
+=== typecheck
+STEP_TIME typecheck 104s
+STEP_EXIT typecheck 0
+STEP_START lint-deps 2026-11-11T08:14:03+07:00
+=== lint-deps
+STEP_TIME lint-deps 1s
+STEP_EXIT lint-deps 0
+STEP_START test-web 2026-11-11T08:14:04+07:00
+=== test-web
+STEP_TIME test-web 14s
+STEP_EXIT test-web 0
+STEP_START lint-web 2026-11-11T08:14:18+07:00
+=== lint-web
+STEP_TIME lint-web 4s
+STEP_EXIT lint-web 0
+STEP_START step-018 2026-11-11T08:14:22+07:00
+=== step-018
+STEP_TIME step-018 24s
+STEP_EXIT step-018 0
+STEP_START test-docs 2026-11-11T08:14:46+07:00
+=== test-docs
+STEP_TIME test-docs 161s
+STEP_EXIT test-docs 0
+STEP_START check-tracker 2026-11-11T08:17:27+07:00
+=== check-tracker
+STEP_TIME check-tracker 1s
+STEP_EXIT check-tracker 0
+STEP_START step-019 2026-11-11T08:17:28+07:00
+=== step-019
+STEP_TIME step-019 2s
+STEP_EXIT step-019 0
+STEP_START step-020 2026-11-11T08:17:30+07:00
+=== step-020
+STEP_TIME step-020 2s
+STEP_EXIT step-020 0
+STEP_START step-021 2026-11-11T08:17:32+07:00
+=== step-021
+STEP_TIME step-021 0s
+STEP_EXIT step-021 0
+STEP_START test-tools 2026-11-11T08:17:32+07:00
+=== test-tools
+STEP_TIME test-tools 1928s
+STEP_EXIT test-tools 1
+RED_NOW test-tools rc=1 at 2026-11-11T08:49:40+07:00 (the chain continues)
+STEP_START cargo-test 2026-11-11T08:17:32+07:00
+=== cargo-test
+STEP_TIME cargo-test 2025s
+STEP_EXIT cargo-test 0
+STEP_START test-api 2026-11-11T08:17:32+07:00
+=== test-api
+STEP_TIME test-api 2395s
+STEP_EXIT test-api 0

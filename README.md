@@ -63,6 +63,42 @@ cp gatetrain/config/hosts.example.yaml gatetrain/config/hosts.yaml   # git-ignor
 sqlite3 gatetrain.db < gatetrain/ledger/schema.sql                   # or Postgres: the numbers exist from day one
 ```
 
+### Try it on your own chain log
+
+Needs Python 3 only (standard library). Your chain prints a few marker lines, see [`docs/log-format.md`](docs/log-format.md).
+
+```bash
+bin/gatetrain ingest my-chain.log --db gatetrain.db        # parse it into the ledger (append-only)
+bin/gatetrain report --db gatetrain.db --run my-chain      # totals, reds, slowest steps, busiest stretch
+bin/gatetrain trace my-chain.log > trace.json              # open trace.json in https://ui.perfetto.dev
+bin/gatetrain eta my-running.log --db gatetrain.db         # when will it end (needs earlier runs in the ledger)
+bin/gatetrain next-tick --log my-running.log --db gatetrain.db   # when to look next
+```
+
+From the sample logs in `tests/fixtures/` (generated from real runs by `tools/synthesize_fixture.py`: real timings and shape, generic names): a 466-step run with one red, then a run in progress:
+
+```text
+$ gatetrain report --db gatetrain.db --run run-one-red
+run run-one-red: red  commit 0a1b2c3d4  host builder-1
+steps 466  finished 466  red 1  cached 0  unknown start 0
+wall time 2h47m29s  busy time 16h55m15s  average parallelism 6.1
+reds: e2e-001(rc=1)
+10 slowest steps:
+     39m33s  test-api
+     32m47s  test-tools
+     28m14s  cargo-test
+...
+$ gatetrain eta tests/fixtures/run-partial-red.log --db gatetrain.db
+eta 2026-11-11T20:33:32.497407+07:00
+band p25-p75: 2026-11-11T20:04:02.756155+07:00 .. 2026-11-11T21:14:40.820733+07:00
+basis: 250 steps finished at 2.1/min, parallelism 5.3 (max seen 8), 215 steps remaining, last log line 2026-11-11T19:18:15+07:00
+dominant remaining steps: db-gate-264 (~9m31s), db-gate-318 (~6m02s), db-gate-404 (~5m46s), db-gate-425 (~5m43s), db-gate-273 (~5m37s)
+$ gatetrain next-tick --log tests/fixtures/run-partial-red.log --db gatetrain.db --now 2026-11-11T18:15:00+07:00
+5 min - a red appeared in the last 5 minutes: look again at the minimum
+```
+
+Run the tests with `python -m unittest discover -s tests -v`.
+
 Works alongside single-branch development skill sets (brainstorming, plans, test-driven development, code review, such as
 [Superpowers](https://github.com/obra/superpowers)): those make one lane good; gatetrain runs many lanes on many machines and proves the batch.
 
@@ -174,10 +210,13 @@ Fifteen so far, each with the rule and what enforces it ([`docs/lessons.md`](doc
 - [x] Agent skills: using-gatetrain, plan-lanes, review-lane, preflight-and-chain, tick, diagnose-run, tidy
 - [x] Claude Code plugin manifest and marketplace
 - [ ] `gatetrain tick` and `gatetrain watch` (generic, host-aware)
-- [ ] `gatetrain chain` (holder, step runner, stop) and the ledger writer
+- [ ] `gatetrain chain` (holder, step runner, stop)
+- [x] Ledger writer: `gatetrain ingest` (chain logs into runs and steps), `report`, `trace` (Perfetto timeline)
+- [x] `gatetrain eta` (prediction from the ledger) and `gatetrain next-tick` (adaptive cadence)
 - [ ] `gatetrain stack` with base detection, artefact repair and pre-flight on a free host
 - [ ] `gatetrain plan` (owned-file conflicts, parallel schedule, critical path)
-- [ ] Ledger views: critical path, flaky steps, cost per batch, agent scorecard
+- [x] Ledger views: critical path approximation (`report`), flaky steps (`flaky`)
+- [ ] Ledger views: cost per batch, agent scorecard
 - [ ] Cloud adapters for the `budget` and `speed` profiles
 
 ## Contributing

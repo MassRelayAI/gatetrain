@@ -1,0 +1,1869 @@
+branch batch-a at 0a1b2c3d4 on builder-1
+CHAIN_MODE full
+STEP_START step-001 2026-11-11T09:00:48+07:00
+=== step-001
+STEP_TIME step-001 0s
+STEP_EXIT step-001 0
+STEP_START step-002 2026-11-11T09:00:48+07:00
+=== step-002
+STEP_TIME step-002 4s
+STEP_EXIT step-002 0
+STEP_START build-packages 2026-11-11T09:00:52+07:00
+=== build-packages
+STEP_TIME build-packages 31s
+STEP_EXIT build-packages 0
+STEP_START step-003 2026-11-11T09:01:23+07:00
+=== step-003
+STEP_TIME step-003 0s
+STEP_EXIT step-003 0
+STEP_START step-004 2026-11-11T09:01:23+07:00
+=== step-004
+STEP_TIME step-004 22s
+STEP_EXIT step-004 0
+STEP_START step-005 2026-11-11T09:01:45+07:00
+=== step-005
+STEP_TIME step-005 21s
+STEP_EXIT step-005 0
+STEP_START step-006 2026-11-11T09:02:06+07:00
+=== step-006
+STEP_TIME step-006 2s
+STEP_EXIT step-006 0
+STEP_START step-007 2026-11-11T09:02:08+07:00
+=== step-007
+STEP_TIME step-007 0s
+STEP_EXIT step-007 0
+STEP_START step-008 2026-11-11T09:02:08+07:00
+=== step-008
+STEP_TIME step-008 0s
+STEP_EXIT step-008 0
+STEP_START step-009 2026-11-11T09:02:08+07:00
+=== step-009
+STEP_TIME step-009 22s
+STEP_EXIT step-009 0
+STEP_START step-010 2026-11-11T09:02:30+07:00
+=== step-010
+STEP_TIME step-010 0s
+STEP_EXIT step-010 0
+STEP_START step-011 2026-11-11T09:02:30+07:00
+=== step-011
+STEP_TIME step-011 1s
+STEP_EXIT step-011 0
+STEP_START step-012 2026-11-11T09:02:31+07:00
+=== step-012
+STEP_TIME step-012 2s
+STEP_EXIT step-012 0
+STEP_START step-013 2026-11-11T09:02:33+07:00
+=== step-013
+STEP_TIME step-013 1s
+STEP_EXIT step-013 0
+STEP_START step-014 2026-11-11T09:02:34+07:00
+=== step-014
+STEP_TIME step-014 0s
+STEP_EXIT step-014 0
+STEP_START step-015 2026-11-11T09:02:34+07:00
+=== step-015
+STEP_TIME step-015 253s
+STEP_EXIT step-015 0
+STEP_START step-016 2026-11-11T09:06:47+07:00
+=== step-016
+STEP_TIME step-016 59s
+STEP_EXIT step-016 0
+STEP_START step-017 2026-11-11T09:07:46+07:00
+=== step-017
+STEP_TIME step-017 24s
+STEP_EXIT step-017 0
+STEP_START typecheck 2026-11-11T09:08:10+07:00
+=== typecheck
+STEP_TIME typecheck 108s
+STEP_EXIT typecheck 0
+STEP_START lint-deps 2026-11-11T09:09:58+07:00
+=== lint-deps
+STEP_TIME lint-deps 1s
+STEP_EXIT lint-deps 0
+STEP_START test-web 2026-11-11T09:09:59+07:00
+=== test-web
+STEP_TIME test-web 13s
+STEP_EXIT test-web 0
+STEP_START lint-web 2026-11-11T09:10:12+07:00
+=== lint-web
+STEP_TIME lint-web 4s
+STEP_EXIT lint-web 0
+STEP_START step-018 2026-11-11T09:10:16+07:00
+=== step-018
+STEP_TIME step-018 21s
+STEP_EXIT step-018 0
+STEP_START test-docs 2026-11-11T09:10:37+07:00
+=== test-docs
+STEP_TIME test-docs 161s
+STEP_EXIT test-docs 0
+STEP_START check-tracker 2026-11-11T09:13:18+07:00
+=== check-tracker
+STEP_TIME check-tracker 1s
+STEP_EXIT check-tracker 0
+STEP_START step-019 2026-11-11T09:13:19+07:00
+=== step-019
+STEP_TIME step-019 2s
+STEP_EXIT step-019 0
+STEP_START step-020 2026-11-11T09:13:21+07:00
+=== step-020
+STEP_TIME step-020 2s
+STEP_EXIT step-020 0
+STEP_START step-021 2026-11-11T09:13:23+07:00
+=== step-021
+STEP_TIME step-021 1s
+STEP_EXIT step-021 0
+STEP_START cargo-test 2026-11-11T09:13:24+07:00
+=== cargo-test
+STEP_TIME cargo-test 1694s
+STEP_EXIT cargo-test 0
+STEP_START test-tools 2026-11-11T09:13:24+07:00
+=== test-tools
+STEP_TIME test-tools 1967s
+STEP_EXIT test-tools 0
+STEP_START test-api 2026-11-11T09:13:24+07:00
+=== test-api
+STEP_TIME test-api 2373s
+STEP_EXIT test-api 0
+STEP_START step-022 2026-11-11T09:52:58+07:00
+=== step-022
+STEP_TIME step-022 0s
+STEP_EXIT step-022 0
+STEP_START db-gate-003 2026-11-11T09:52:58+07:00
+=== db-gate-003
+STEP_TIME db-gate-003 137s
+STEP_EXIT db-gate-003 0
+STEP_START db-gate-002 2026-11-11T09:52:58+07:00
+=== db-gate-002
+STEP_TIME db-gate-002 139s
+STEP_EXIT db-gate-002 0
+STEP_START db-gate-001 2026-11-11T09:52:58+07:00
+=== db-gate-001
+STEP_TIME db-gate-001 163s
+STEP_EXIT db-gate-001 0
+STEP_START db-gate-006 2026-11-11T09:55:41+07:00
+=== db-gate-006
+STEP_TIME db-gate-006 44s
+STEP_EXIT db-gate-006 0
+STEP_START db-gate-004 2026-11-11T09:52:58+07:00
+=== db-gate-004
+STEP_TIME db-gate-004 216s
+STEP_EXIT db-gate-004 0
+STEP_START db-gate-007 2026-11-11T09:52:58+07:00
+=== db-gate-007
+STEP_TIME db-gate-007 218s
+STEP_EXIT db-gate-007 0
+STEP_START db-gate-008 2026-11-11T09:55:15+07:00
+=== db-gate-008
+STEP_TIME db-gate-008 85s
+STEP_EXIT db-gate-008 0
+STEP_START db-gate-005 2026-11-11T09:52:58+07:00
+=== db-gate-005
+STEP_TIME db-gate-005 223s
+STEP_EXIT db-gate-005 0
+STEP_START db-gate-010 2026-11-11T09:55:17+07:00
+=== db-gate-010
+STEP_TIME db-gate-010 125s
+STEP_EXIT db-gate-010 0
+STEP_START db-gate-011 2026-11-11T09:56:25+07:00
+=== db-gate-011
+STEP_TIME db-gate-011 64s
+STEP_EXIT db-gate-011 0
+STEP_START db-gate-013 2026-11-11T09:52:58+07:00
+=== db-gate-013
+STEP_TIME db-gate-013 279s
+STEP_EXIT db-gate-013 0
+STEP_START db-gate-014 2026-11-11T09:56:34+07:00
+=== db-gate-014
+STEP_TIME db-gate-014 110s
+STEP_EXIT db-gate-014 0
+STEP_START db-gate-009 2026-11-11T09:52:58+07:00
+=== db-gate-009
+STEP_TIME db-gate-009 563s
+STEP_EXIT db-gate-009 0
+STEP_START db-gate-012 2026-11-11T09:56:41+07:00
+=== db-gate-012
+STEP_TIME db-gate-012 358s
+STEP_EXIT db-gate-012 0
+STEP_START step-023 2026-11-11T09:56:36+07:00
+=== step-023
+STEP_TIME step-023 374s
+STEP_EXIT step-023 0
+STEP_START db-gate-015 2026-11-11T09:57:37+07:00
+=== db-gate-015
+STEP_TIME db-gate-015 348s
+STEP_EXIT db-gate-015 0
+STEP_START db-gate-016 2026-11-11T10:02:21+07:00
+=== db-gate-016
+STEP_TIME db-gate-016 77s
+STEP_EXIT db-gate-016 0
+STEP_START db-gate-018 2026-11-11T09:56:40+07:00
+=== db-gate-018
+STEP_TIME db-gate-018 432s
+STEP_EXIT db-gate-018 0
+STEP_START db-gate-017 2026-11-11T09:57:22+07:00
+=== db-gate-017
+STEP_TIME db-gate-017 392s
+STEP_EXIT db-gate-017 0
+STEP_START db-gate-020 2026-11-11T10:02:50+07:00
+=== db-gate-020
+STEP_TIME db-gate-020 75s
+STEP_EXIT db-gate-020 0
+STEP_START db-gate-019 2026-11-11T10:02:40+07:00
+=== db-gate-019
+STEP_TIME db-gate-019 98s
+STEP_EXIT db-gate-019 0
+STEP_START db-gate-022 2026-11-11T09:57:30+07:00
+=== db-gate-022
+STEP_TIME db-gate-022 426s
+STEP_EXIT db-gate-022 0
+STEP_START db-gate-021 2026-11-11T10:04:05+07:00
+=== db-gate-021
+STEP_TIME db-gate-021 35s
+STEP_EXIT db-gate-021 0
+STEP_START db-gate-023 2026-11-11T10:03:53+07:00
+=== db-gate-023
+STEP_TIME db-gate-023 122s
+STEP_EXIT db-gate-023 0
+STEP_START db-gate-024 2026-11-11T09:58:25+07:00
+=== db-gate-024
+STEP_TIME db-gate-024 480s
+STEP_EXIT db-gate-024 0
+STEP_START db-gate-025 2026-11-11T10:03:25+07:00
+=== db-gate-025
+STEP_TIME db-gate-025 191s
+STEP_EXIT db-gate-025 0
+STEP_START db-gate-027 2026-11-11T10:03:54+07:00
+=== db-gate-027
+STEP_TIME db-gate-027 173s
+STEP_EXIT db-gate-027 0
+STEP_START db-gate-026 2026-11-11T10:05:55+07:00
+=== db-gate-026
+STEP_TIME db-gate-026 55s
+STEP_EXIT db-gate-026 0
+STEP_START db-gate-028 2026-11-11T10:04:36+07:00
+=== db-gate-028
+STEP_TIME db-gate-028 168s
+STEP_EXIT db-gate-028 0
+STEP_START db-gate-031 2026-11-11T10:04:40+07:00
+=== db-gate-031
+STEP_TIME db-gate-031 229s
+STEP_EXIT db-gate-031 0
+STEP_START db-gate-029 2026-11-11T10:04:18+07:00
+=== db-gate-029
+STEP_TIME db-gate-029 271s
+STEP_EXIT db-gate-029 0
+STEP_START db-gate-030 2026-11-11T10:03:38+07:00
+=== db-gate-030
+STEP_TIME db-gate-030 320s
+STEP_EXIT db-gate-030 0
+STEP_START db-gate-032 2026-11-11T10:08:49+07:00
+=== db-gate-032
+STEP_TIME db-gate-032 51s
+STEP_EXIT db-gate-032 0
+STEP_START db-gate-034 2026-11-11T10:08:59+07:00
+=== db-gate-034
+STEP_TIME db-gate-034 63s
+STEP_EXIT db-gate-034 0
+STEP_START db-gate-033 2026-11-11T10:08:30+07:00
+=== db-gate-033
+STEP_TIME db-gate-033 114s
+STEP_EXIT db-gate-033 0
+STEP_START db-gate-035 2026-11-11T10:07:24+07:00
+=== db-gate-035
+STEP_TIME db-gate-035 214s
+STEP_EXIT db-gate-035 0
+STEP_START db-gate-036 2026-11-11T10:09:40+07:00
+=== db-gate-036
+STEP_TIME db-gate-036 86s
+STEP_EXIT db-gate-036 0
+STEP_START db-gate-037 2026-11-11T10:10:03+07:00
+=== db-gate-037
+STEP_TIME db-gate-037 78s
+STEP_EXIT db-gate-037 0
+STEP_START db-gate-039 2026-11-11T10:06:37+07:00
+=== db-gate-039
+STEP_TIME db-gate-039 289s
+STEP_EXIT db-gate-039 0
+STEP_START db-gate-038 2026-11-11T10:10:25+07:00
+=== db-gate-038
+STEP_TIME db-gate-038 75s
+STEP_EXIT db-gate-038 0
+STEP_START db-gate-041 2026-11-11T10:06:47+07:00
+=== db-gate-041
+STEP_TIME db-gate-041 304s
+STEP_EXIT db-gate-041 0
+STEP_START db-gate-040 2026-11-11T10:06:25+07:00
+=== db-gate-040
+STEP_TIME db-gate-040 344s
+STEP_EXIT db-gate-040 0
+STEP_START db-gate-043 2026-11-11T10:11:06+07:00
+=== db-gate-043
+STEP_TIME db-gate-043 77s
+STEP_EXIT db-gate-043 0
+STEP_START db-gate-042 2026-11-11T10:11:21+07:00
+=== db-gate-042
+STEP_TIME db-gate-042 70s
+STEP_EXIT db-gate-042 0
+STEP_START db-gate-044 2026-11-11T10:06:50+07:00
+=== db-gate-044
+STEP_TIME db-gate-044 390s
+STEP_EXIT db-gate-044 0
+STEP_START db-gate-048 2026-11-11T10:12:31+07:00
+=== db-gate-048
+STEP_TIME db-gate-048 87s
+STEP_EXIT db-gate-048 0
+STEP_START db-gate-046 2026-11-11T10:11:51+07:00
+=== db-gate-046
+STEP_TIME db-gate-046 128s
+STEP_EXIT db-gate-046 0
+STEP_START db-gate-045 2026-11-11T10:10:59+07:00
+=== db-gate-045
+STEP_TIME db-gate-045 188s
+STEP_EXIT db-gate-045 0
+STEP_START db-gate-047 2026-11-11T10:13:20+07:00
+=== db-gate-047
+STEP_TIME db-gate-047 59s
+STEP_EXIT db-gate-047 0
+STEP_START db-gate-050 2026-11-11T10:12:23+07:00
+=== db-gate-050
+STEP_TIME db-gate-050 125s
+STEP_EXIT db-gate-050 0
+STEP_START db-gate-049 2026-11-11T10:13:58+07:00
+=== db-gate-049
+STEP_TIME db-gate-049 53s
+STEP_EXIT db-gate-049 0
+STEP_START db-gate-052 2026-11-11T10:13:59+07:00
+=== db-gate-052
+STEP_TIME db-gate-052 65s
+STEP_EXIT db-gate-052 0
+STEP_START db-gate-051 2026-11-11T10:12:09+07:00
+=== db-gate-051
+STEP_TIME db-gate-051 177s
+STEP_EXIT db-gate-051 0
+STEP_START db-gate-053 2026-11-11T10:11:41+07:00
+=== db-gate-053
+STEP_TIME db-gate-053 221s
+STEP_EXIT db-gate-053 0
+STEP_START db-gate-055 2026-11-11T10:14:07+07:00
+=== db-gate-055
+STEP_TIME db-gate-055 137s
+STEP_EXIT db-gate-055 0
+STEP_START db-gate-054 2026-11-11T10:14:51+07:00
+=== db-gate-054
+STEP_TIME db-gate-054 116s
+STEP_EXIT db-gate-054 0
+STEP_START db-gate-056 2026-11-11T10:15:06+07:00
+=== db-gate-056
+STEP_TIME db-gate-056 104s
+STEP_EXIT db-gate-056 0
+STEP_START db-gate-057 2026-11-11T10:14:19+07:00
+=== db-gate-057
+STEP_TIME db-gate-057 164s
+STEP_EXIT db-gate-057 0
+STEP_START db-gate-058 2026-11-11T10:16:24+07:00
+=== db-gate-058
+STEP_TIME db-gate-058 71s
+STEP_EXIT db-gate-058 0
+STEP_START db-gate-059 2026-11-11T10:16:47+07:00
+=== db-gate-059
+STEP_TIME db-gate-059 56s
+STEP_EXIT db-gate-059 0
+STEP_START db-gate-060 2026-11-11T10:15:22+07:00
+=== db-gate-060
+STEP_TIME db-gate-060 166s
+STEP_EXIT db-gate-060 0
+STEP_START db-gate-061 2026-11-11T10:16:50+07:00
+=== db-gate-061
+STEP_TIME db-gate-061 94s
+STEP_EXIT db-gate-061 0
+STEP_START db-gate-063 2026-11-11T10:17:03+07:00
+=== db-gate-063
+STEP_TIME db-gate-063 94s
+STEP_EXIT db-gate-063 0
+STEP_START db-gate-064 2026-11-11T10:17:35+07:00
+=== db-gate-064
+STEP_TIME db-gate-064 64s
+STEP_EXIT db-gate-064 0
+STEP_START db-gate-062 2026-11-11T10:11:27+07:00
+=== db-gate-062
+STEP_TIME db-gate-062 442s
+STEP_EXIT db-gate-062 0
+STEP_START db-gate-065 2026-11-11T10:17:43+07:00
+=== db-gate-065
+STEP_TIME db-gate-065 96s
+STEP_EXIT db-gate-065 0
+STEP_START db-gate-070 2026-11-11T10:18:09+07:00
+=== db-gate-070
+STEP_TIME db-gate-070 93s
+STEP_EXIT db-gate-070 0
+STEP_START db-gate-067 2026-11-11T10:18:24+07:00
+=== db-gate-067
+STEP_TIME db-gate-067 81s
+STEP_EXIT db-gate-067 0
+STEP_START db-gate-066 2026-11-11T10:18:39+07:00
+=== db-gate-066
+STEP_TIME db-gate-066 74s
+STEP_EXIT db-gate-066 0
+STEP_START db-gate-071 2026-11-11T10:14:28+07:00
+=== db-gate-071
+STEP_TIME db-gate-071 333s
+STEP_EXIT db-gate-071 0
+STEP_START db-gate-069 2026-11-11T10:18:49+07:00
+=== db-gate-069
+STEP_TIME db-gate-069 77s
+STEP_EXIT db-gate-069 0
+STEP_START db-gate-072 2026-11-11T10:18:37+07:00
+=== db-gate-072
+STEP_TIME db-gate-072 99s
+STEP_EXIT db-gate-072 0
+STEP_START db-gate-074 2026-11-11T10:19:42+07:00
+=== db-gate-074
+STEP_TIME db-gate-074 83s
+STEP_EXIT db-gate-074 0
+STEP_START db-gate-068 2026-11-11T10:15:04+07:00
+=== db-gate-068
+STEP_TIME db-gate-068 379s
+STEP_EXIT db-gate-068 0
+STEP_START db-gate-073 2026-11-11T10:19:19+07:00
+=== db-gate-073
+STEP_TIME db-gate-073 130s
+STEP_EXIT db-gate-073 0
+STEP_START db-gate-075 2026-11-11T10:19:45+07:00
+=== db-gate-075
+STEP_TIME db-gate-075 108s
+STEP_EXIT db-gate-075 0
+STEP_START db-gate-077 2026-11-11T10:20:01+07:00
+=== db-gate-077
+STEP_TIME db-gate-077 103s
+STEP_EXIT db-gate-077 0
+STEP_START db-gate-076 2026-11-11T10:21:23+07:00
+=== db-gate-076
+STEP_TIME db-gate-076 25s
+STEP_EXIT db-gate-076 0
+STEP_START step-024 2026-11-11T10:21:29+07:00
+=== step-024
+STEP_TIME step-024 56s
+STEP_EXIT step-024 0
+STEP_START db-gate-082 2026-11-11T10:20:06+07:00
+=== db-gate-082
+STEP_TIME db-gate-082 141s
+STEP_EXIT db-gate-082 0
+STEP_START db-gate-079 2026-11-11T10:21:48+07:00
+=== db-gate-079
+STEP_TIME db-gate-079 44s
+STEP_EXIT db-gate-079 0
+STEP_START db-gate-080 2026-11-11T10:21:44+07:00
+=== db-gate-080
+STEP_TIME db-gate-080 49s
+STEP_EXIT db-gate-080 0
+STEP_START db-gate-078 2026-11-11T10:21:05+07:00
+=== db-gate-078
+STEP_TIME db-gate-078 89s
+STEP_EXIT db-gate-078 0
+STEP_START db-gate-081 2026-11-11T10:22:27+07:00
+=== db-gate-081
+STEP_TIME db-gate-081 28s
+STEP_EXIT db-gate-081 0
+STEP_START db-gate-083 2026-11-11T10:22:25+07:00
+=== db-gate-083
+STEP_TIME db-gate-083 52s
+STEP_EXIT db-gate-083 0
+STEP_START db-gate-086 2026-11-11T10:20:16+07:00
+=== db-gate-086
+STEP_TIME db-gate-086 191s
+STEP_EXIT db-gate-086 0
+STEP_START db-gate-084 2026-11-11T10:21:34+07:00
+=== db-gate-084
+STEP_TIME db-gate-084 116s
+STEP_EXIT db-gate-084 0
+STEP_START db-gate-085 2026-11-11T10:22:35+07:00
+=== db-gate-085
+STEP_TIME db-gate-085 73s
+STEP_EXIT db-gate-085 0
+STEP_START db-gate-087 2026-11-11T10:19:53+07:00
+=== db-gate-087
+STEP_TIME db-gate-087 236s
+STEP_EXIT db-gate-087 0
+STEP_START db-gate-088 2026-11-11T10:22:33+07:00
+=== db-gate-088
+STEP_TIME db-gate-088 96s
+STEP_EXIT db-gate-088 0
+STEP_START db-gate-091 2026-11-11T10:23:50+07:00
+=== db-gate-091
+STEP_TIME db-gate-091 30s
+STEP_EXIT db-gate-091 0
+STEP_START db-gate-093 2026-11-11T10:23:30+07:00
+=== db-gate-093
+STEP_TIME db-gate-093 55s
+STEP_EXIT db-gate-093 0
+STEP_START db-gate-089 2026-11-11T10:23:27+07:00
+=== db-gate-089
+STEP_TIME db-gate-089 65s
+STEP_EXIT db-gate-089 0
+STEP_START db-gate-095 2026-11-11T10:23:48+07:00
+=== db-gate-095
+STEP_TIME db-gate-095 56s
+STEP_EXIT db-gate-095 0
+STEP_START db-gate-092 2026-11-11T10:22:32+07:00
+=== db-gate-092
+STEP_TIME db-gate-092 132s
+STEP_EXIT db-gate-092 0
+STEP_START db-gate-094 2026-11-11T10:24:09+07:00
+=== db-gate-094
+STEP_TIME db-gate-094 38s
+STEP_EXIT db-gate-094 0
+STEP_START db-gate-090 2026-11-11T10:22:55+07:00
+=== db-gate-090
+STEP_TIME db-gate-090 113s
+STEP_EXIT db-gate-090 0
+STEP_START db-gate-096 2026-11-11T10:24:47+07:00
+=== db-gate-096
+STEP_TIME db-gate-096 51s
+STEP_EXIT db-gate-096 0
+STEP_START db-gate-097 2026-11-11T10:23:17+07:00
+=== db-gate-097
+STEP_TIME db-gate-097 151s
+STEP_EXIT db-gate-097 0
+STEP_START db-gate-099 2026-11-11T10:24:20+07:00
+=== db-gate-099
+STEP_TIME db-gate-099 92s
+STEP_EXIT db-gate-099 0
+STEP_START db-gate-098 2026-11-11T10:24:44+07:00
+=== db-gate-098
+STEP_TIME db-gate-098 75s
+STEP_EXIT db-gate-098 0
+STEP_START db-gate-100 2026-11-11T10:24:44+07:00
+=== db-gate-100
+STEP_TIME db-gate-100 88s
+STEP_EXIT db-gate-100 0
+STEP_START db-gate-102 2026-11-11T10:24:25+07:00
+=== db-gate-102
+STEP_TIME db-gate-102 108s
+STEP_EXIT db-gate-102 0
+STEP_START db-gate-101 2026-11-11T10:24:49+07:00
+=== db-gate-101
+STEP_TIME db-gate-101 91s
+STEP_EXIT db-gate-101 0
+STEP_START db-gate-103 2026-11-11T10:25:39+07:00
+=== db-gate-103
+STEP_TIME db-gate-103 109s
+STEP_EXIT db-gate-103 0
+STEP_START db-gate-104 2026-11-11T10:25:53+07:00
+=== db-gate-104
+STEP_TIME db-gate-104 121s
+STEP_EXIT db-gate-104 0
+STEP_START db-gate-106 2026-11-11T10:26:12+07:00
+=== db-gate-106
+STEP_TIME db-gate-106 121s
+STEP_EXIT db-gate-106 0
+STEP_START db-gate-107 2026-11-11T10:26:20+07:00
+=== db-gate-107
+STEP_TIME db-gate-107 120s
+STEP_EXIT db-gate-107 0
+STEP_START db-gate-108 2026-11-11T10:24:33+07:00
+=== db-gate-108
+STEP_TIME db-gate-108 253s
+STEP_EXIT db-gate-108 0
+STEP_START db-gate-105 2026-11-11T10:26:13+07:00
+=== db-gate-105
+STEP_TIME db-gate-105 154s
+STEP_EXIT db-gate-105 0
+STEP_START db-gate-109 2026-11-11T10:27:29+07:00
+=== db-gate-109
+STEP_TIME db-gate-109 150s
+STEP_EXIT db-gate-109 0
+STEP_START db-gate-110 2026-11-11T10:25:59+07:00
+=== db-gate-110
+STEP_TIME db-gate-110 247s
+STEP_EXIT db-gate-110 0
+STEP_START db-gate-113 2026-11-11T10:27:55+07:00
+=== db-gate-113
+STEP_TIME db-gate-113 150s
+STEP_EXIT db-gate-113 0
+STEP_START db-gate-111 2026-11-11T10:25:48+07:00
+=== db-gate-111
+STEP_TIME db-gate-111 289s
+STEP_EXIT db-gate-111 0
+STEP_START db-gate-112 2026-11-11T10:28:13+07:00
+=== db-gate-112
+STEP_TIME db-gate-112 144s
+STEP_EXIT db-gate-112 0
+STEP_START db-gate-114 2026-11-11T10:28:20+07:00
+=== db-gate-114
+STEP_TIME db-gate-114 177s
+STEP_EXIT db-gate-114 0
+STEP_START db-gate-115 2026-11-11T10:30:37+07:00
+=== db-gate-115
+STEP_TIME db-gate-115 67s
+STEP_EXIT db-gate-115 0
+STEP_START db-gate-116 2026-11-11T10:30:25+07:00
+=== db-gate-116
+STEP_TIME db-gate-116 108s
+STEP_EXIT db-gate-116 0
+STEP_START db-gate-118 2026-11-11T10:28:47+07:00
+=== db-gate-118
+STEP_TIME db-gate-118 219s
+STEP_EXIT db-gate-118 0
+STEP_START db-gate-117 2026-11-11T10:29:59+07:00
+=== db-gate-117
+STEP_TIME db-gate-117 166s
+STEP_EXIT db-gate-117 0
+STEP_START db-gate-121 2026-11-11T10:30:37+07:00
+=== db-gate-121
+STEP_TIME db-gate-121 134s
+STEP_EXIT db-gate-121 0
+STEP_START db-gate-120 2026-11-11T10:32:26+07:00
+=== db-gate-120
+STEP_TIME db-gate-120 36s
+STEP_EXIT db-gate-120 0
+STEP_START db-gate-119 2026-11-11T10:28:46+07:00
+=== db-gate-119
+STEP_TIME db-gate-119 256s
+STEP_EXIT db-gate-119 0
+STEP_START db-gate-122 2026-11-11T10:30:06+07:00
+=== db-gate-122
+STEP_TIME db-gate-122 277s
+STEP_EXIT db-gate-122 0
+STEP_START db-gate-123 2026-11-11T10:32:13+07:00
+=== db-gate-123
+STEP_TIME db-gate-123 156s
+STEP_EXIT db-gate-123 0
+STEP_START db-gate-124 2026-11-11T10:32:46+07:00
+=== db-gate-124
+STEP_TIME db-gate-124 138s
+STEP_EXIT db-gate-124 0
+STEP_START db-gate-126 2026-11-11T10:33:02+07:00
+=== db-gate-126
+STEP_TIME db-gate-126 124s
+STEP_EXIT db-gate-126 0
+STEP_START db-gate-125 2026-11-11T10:31:44+07:00
+=== db-gate-125
+STEP_TIME db-gate-125 248s
+STEP_EXIT db-gate-125 0
+STEP_START db-gate-128 2026-11-11T10:33:02+07:00
+=== db-gate-128
+STEP_TIME db-gate-128 180s
+STEP_EXIT db-gate-128 0
+STEP_START db-gate-127 2026-11-11T10:35:06+07:00
+=== db-gate-127
+STEP_TIME db-gate-127 64s
+STEP_EXIT db-gate-127 0
+STEP_START db-gate-129 2026-11-11T10:35:04+07:00
+=== db-gate-129
+STEP_TIME db-gate-129 92s
+STEP_EXIT db-gate-129 0
+STEP_START db-gate-133 2026-11-11T10:32:51+07:00
+=== db-gate-133
+STEP_TIME db-gate-133 231s
+STEP_EXIT db-gate-133 0
+STEP_START db-gate-130 2026-11-11T10:34:43+07:00
+=== db-gate-130
+STEP_TIME db-gate-130 130s
+STEP_EXIT db-gate-130 0
+STEP_START db-gate-131 2026-11-11T10:34:49+07:00
+=== db-gate-131
+STEP_TIME db-gate-131 134s
+STEP_EXIT db-gate-131 0
+STEP_START db-gate-132 2026-11-11T10:36:10+07:00
+=== db-gate-132
+STEP_TIME db-gate-132 58s
+STEP_EXIT db-gate-132 0
+STEP_START db-gate-135 2026-11-11T10:31:17+07:00
+=== db-gate-135
+STEP_TIME db-gate-135 382s
+STEP_EXIT db-gate-135 0
+STEP_START db-gate-139 2026-11-11T10:36:02+07:00
+=== db-gate-139
+STEP_TIME db-gate-139 111s
+STEP_EXIT db-gate-139 0
+STEP_START db-gate-136 2026-11-11T10:36:53+07:00
+=== db-gate-136
+STEP_TIME db-gate-136 73s
+STEP_EXIT db-gate-136 0
+STEP_START db-gate-134 2026-11-11T10:35:53+07:00
+=== db-gate-134
+STEP_TIME db-gate-134 137s
+STEP_EXIT db-gate-134 0
+STEP_START db-gate-137 2026-11-11T10:36:36+07:00
+=== db-gate-137
+STEP_TIME db-gate-137 103s
+STEP_EXIT db-gate-137 0
+STEP_START db-gate-141 2026-11-11T10:37:39+07:00
+=== db-gate-141
+STEP_TIME db-gate-141 51s
+STEP_EXIT db-gate-141 0
+STEP_START db-gate-138 2026-11-11T10:38:10+07:00
+=== db-gate-138
+STEP_TIME db-gate-138 30s
+STEP_EXIT db-gate-138 0
+STEP_START db-gate-140 2026-11-11T10:37:53+07:00
+=== db-gate-140
+STEP_TIME db-gate-140 50s
+STEP_EXIT db-gate-140 0
+STEP_START db-gate-143 2026-11-11T10:38:19+07:00
+=== db-gate-143
+STEP_TIME db-gate-143 31s
+STEP_EXIT db-gate-143 0
+STEP_START db-gate-144 2026-11-11T10:38:30+07:00
+=== db-gate-144
+STEP_TIME db-gate-144 23s
+STEP_EXIT db-gate-144 0
+STEP_START db-gate-142 2026-11-11T10:38:06+07:00
+=== db-gate-142
+STEP_TIME db-gate-142 52s
+STEP_EXIT db-gate-142 0
+STEP_START db-gate-145 2026-11-11T10:37:08+07:00
+=== db-gate-145
+STEP_TIME db-gate-145 118s
+STEP_EXIT db-gate-145 0
+STEP_START db-gate-146 2026-11-11T10:38:58+07:00
+=== db-gate-146
+STEP_TIME db-gate-146 43s
+STEP_EXIT db-gate-146 0
+STEP_START db-gate-151 2026-11-11T10:38:54+07:00
+=== db-gate-151
+STEP_TIME db-gate-151 52s
+STEP_EXIT db-gate-151 0
+STEP_START db-gate-147 2026-11-11T10:38:50+07:00
+=== db-gate-147
+STEP_TIME db-gate-147 58s
+STEP_EXIT db-gate-147 0
+STEP_START db-gate-150 2026-11-11T10:39:06+07:00
+=== db-gate-150
+STEP_TIME db-gate-150 59s
+STEP_EXIT db-gate-150 0
+STEP_START db-gate-149 2026-11-11T10:38:43+07:00
+=== db-gate-149
+STEP_TIME db-gate-149 89s
+STEP_EXIT db-gate-149 0
+STEP_START db-gate-148 2026-11-11T10:38:40+07:00
+=== db-gate-148
+STEP_TIME db-gate-148 94s
+STEP_EXIT db-gate-148 0
+STEP_START db-gate-152 2026-11-11T10:39:41+07:00
+=== db-gate-152
+STEP_TIME db-gate-152 36s
+STEP_EXIT db-gate-152 0
+STEP_START db-gate-153 2026-11-11T10:39:46+07:00
+=== db-gate-153
+STEP_TIME db-gate-153 36s
+STEP_EXIT db-gate-153 0
+STEP_START db-gate-155 2026-11-11T10:39:49+07:00
+=== db-gate-155
+STEP_TIME db-gate-155 47s
+STEP_EXIT db-gate-155 0
+STEP_START db-gate-154 2026-11-11T10:37:03+07:00
+=== db-gate-154
+STEP_TIME db-gate-154 219s
+STEP_EXIT db-gate-154 0
+STEP_START db-gate-156 2026-11-11T10:40:05+07:00
+=== db-gate-156
+STEP_TIME db-gate-156 59s
+STEP_EXIT db-gate-156 0
+STEP_START db-gate-157 2026-11-11T10:40:12+07:00
+=== db-gate-157
+STEP_TIME db-gate-157 63s
+STEP_EXIT db-gate-157 0
+STEP_START db-gate-158 2026-11-11T10:40:14+07:00
+=== db-gate-158
+STEP_TIME db-gate-158 64s
+STEP_EXIT db-gate-158 0
+STEP_START db-gate-159 2026-11-11T10:40:23+07:00
+=== db-gate-159
+STEP_TIME db-gate-159 60s
+STEP_EXIT db-gate-159 0
+STEP_START db-gate-160 2026-11-11T10:40:36+07:00
+=== db-gate-160
+STEP_TIME db-gate-160 59s
+STEP_EXIT db-gate-160 0
+STEP_START db-gate-161 2026-11-11T10:40:17+07:00
+=== db-gate-161
+STEP_TIME db-gate-161 105s
+STEP_EXIT db-gate-161 0
+STEP_START db-gate-162 2026-11-11T10:41:05+07:00
+=== db-gate-162
+STEP_TIME db-gate-162 59s
+STEP_EXIT db-gate-162 0
+STEP_START db-gate-163 2026-11-11T10:40:42+07:00
+=== db-gate-163
+STEP_TIME db-gate-163 107s
+STEP_EXIT db-gate-163 0
+STEP_START db-gate-164 2026-11-11T10:41:15+07:00
+=== db-gate-164
+STEP_TIME db-gate-164 74s
+STEP_EXIT db-gate-164 0
+STEP_START db-gate-165 2026-11-11T10:41:18+07:00
+=== db-gate-165
+STEP_TIME db-gate-165 71s
+STEP_EXIT db-gate-165 0
+STEP_START db-gate-166 2026-11-11T10:41:23+07:00
+=== db-gate-166
+STEP_TIME db-gate-166 71s
+STEP_EXIT db-gate-166 0
+STEP_START db-gate-167 2026-11-11T10:41:35+07:00
+=== db-gate-167
+STEP_TIME db-gate-167 66s
+STEP_EXIT db-gate-167 0
+STEP_START db-gate-168 2026-11-11T10:36:42+07:00
+=== db-gate-168
+STEP_TIME db-gate-168 370s
+STEP_EXIT db-gate-168 0
+STEP_START db-gate-171 2026-11-11T10:42:02+07:00
+=== db-gate-171
+STEP_TIME db-gate-171 73s
+STEP_EXIT db-gate-171 0
+STEP_START db-gate-169 2026-11-11T10:42:29+07:00
+=== db-gate-169
+STEP_TIME db-gate-169 55s
+STEP_EXIT db-gate-169 0
+STEP_START db-gate-170 2026-11-11T10:42:30+07:00
+=== db-gate-170
+STEP_TIME db-gate-170 66s
+STEP_EXIT db-gate-170 0
+STEP_START db-gate-173 2026-11-11T10:42:41+07:00
+=== db-gate-173
+STEP_TIME db-gate-173 84s
+STEP_EXIT db-gate-173 0
+STEP_START db-gate-175 2026-11-11T10:42:34+07:00
+=== db-gate-175
+STEP_TIME db-gate-175 93s
+STEP_EXIT db-gate-175 0
+STEP_START db-gate-172 2026-11-11T10:42:29+07:00
+=== db-gate-172
+STEP_TIME db-gate-172 100s
+STEP_EXIT db-gate-172 0
+STEP_START db-gate-174 2026-11-11T10:43:36+07:00
+=== db-gate-174
+STEP_TIME db-gate-174 46s
+STEP_EXIT db-gate-174 0
+STEP_START db-gate-176 2026-11-11T10:42:52+07:00
+=== db-gate-176
+STEP_TIME db-gate-176 126s
+STEP_EXIT db-gate-176 0
+STEP_START db-gate-178 2026-11-11T10:43:24+07:00
+=== db-gate-178
+STEP_TIME db-gate-178 114s
+STEP_EXIT db-gate-178 0
+STEP_START db-gate-177 2026-11-11T10:43:16+07:00
+=== db-gate-177
+STEP_TIME db-gate-177 126s
+STEP_EXIT db-gate-177 0
+STEP_START db-gate-180 2026-11-11T10:44:58+07:00
+=== db-gate-180
+STEP_TIME db-gate-180 64s
+STEP_EXIT db-gate-180 0
+STEP_START db-gate-179 2026-11-11T10:45:18+07:00
+=== db-gate-179
+STEP_TIME db-gate-179 49s
+STEP_EXIT db-gate-179 0
+STEP_START db-gate-182 2026-11-11T10:44:07+07:00
+=== db-gate-182
+STEP_TIME db-gate-182 159s
+STEP_EXIT db-gate-182 0
+STEP_START db-gate-181 2026-11-11T10:44:05+07:00
+=== db-gate-181
+STEP_TIME db-gate-181 164s
+STEP_EXIT db-gate-181 0
+STEP_START db-gate-183 2026-11-11T10:42:04+07:00
+=== db-gate-183
+STEP_TIME db-gate-183 321s
+STEP_EXIT db-gate-183 0
+STEP_START db-gate-184 2026-11-11T10:46:02+07:00
+=== db-gate-184
+STEP_TIME db-gate-184 83s
+STEP_EXIT db-gate-184 0
+STEP_START db-gate-185 2026-11-11T10:45:23+07:00
+=== db-gate-185
+STEP_TIME db-gate-185 135s
+STEP_EXIT db-gate-185 0
+STEP_START db-gate-186 2026-11-11T10:46:07+07:00
+=== db-gate-186
+STEP_TIME db-gate-186 109s
+STEP_EXIT db-gate-186 0
+STEP_START db-gate-187 2026-11-11T10:44:09+07:00
+=== db-gate-187
+STEP_TIME db-gate-187 260s
+STEP_EXIT db-gate-187 0
+STEP_START db-gate-188 2026-11-11T10:46:49+07:00
+=== db-gate-188
+STEP_TIME db-gate-188 118s
+STEP_EXIT db-gate-188 0
+STEP_START db-gate-190 2026-11-11T10:46:46+07:00
+=== db-gate-190
+STEP_TIME db-gate-190 141s
+STEP_EXIT db-gate-190 0
+STEP_START db-gate-189 2026-11-11T10:47:25+07:00
+=== db-gate-189
+STEP_TIME db-gate-189 109s
+STEP_EXIT db-gate-189 0
+STEP_START db-gate-191 2026-11-11T10:47:38+07:00
+=== db-gate-191
+STEP_TIME db-gate-191 105s
+STEP_EXIT db-gate-191 0
+STEP_START db-gate-192 2026-11-11T10:48:47+07:00
+=== db-gate-192
+STEP_TIME db-gate-192 58s
+STEP_EXIT db-gate-192 0
+STEP_START db-gate-193 2026-11-11T10:49:07+07:00
+=== db-gate-193
+STEP_TIME db-gate-193 65s
+STEP_EXIT db-gate-193 0
+STEP_START db-gate-194 2026-11-11T10:49:14+07:00
+=== db-gate-194
+STEP_TIME db-gate-194 75s
+STEP_EXIT db-gate-194 0
+STEP_START db-gate-200 2026-11-11T10:47:56+07:00
+=== db-gate-200
+STEP_TIME db-gate-200 172s
+STEP_EXIT db-gate-200 0
+STEP_START db-gate-195 2026-11-11T10:49:45+07:00
+=== db-gate-195
+STEP_TIME db-gate-195 67s
+STEP_EXIT db-gate-195 0
+STEP_START db-gate-196 2026-11-11T10:48:29+07:00
+=== db-gate-196
+STEP_TIME db-gate-196 147s
+STEP_EXIT db-gate-196 0
+STEP_START db-gate-198 2026-11-11T10:44:22+07:00
+=== db-gate-198
+STEP_TIME db-gate-198 399s
+STEP_EXIT db-gate-198 0
+STEP_START db-gate-197 2026-11-11T10:49:23+07:00
+=== db-gate-197
+STEP_TIME db-gate-197 103s
+STEP_EXIT db-gate-197 0
+STEP_START db-gate-199 2026-11-11T10:50:12+07:00
+=== db-gate-199
+STEP_TIME db-gate-199 63s
+STEP_EXIT db-gate-199 0
+STEP_START db-gate-201 2026-11-11T10:50:48+07:00
+=== db-gate-201
+STEP_TIME db-gate-201 66s
+STEP_EXIT db-gate-201 0
+STEP_START db-gate-202 2026-11-11T10:47:25+07:00
+=== db-gate-202
+STEP_TIME db-gate-202 273s
+STEP_EXIT db-gate-202 0
+STEP_START db-gate-203 2026-11-11T10:50:29+07:00
+=== db-gate-203
+STEP_TIME db-gate-203 107s
+STEP_EXIT db-gate-203 0
+STEP_START db-gate-205 2026-11-11T10:51:58+07:00
+=== db-gate-205
+STEP_TIME db-gate-205 46s
+STEP_EXIT db-gate-205 0
+STEP_START db-gate-206 2026-11-11T10:51:01+07:00
+=== db-gate-206
+STEP_TIME db-gate-206 109s
+STEP_EXIT db-gate-206 0
+STEP_START db-gate-204 2026-11-11T10:52:16+07:00
+=== db-gate-204
+STEP_TIME db-gate-204 37s
+STEP_EXIT db-gate-204 0
+STEP_START db-gate-207 2026-11-11T10:50:53+07:00
+=== db-gate-207
+STEP_TIME db-gate-207 133s
+STEP_EXIT db-gate-207 0
+STEP_START db-gate-208 2026-11-11T10:51:06+07:00
+=== db-gate-208
+STEP_TIME db-gate-208 156s
+STEP_EXIT db-gate-208 0
+STEP_START db-gate-209 2026-11-11T10:50:56+07:00
+=== db-gate-209
+STEP_TIME db-gate-209 193s
+STEP_EXIT db-gate-209 0
+STEP_START db-gate-213 2026-11-11T10:51:15+07:00
+=== db-gate-213
+STEP_TIME db-gate-213 188s
+STEP_EXIT db-gate-213 0
+STEP_START db-gate-211 2026-11-11T10:52:44+07:00
+=== db-gate-211
+STEP_TIME db-gate-211 106s
+STEP_EXIT db-gate-211 0
+STEP_START db-gate-210 2026-11-11T10:53:06+07:00
+=== db-gate-210
+STEP_TIME db-gate-210 85s
+STEP_EXIT db-gate-210 0
+STEP_START db-gate-212 2026-11-11T10:51:54+07:00
+=== db-gate-212
+STEP_TIME db-gate-212 169s
+STEP_EXIT db-gate-212 0
+STEP_START db-gate-214 2026-11-11T10:52:53+07:00
+=== db-gate-214
+STEP_TIME db-gate-214 116s
+STEP_EXIT db-gate-214 0
+STEP_START db-gate-215 2026-11-11T10:54:31+07:00
+=== db-gate-215
+STEP_TIME db-gate-215 40s
+STEP_EXIT db-gate-215 0
+STEP_START db-gate-216 2026-11-11T10:54:43+07:00
+=== db-gate-216
+STEP_TIME db-gate-216 61s
+STEP_EXIT db-gate-216 0
+STEP_START db-gate-217 2026-11-11T10:54:23+07:00
+=== db-gate-217
+STEP_TIME db-gate-217 102s
+STEP_EXIT db-gate-217 0
+STEP_START db-gate-218 2026-11-11T10:52:50+07:00
+=== db-gate-218
+STEP_TIME db-gate-218 201s
+STEP_EXIT db-gate-218 0
+STEP_START db-gate-220 2026-11-11T10:53:42+07:00
+=== db-gate-220
+STEP_TIME db-gate-220 159s
+STEP_EXIT db-gate-220 0
+STEP_START db-gate-219 2026-11-11T10:54:30+07:00
+=== db-gate-219
+STEP_TIME db-gate-219 112s
+STEP_EXIT db-gate-219 0
+STEP_START db-gate-221 2026-11-11T10:54:09+07:00
+=== db-gate-221
+STEP_TIME db-gate-221 153s
+STEP_EXIT db-gate-221 0
+STEP_START db-gate-222 2026-11-11T10:54:49+07:00
+=== db-gate-222
+STEP_TIME db-gate-222 119s
+STEP_EXIT db-gate-222 0
+STEP_START db-gate-223 2026-11-11T10:55:12+07:00
+=== db-gate-223
+STEP_TIME db-gate-223 106s
+STEP_EXIT db-gate-223 0
+STEP_START db-gate-224 2026-11-11T10:55:44+07:00
+=== db-gate-224
+STEP_TIME db-gate-224 121s
+STEP_EXIT db-gate-224 0
+STEP_START db-gate-225 2026-11-11T10:56:12+07:00
+=== db-gate-225
+STEP_TIME db-gate-225 107s
+STEP_EXIT db-gate-225 0
+STEP_START db-gate-226 2026-11-11T10:57:45+07:00
+=== db-gate-226
+STEP_TIME db-gate-226 45s
+STEP_EXIT db-gate-226 0
+STEP_START db-gate-227 2026-11-11T10:56:21+07:00
+=== db-gate-227
+STEP_TIME db-gate-227 135s
+STEP_EXIT db-gate-227 0
+STEP_START db-gate-229 2026-11-11T10:56:05+07:00
+=== db-gate-229
+STEP_TIME db-gate-229 165s
+STEP_EXIT db-gate-229 0
+STEP_START db-gate-230 2026-11-11T10:56:58+07:00
+=== db-gate-230
+STEP_TIME db-gate-230 112s
+STEP_EXIT db-gate-230 0
+STEP_START db-gate-231 2026-11-11T10:56:22+07:00
+=== db-gate-231
+STEP_TIME db-gate-231 150s
+STEP_EXIT db-gate-231 0
+STEP_START db-gate-228 2026-11-11T10:56:49+07:00
+=== db-gate-228
+STEP_TIME db-gate-228 139s
+STEP_EXIT db-gate-228 0
+STEP_START db-gate-232 2026-11-11T10:57:59+07:00
+=== db-gate-232
+STEP_TIME db-gate-232 78s
+STEP_EXIT db-gate-232 0
+STEP_START db-gate-233 2026-11-11T10:58:30+07:00
+=== db-gate-233
+STEP_TIME db-gate-233 55s
+STEP_EXIT db-gate-233 0
+STEP_START db-gate-234 2026-11-11T10:56:42+07:00
+=== db-gate-234
+STEP_TIME db-gate-234 197s
+STEP_EXIT db-gate-234 0
+STEP_START db-gate-235 2026-11-11T10:58:52+07:00
+=== db-gate-235
+STEP_TIME db-gate-235 76s
+STEP_EXIT db-gate-235 0
+STEP_START db-gate-236 2026-11-11T10:58:50+07:00
+=== db-gate-236
+STEP_TIME db-gate-236 108s
+STEP_EXIT db-gate-236 0
+STEP_START db-gate-237 2026-11-11T10:59:08+07:00
+=== db-gate-237
+STEP_TIME db-gate-237 119s
+STEP_EXIT db-gate-237 0
+STEP_START db-gate-238 2026-11-11T10:58:36+07:00
+=== db-gate-238
+STEP_TIME db-gate-238 157s
+STEP_EXIT db-gate-238 0
+STEP_START db-gate-239 2026-11-11T10:59:59+07:00
+=== db-gate-239
+STEP_TIME db-gate-239 81s
+STEP_EXIT db-gate-239 0
+STEP_START db-gate-242 2026-11-11T10:59:17+07:00
+=== db-gate-242
+STEP_TIME db-gate-242 188s
+STEP_EXIT db-gate-242 0
+STEP_START db-gate-241 2026-11-11T10:59:25+07:00
+=== db-gate-241
+STEP_TIME db-gate-241 188s
+STEP_EXIT db-gate-241 0
+STEP_START step-025 2026-11-11T11:02:33+07:00
+=== step-025
+STEP_TIME step-025 4s
+STEP_EXIT step-025 0
+STEP_START db-gate-240 2026-11-11T10:58:50+07:00
+=== db-gate-240
+STEP_TIME db-gate-240 262s
+STEP_EXIT db-gate-240 0
+STEP_START db-gate-243 2026-11-11T11:01:07+07:00
+=== db-gate-243
+STEP_TIME db-gate-243 153s
+STEP_EXIT db-gate-243 0
+STEP_START db-gate-244 2026-11-11T11:00:09+07:00
+=== db-gate-244
+STEP_TIME db-gate-244 213s
+STEP_EXIT db-gate-244 0
+STEP_START db-gate-248 2026-11-11T11:02:25+07:00
+=== db-gate-248
+STEP_TIME db-gate-248 142s
+STEP_EXIT db-gate-248 0
+STEP_START db-gate-245 2026-11-11T11:03:12+07:00
+=== db-gate-245
+STEP_TIME db-gate-245 119s
+STEP_EXIT db-gate-245 0
+STEP_START db-gate-246 2026-11-11T11:01:13+07:00
+=== db-gate-246
+STEP_TIME db-gate-246 238s
+STEP_EXIT db-gate-246 0
+STEP_START db-gate-247 2026-11-11T11:03:42+07:00
+=== db-gate-247
+STEP_TIME db-gate-247 92s
+STEP_EXIT db-gate-247 0
+STEP_START db-gate-249 2026-11-11T11:05:11+07:00
+=== db-gate-249
+STEP_TIME db-gate-249 43s
+STEP_EXIT db-gate-249 0
+STEP_START db-gate-251 2026-11-11T11:04:48+07:00
+=== db-gate-251
+STEP_TIME db-gate-251 77s
+STEP_EXIT db-gate-251 0
+STEP_START db-gate-250 2026-11-11T11:03:40+07:00
+=== db-gate-250
+STEP_TIME db-gate-250 164s
+STEP_EXIT db-gate-250 0
+STEP_START db-gate-252 2026-11-11T11:05:11+07:00
+=== db-gate-252
+STEP_TIME db-gate-252 108s
+STEP_EXIT db-gate-252 0
+STEP_START db-gate-253 2026-11-11T11:05:55+07:00
+=== db-gate-253
+STEP_TIME db-gate-253 72s
+STEP_EXIT db-gate-253 0
+STEP_START db-gate-254 2026-11-11T11:05:14+07:00
+=== db-gate-254
+STEP_TIME db-gate-254 128s
+STEP_EXIT db-gate-254 0
+STEP_START db-gate-255 2026-11-11T11:06:05+07:00
+=== db-gate-255
+STEP_TIME db-gate-255 93s
+STEP_EXIT db-gate-255 0
+STEP_START db-gate-256 2026-11-11T11:02:38+07:00
+=== db-gate-256
+STEP_TIME db-gate-256 314s
+STEP_EXIT db-gate-256 0
+STEP_START db-gate-257 2026-11-11T11:07:00+07:00
+=== db-gate-257
+STEP_TIME db-gate-257 68s
+STEP_EXIT db-gate-257 0
+STEP_START db-gate-258 2026-11-11T11:06:24+07:00
+=== db-gate-258
+STEP_TIME db-gate-258 124s
+STEP_EXIT db-gate-258 0
+STEP_START db-gate-259 2026-11-11T11:07:07+07:00
+=== db-gate-259
+STEP_TIME db-gate-259 112s
+STEP_EXIT db-gate-259 0
+STEP_START db-gate-260 2026-11-11T11:07:22+07:00
+=== db-gate-260
+STEP_TIME db-gate-260 115s
+STEP_EXIT db-gate-260 0
+STEP_START db-gate-261 2026-11-11T11:07:53+07:00
+=== db-gate-261
+STEP_TIME db-gate-261 110s
+STEP_EXIT db-gate-261 0
+STEP_START db-gate-262 2026-11-11T11:08:29+07:00
+=== db-gate-262
+STEP_TIME db-gate-262 86s
+STEP_EXIT db-gate-262 0
+STEP_START db-gate-263 2026-11-11T11:09:17+07:00
+=== db-gate-263
+STEP_TIME db-gate-263 56s
+STEP_EXIT db-gate-263 0
+STEP_START db-gate-265 2026-11-11T11:08:59+07:00
+=== db-gate-265
+STEP_TIME db-gate-265 99s
+STEP_EXIT db-gate-265 0
+STEP_START db-gate-264 2026-11-11T11:01:20+07:00
+=== db-gate-264
+STEP_TIME db-gate-264 571s
+STEP_EXIT db-gate-264 0
+STEP_START db-gate-266 2026-11-11T11:10:13+07:00
+=== db-gate-266
+STEP_TIME db-gate-266 92s
+STEP_EXIT db-gate-266 0
+STEP_START db-gate-267 2026-11-11T11:09:56+07:00
+=== db-gate-267
+STEP_TIME db-gate-267 163s
+STEP_EXIT db-gate-267 0
+STEP_START db-gate-268 2026-11-11T11:07:38+07:00
+=== db-gate-268
+STEP_TIME db-gate-268 330s
+STEP_EXIT db-gate-268 0
+STEP_START db-gate-270 2026-11-11T11:10:51+07:00
+=== db-gate-270
+STEP_TIME db-gate-270 144s
+STEP_EXIT db-gate-270 0
+STEP_START db-gate-271 2026-11-11T11:10:39+07:00
+=== db-gate-271
+STEP_TIME db-gate-271 168s
+STEP_EXIT db-gate-271 0
+STEP_START db-gate-272 2026-11-11T11:09:43+07:00
+=== db-gate-272
+STEP_TIME db-gate-272 228s
+STEP_EXIT db-gate-272 0
+STEP_START db-gate-269 2026-11-11T11:11:46+07:00
+=== db-gate-269
+STEP_TIME db-gate-269 105s
+STEP_EXIT db-gate-269 0
+STEP_START db-gate-273 2026-11-11T11:08:08+07:00
+=== db-gate-273
+STEP_TIME db-gate-273 337s
+STEP_EXIT db-gate-273 0
+STEP_START e2e-001 2026-11-11T11:00:38+07:00
+=== e2e-001
+STEP_TIME e2e-001 808s
+STEP_EXIT e2e-001 1
+RED_NOW e2e-001 rc=1 at 2026-11-11T11:14:06+07:00 (the chain continues)
+STEP_START db-gate-274 2026-11-11T11:13:08+07:00
+=== db-gate-274
+STEP_TIME db-gate-274 93s
+STEP_EXIT db-gate-274 0
+STEP_START db-gate-276 2026-11-11T11:13:45+07:00
+=== db-gate-276
+STEP_TIME db-gate-276 81s
+STEP_EXIT db-gate-276 0
+STEP_START db-gate-275 2026-11-11T11:14:06+07:00
+=== db-gate-275
+STEP_TIME db-gate-275 63s
+STEP_EXIT db-gate-275 0
+STEP_START db-gate-277 2026-11-11T11:13:31+07:00
+=== db-gate-277
+STEP_TIME db-gate-277 108s
+STEP_EXIT db-gate-277 0
+STEP_START db-gate-278 2026-11-11T11:12:39+07:00
+=== db-gate-278
+STEP_TIME db-gate-278 166s
+STEP_EXIT db-gate-278 0
+STEP_START db-gate-279 2026-11-11T11:14:41+07:00
+=== db-gate-279
+STEP_TIME db-gate-279 65s
+STEP_EXIT db-gate-279 0
+STEP_START db-gate-280 2026-11-11T11:15:09+07:00
+=== db-gate-280
+STEP_TIME db-gate-280 47s
+STEP_EXIT db-gate-280 0
+STEP_START db-gate-282 2026-11-11T11:15:25+07:00
+=== db-gate-282
+STEP_TIME db-gate-282 32s
+STEP_EXIT db-gate-282 0
+STEP_START db-gate-283 2026-11-11T11:13:27+07:00
+=== db-gate-283
+STEP_TIME db-gate-283 165s
+STEP_EXIT db-gate-283 0
+STEP_START db-gate-285 2026-11-11T11:13:31+07:00
+=== db-gate-285
+STEP_TIME db-gate-285 166s
+STEP_EXIT db-gate-285 0
+STEP_START db-gate-281 2026-11-11T11:15:56+07:00
+=== db-gate-281
+STEP_TIME db-gate-281 23s
+STEP_EXIT db-gate-281 0
+STEP_START db-gate-284 2026-11-11T11:15:20+07:00
+=== db-gate-284
+STEP_TIME db-gate-284 62s
+STEP_EXIT db-gate-284 0
+STEP_START db-gate-286 2026-11-11T11:15:57+07:00
+=== db-gate-286
+STEP_TIME db-gate-286 26s
+STEP_EXIT db-gate-286 0
+STEP_START db-gate-287 2026-11-11T11:15:06+07:00
+=== db-gate-287
+STEP_TIME db-gate-287 99s
+STEP_EXIT db-gate-287 0
+STEP_START db-gate-288 2026-11-11T11:13:15+07:00
+=== db-gate-288
+STEP_TIME db-gate-288 215s
+STEP_EXIT db-gate-288 0
+STEP_START db-gate-289 2026-11-11T11:15:46+07:00
+=== db-gate-289
+STEP_TIME db-gate-289 80s
+STEP_EXIT db-gate-289 0
+STEP_START db-gate-290 2026-11-11T11:16:12+07:00
+=== db-gate-290
+STEP_TIME db-gate-290 57s
+STEP_EXIT db-gate-290 0
+STEP_START db-gate-291 2026-11-11T11:16:17+07:00
+=== db-gate-291
+STEP_TIME db-gate-291 71s
+STEP_EXIT db-gate-291 0
+STEP_START db-gate-292 2026-11-11T11:16:19+07:00
+=== db-gate-292
+STEP_TIME db-gate-292 79s
+STEP_EXIT db-gate-292 0
+STEP_START db-gate-293 2026-11-11T11:17:38+07:00
+=== db-gate-293
+STEP_TIME db-gate-293 7s
+STEP_EXIT db-gate-293 0
+STEP_START db-gate-294 2026-11-11T11:17:29+07:00
+=== db-gate-294
+STEP_TIME db-gate-294 48s
+STEP_EXIT db-gate-294 0
+STEP_START db-gate-295 2026-11-11T11:16:23+07:00
+=== db-gate-295
+STEP_TIME db-gate-295 139s
+STEP_EXIT db-gate-295 0
+STEP_START db-gate-297 2026-11-11T11:17:46+07:00
+=== db-gate-297
+STEP_TIME db-gate-297 105s
+STEP_EXIT db-gate-297 0
+STEP_START db-gate-296 2026-11-11T11:18:42+07:00
+=== db-gate-296
+STEP_TIME db-gate-296 51s
+STEP_EXIT db-gate-296 0
+STEP_START db-gate-298 2026-11-11T11:18:17+07:00
+=== db-gate-298
+STEP_TIME db-gate-298 77s
+STEP_EXIT db-gate-298 0
+STEP_START db-gate-300 2026-11-11T11:16:22+07:00
+=== db-gate-300
+STEP_TIME db-gate-300 194s
+STEP_EXIT db-gate-300 0
+STEP_START db-gate-299 2026-11-11T11:17:09+07:00
+=== db-gate-299
+STEP_TIME db-gate-299 147s
+STEP_EXIT db-gate-299 0
+STEP_START db-gate-301 2026-11-11T11:17:06+07:00
+=== db-gate-301
+STEP_TIME db-gate-301 160s
+STEP_EXIT db-gate-301 0
+STEP_START db-gate-302 2026-11-11T11:19:31+07:00
+=== db-gate-302
+STEP_TIME db-gate-302 53s
+STEP_EXIT db-gate-302 0
+STEP_START db-gate-303 2026-11-11T11:19:33+07:00
+=== db-gate-303
+STEP_TIME db-gate-303 62s
+STEP_EXIT db-gate-303 0
+STEP_START db-gate-304 2026-11-11T11:19:34+07:00
+=== db-gate-304
+STEP_TIME db-gate-304 66s
+STEP_EXIT db-gate-304 0
+STEP_START db-gate-305 2026-11-11T11:19:46+07:00
+=== db-gate-305
+STEP_TIME db-gate-305 75s
+STEP_EXIT db-gate-305 0
+STEP_START db-gate-306 2026-11-11T11:16:45+07:00
+=== db-gate-306
+STEP_TIME db-gate-306 262s
+STEP_EXIT db-gate-306 0
+STEP_START db-gate-314 2026-11-11T11:19:36+07:00
+=== db-gate-314
+STEP_TIME db-gate-314 108s
+STEP_EXIT db-gate-314 0
+STEP_START db-gate-308 2026-11-11T11:20:24+07:00
+=== db-gate-308
+STEP_TIME db-gate-308 66s
+STEP_EXIT db-gate-308 0
+STEP_START db-gate-307 2026-11-11T11:21:01+07:00
+=== db-gate-307
+STEP_TIME db-gate-307 32s
+STEP_EXIT db-gate-307 0
+STEP_START db-gate-309 2026-11-11T11:20:40+07:00
+=== db-gate-309
+STEP_TIME db-gate-309 53s
+STEP_EXIT db-gate-309 0
+STEP_START db-gate-310 2026-11-11T11:19:36+07:00
+=== db-gate-310
+STEP_TIME db-gate-310 121s
+STEP_EXIT db-gate-310 0
+STEP_START db-gate-311 2026-11-11T11:21:33+07:00
+=== db-gate-311
+STEP_TIME db-gate-311 10s
+STEP_EXIT db-gate-311 0
+STEP_START db-gate-312 2026-11-11T11:21:07+07:00
+=== db-gate-312
+STEP_TIME db-gate-312 44s
+STEP_EXIT db-gate-312 0
+STEP_START db-gate-313 2026-11-11T11:20:35+07:00
+=== db-gate-313
+STEP_TIME db-gate-313 82s
+STEP_EXIT db-gate-313 0
+STEP_START db-gate-315 2026-11-11T11:21:33+07:00
+=== db-gate-315
+STEP_TIME db-gate-315 48s
+STEP_EXIT db-gate-315 0
+STEP_START db-gate-316 2026-11-11T11:21:30+07:00
+=== db-gate-316
+STEP_TIME db-gate-316 58s
+STEP_EXIT db-gate-316 0
+STEP_START db-gate-317 2026-11-11T11:22:21+07:00
+=== db-gate-317
+STEP_TIME db-gate-317 18s
+STEP_EXIT db-gate-317 0
+STEP_START db-gate-318 2026-11-11T11:16:50+07:00
+=== db-gate-318
+STEP_TIME db-gate-318 362s
+STEP_EXIT db-gate-318 0
+STEP_START db-gate-320 2026-11-11T11:21:51+07:00
+=== db-gate-320
+STEP_TIME db-gate-320 67s
+STEP_EXIT db-gate-320 0
+STEP_START db-gate-321 2026-11-11T11:21:43+07:00
+=== db-gate-321
+STEP_TIME db-gate-321 85s
+STEP_EXIT db-gate-321 0
+STEP_START db-gate-319 2026-11-11T11:21:24+07:00
+=== db-gate-319
+STEP_TIME db-gate-319 104s
+STEP_EXIT db-gate-319 0
+STEP_START db-gate-323 2026-11-11T11:21:57+07:00
+=== db-gate-323
+STEP_TIME db-gate-323 99s
+STEP_EXIT db-gate-323 0
+STEP_START db-gate-322 2026-11-11T11:22:28+07:00
+=== db-gate-322
+STEP_TIME db-gate-322 77s
+STEP_EXIT db-gate-322 0
+STEP_START db-gate-325 2026-11-11T11:23:09+07:00
+=== db-gate-325
+STEP_TIME db-gate-325 55s
+STEP_EXIT db-gate-325 0
+STEP_START db-gate-327 2026-11-11T11:22:52+07:00
+=== db-gate-327
+STEP_TIME db-gate-327 72s
+STEP_EXIT db-gate-327 0
+STEP_START db-gate-326 2026-11-11T11:22:58+07:00
+=== db-gate-326
+STEP_TIME db-gate-326 69s
+STEP_EXIT db-gate-326 0
+STEP_START db-gate-324 2026-11-11T11:23:08+07:00
+=== db-gate-324
+STEP_TIME db-gate-324 59s
+STEP_EXIT db-gate-324 0
+STEP_START db-gate-328 2026-11-11T11:21:37+07:00
+=== db-gate-328
+STEP_TIME db-gate-328 156s
+STEP_EXIT db-gate-328 0
+STEP_START db-gate-329 2026-11-11T11:22:39+07:00
+=== db-gate-329
+STEP_TIME db-gate-329 101s
+STEP_EXIT db-gate-329 0
+STEP_START db-gate-330 2026-11-11T11:23:46+07:00
+=== db-gate-330
+STEP_TIME db-gate-330 38s
+STEP_EXIT db-gate-330 0
+STEP_START db-gate-331 2026-11-11T11:24:13+07:00
+=== db-gate-331
+STEP_TIME db-gate-331 42s
+STEP_EXIT db-gate-331 0
+STEP_START db-gate-332 2026-11-11T11:23:37+07:00
+=== db-gate-332
+STEP_TIME db-gate-332 81s
+STEP_EXIT db-gate-332 0
+STEP_START db-gate-333 2026-11-11T11:24:20+07:00
+=== db-gate-333
+STEP_TIME db-gate-333 56s
+STEP_EXIT db-gate-333 0
+STEP_START db-gate-334 2026-11-11T11:24:07+07:00
+=== db-gate-334
+STEP_TIME db-gate-334 71s
+STEP_EXIT db-gate-334 0
+STEP_START db-gate-336 2026-11-11T11:24:07+07:00
+=== db-gate-336
+STEP_TIME db-gate-336 73s
+STEP_EXIT db-gate-336 0
+STEP_START db-gate-335 2026-11-11T11:24:04+07:00
+=== db-gate-335
+STEP_TIME db-gate-335 89s
+STEP_EXIT db-gate-335 0
+STEP_START db-gate-337 2026-11-11T11:24:56+07:00
+=== db-gate-337
+STEP_TIME db-gate-337 56s
+STEP_EXIT db-gate-337 0
+STEP_START db-gate-339 2026-11-11T11:24:58+07:00
+=== db-gate-339
+STEP_TIME db-gate-339 75s
+STEP_EXIT db-gate-339 0
+STEP_START db-gate-338 2026-11-11T11:24:04+07:00
+=== db-gate-338
+STEP_TIME db-gate-338 134s
+STEP_EXIT db-gate-338 0
+STEP_START db-gate-341 2026-11-11T11:25:16+07:00
+=== db-gate-341
+STEP_TIME db-gate-341 97s
+STEP_EXIT db-gate-341 0
+STEP_START db-gate-340 2026-11-11T11:24:24+07:00
+=== db-gate-340
+STEP_TIME db-gate-340 149s
+STEP_EXIT db-gate-340 0
+STEP_START db-gate-345 2026-11-11T11:25:33+07:00
+=== db-gate-345
+STEP_TIME db-gate-345 106s
+STEP_EXIT db-gate-345 0
+STEP_START db-gate-343 2026-11-11T11:25:20+07:00
+=== db-gate-343
+STEP_TIME db-gate-343 120s
+STEP_EXIT db-gate-343 0
+STEP_START db-gate-344 2026-11-11T11:25:52+07:00
+=== db-gate-344
+STEP_TIME db-gate-344 92s
+STEP_EXIT db-gate-344 0
+STEP_START db-gate-346 2026-11-11T11:26:13+07:00
+=== db-gate-346
+STEP_TIME db-gate-346 73s
+STEP_EXIT db-gate-346 0
+STEP_START db-gate-347 2026-11-11T11:26:18+07:00
+=== db-gate-347
+STEP_TIME db-gate-347 87s
+STEP_EXIT db-gate-347 0
+STEP_START db-gate-342 2026-11-11T11:25:18+07:00
+=== db-gate-342
+STEP_TIME db-gate-342 158s
+STEP_EXIT db-gate-342 0
+STEP_START db-gate-349 2026-11-11T11:27:20+07:00
+=== db-gate-349
+STEP_TIME db-gate-349 41s
+STEP_EXIT db-gate-349 0
+STEP_START db-gate-348 2026-11-11T11:26:53+07:00
+=== db-gate-348
+STEP_TIME db-gate-348 68s
+STEP_EXIT db-gate-348 0
+STEP_START db-gate-350 2026-11-11T11:27:19+07:00
+=== db-gate-350
+STEP_TIME db-gate-350 66s
+STEP_EXIT db-gate-350 0
+STEP_START db-gate-353 2026-11-11T11:26:53+07:00
+=== db-gate-353
+STEP_TIME db-gate-353 102s
+STEP_EXIT db-gate-353 0
+STEP_START db-gate-351 2026-11-11T11:27:24+07:00
+=== db-gate-351
+STEP_TIME db-gate-351 72s
+STEP_EXIT db-gate-351 0
+STEP_START db-gate-352 2026-11-11T11:27:26+07:00
+=== db-gate-352
+STEP_TIME db-gate-352 72s
+STEP_EXIT db-gate-352 0
+STEP_START db-gate-355 2026-11-11T11:27:56+07:00
+=== db-gate-355
+STEP_TIME db-gate-355 74s
+STEP_EXIT db-gate-355 0
+STEP_START db-gate-356 2026-11-11T11:28:35+07:00
+=== db-gate-356
+STEP_TIME db-gate-356 41s
+STEP_EXIT db-gate-356 0
+STEP_START db-gate-354 2026-11-11T11:27:45+07:00
+=== db-gate-354
+STEP_TIME db-gate-354 91s
+STEP_EXIT db-gate-354 0
+STEP_START db-gate-358 2026-11-11T11:28:36+07:00
+=== db-gate-358
+STEP_TIME db-gate-358 48s
+STEP_EXIT db-gate-358 0
+STEP_START db-gate-357 2026-11-11T11:28:01+07:00
+=== db-gate-357
+STEP_TIME db-gate-357 84s
+STEP_EXIT db-gate-357 0
+STEP_START db-gate-359 2026-11-11T11:29:24+07:00
+=== db-gate-359
+STEP_TIME db-gate-359 18s
+STEP_EXIT db-gate-359 0
+STEP_START db-gate-360 2026-11-11T11:28:38+07:00
+=== db-gate-360
+STEP_TIME db-gate-360 74s
+STEP_EXIT db-gate-360 0
+STEP_START db-gate-361 2026-11-11T11:29:16+07:00
+=== db-gate-361
+STEP_TIME db-gate-361 42s
+STEP_EXIT db-gate-361 0
+STEP_START db-gate-362 2026-11-11T11:29:25+07:00
+=== db-gate-362
+STEP_TIME db-gate-362 35s
+STEP_EXIT db-gate-362 0
+STEP_START db-gate-365 2026-11-11T11:29:52+07:00
+=== db-gate-365
+STEP_TIME db-gate-365 24s
+STEP_EXIT db-gate-365 0
+STEP_START db-gate-363 2026-11-11T11:29:16+07:00
+=== db-gate-363
+STEP_TIME db-gate-363 65s
+STEP_EXIT db-gate-363 0
+STEP_START db-gate-364 2026-11-11T11:28:01+07:00
+=== db-gate-364
+STEP_TIME db-gate-364 148s
+STEP_EXIT db-gate-364 0
+STEP_START db-gate-366 2026-11-11T11:29:10+07:00
+=== db-gate-366
+STEP_TIME db-gate-366 85s
+STEP_EXIT db-gate-366 0
+STEP_START db-gate-367 2026-11-11T11:28:26+07:00
+=== db-gate-367
+STEP_TIME db-gate-367 133s
+STEP_EXIT db-gate-367 0
+STEP_START db-gate-368 2026-11-11T11:30:21+07:00
+=== db-gate-368
+STEP_TIME db-gate-368 37s
+STEP_EXIT db-gate-368 0
+STEP_START db-gate-369 2026-11-11T11:30:16+07:00
+=== db-gate-369
+STEP_TIME db-gate-369 49s
+STEP_EXIT db-gate-369 0
+STEP_START db-gate-372 2026-11-11T11:29:42+07:00
+=== db-gate-372
+STEP_TIME db-gate-372 122s
+STEP_EXIT db-gate-372 0
+STEP_START db-gate-371 2026-11-11T11:30:39+07:00
+=== db-gate-371
+STEP_TIME db-gate-371 69s
+STEP_EXIT db-gate-371 0
+STEP_START db-gate-370 2026-11-11T11:30:29+07:00
+=== db-gate-370
+STEP_TIME db-gate-370 81s
+STEP_EXIT db-gate-370 0
+STEP_START db-gate-373 2026-11-11T11:30:00+07:00
+=== db-gate-373
+STEP_TIME db-gate-373 112s
+STEP_EXIT db-gate-373 0
+STEP_START db-gate-374 2026-11-11T11:29:58+07:00
+=== db-gate-374
+STEP_TIME db-gate-374 127s
+STEP_EXIT db-gate-374 0
+STEP_START db-gate-375 2026-11-11T11:30:58+07:00
+=== db-gate-375
+STEP_TIME db-gate-375 105s
+STEP_EXIT db-gate-375 0
+STEP_START db-gate-376 2026-11-11T11:30:35+07:00
+=== db-gate-376
+STEP_TIME db-gate-376 152s
+STEP_EXIT db-gate-376 0
+STEP_START db-gate-377 2026-11-11T11:32:43+07:00
+=== db-gate-377
+STEP_TIME db-gate-377 38s
+STEP_EXIT db-gate-377 0
+STEP_START db-gate-378 2026-11-11T11:31:05+07:00
+=== db-gate-378
+STEP_TIME db-gate-378 148s
+STEP_EXIT db-gate-378 0
+STEP_START db-gate-382 2026-11-11T11:33:08+07:00
+=== db-gate-382
+STEP_TIME db-gate-382 27s
+STEP_EXIT db-gate-382 0
+STEP_START db-gate-380 2026-11-11T11:31:50+07:00
+=== db-gate-380
+STEP_TIME db-gate-380 105s
+STEP_EXIT db-gate-380 0
+STEP_START db-gate-381 2026-11-11T11:31:44+07:00
+=== db-gate-381
+STEP_TIME db-gate-381 114s
+STEP_EXIT db-gate-381 0
+STEP_START db-gate-379 2026-11-11T11:31:48+07:00
+=== db-gate-379
+STEP_TIME db-gate-379 127s
+STEP_EXIT db-gate-379 0
+STEP_START db-gate-383 2026-11-11T11:33:21+07:00
+=== db-gate-383
+STEP_TIME db-gate-383 36s
+STEP_EXIT db-gate-383 0
+STEP_START db-gate-384 2026-11-11T11:31:52+07:00
+=== db-gate-384
+STEP_TIME db-gate-384 130s
+STEP_EXIT db-gate-384 0
+STEP_START db-gate-385 2026-11-11T11:33:55+07:00
+=== db-gate-385
+STEP_TIME db-gate-385 30s
+STEP_EXIT db-gate-385 0
+STEP_START db-gate-386 2026-11-11T11:32:06+07:00
+=== db-gate-386
+STEP_TIME db-gate-386 141s
+STEP_EXIT db-gate-386 0
+STEP_START db-gate-388 2026-11-11T11:34:02+07:00
+=== db-gate-388
+STEP_TIME db-gate-388 45s
+STEP_EXIT db-gate-388 0
+STEP_START db-gate-387 2026-11-11T11:33:38+07:00
+=== db-gate-387
+STEP_TIME db-gate-387 89s
+STEP_EXIT db-gate-387 0
+STEP_START db-gate-390 2026-11-11T11:34:47+07:00
+=== db-gate-390
+STEP_TIME db-gate-390 41s
+STEP_EXIT db-gate-390 0
+STEP_START db-gate-389 2026-11-11T11:33:35+07:00
+=== db-gate-389
+STEP_TIME db-gate-389 125s
+STEP_EXIT db-gate-389 0
+STEP_START db-gate-392 2026-11-11T11:34:27+07:00
+=== db-gate-392
+STEP_TIME db-gate-392 75s
+STEP_EXIT db-gate-392 0
+STEP_START db-gate-393 2026-11-11T11:33:57+07:00
+=== db-gate-393
+STEP_TIME db-gate-393 126s
+STEP_EXIT db-gate-393 0
+STEP_START db-gate-391 2026-11-11T11:33:35+07:00
+=== db-gate-391
+STEP_TIME db-gate-391 151s
+STEP_EXIT db-gate-391 0
+STEP_START db-gate-394 2026-11-11T11:35:07+07:00
+=== db-gate-394
+STEP_TIME db-gate-394 147s
+STEP_EXIT db-gate-394 0
+STEP_START db-gate-395 2026-11-11T11:33:33+07:00
+=== db-gate-395
+STEP_TIME db-gate-395 244s
+STEP_EXIT db-gate-395 0
+STEP_START db-gate-396 2026-11-11T11:35:41+07:00
+=== db-gate-396
+STEP_TIME db-gate-396 132s
+STEP_EXIT db-gate-396 0
+STEP_START db-gate-397 2026-11-11T11:35:28+07:00
+=== db-gate-397
+STEP_TIME db-gate-397 169s
+STEP_EXIT db-gate-397 0
+STEP_START db-gate-398 2026-11-11T11:35:42+07:00
+=== db-gate-398
+STEP_TIME db-gate-398 169s
+STEP_EXIT db-gate-398 0
+STEP_START db-gate-399 2026-11-11T11:37:53+07:00
+=== db-gate-399
+STEP_TIME db-gate-399 55s
+STEP_EXIT db-gate-399 0
+STEP_START db-gate-401 2026-11-11T11:36:06+07:00
+=== db-gate-401
+STEP_TIME db-gate-401 177s
+STEP_EXIT db-gate-401 0
+STEP_START db-gate-400 2026-11-11T11:36:03+07:00
+=== db-gate-400
+STEP_TIME db-gate-400 191s
+STEP_EXIT db-gate-400 0
+STEP_START db-gate-403 2026-11-11T11:38:31+07:00
+=== db-gate-403
+STEP_TIME db-gate-403 57s
+STEP_EXIT db-gate-403 0
+STEP_START db-gate-402 2026-11-11T11:38:48+07:00
+=== db-gate-402
+STEP_TIME db-gate-402 45s
+STEP_EXIT db-gate-402 0
+STEP_START db-gate-404 2026-11-11T11:34:25+07:00
+=== db-gate-404
+STEP_TIME db-gate-404 346s
+STEP_EXIT db-gate-404 0
+STEP_START db-gate-405 2026-11-11T11:37:34+07:00
+=== db-gate-405
+STEP_TIME db-gate-405 190s
+STEP_EXIT db-gate-405 0
+STEP_START db-gate-408 2026-11-11T11:40:11+07:00
+=== db-gate-408
+STEP_TIME db-gate-408 39s
+STEP_EXIT db-gate-408 0
+STEP_START db-gate-407 2026-11-11T11:39:03+07:00
+=== db-gate-407
+STEP_TIME db-gate-407 117s
+STEP_EXIT db-gate-407 0
+STEP_START db-gate-406 2026-11-11T11:38:17+07:00
+=== db-gate-406
+STEP_TIME db-gate-406 163s
+STEP_EXIT db-gate-406 0
+STEP_START db-gate-409 2026-11-11T11:39:33+07:00
+=== db-gate-409
+STEP_TIME db-gate-409 122s
+STEP_EXIT db-gate-409 0
+STEP_START db-gate-410 2026-11-11T11:41:01+07:00
+=== db-gate-410
+STEP_TIME db-gate-410 58s
+STEP_EXIT db-gate-410 0
+STEP_START db-gate-411 2026-11-11T11:37:37+07:00
+=== db-gate-411
+STEP_TIME db-gate-411 284s
+STEP_EXIT db-gate-411 0
+STEP_START db-gate-412 2026-11-11T11:39:29+07:00
+=== db-gate-412
+STEP_TIME db-gate-412 178s
+STEP_EXIT db-gate-412 0
+STEP_START db-gate-414 2026-11-11T11:39:14+07:00
+=== db-gate-414
+STEP_TIME db-gate-414 205s
+STEP_EXIT db-gate-414 0
+STEP_START db-gate-413 2026-11-11T11:40:50+07:00
+=== db-gate-413
+STEP_TIME db-gate-413 112s
+STEP_EXIT db-gate-413 0
+STEP_START db-gate-417 2026-11-11T11:41:00+07:00
+=== db-gate-417
+STEP_TIME db-gate-417 128s
+STEP_EXIT db-gate-417 0
+STEP_START db-gate-415 2026-11-11T11:41:35+07:00
+=== db-gate-415
+STEP_TIME db-gate-415 98s
+STEP_EXIT db-gate-415 0
+STEP_START db-gate-416 2026-11-11T11:42:28+07:00
+=== db-gate-416
+STEP_TIME db-gate-416 47s
+STEP_EXIT db-gate-416 0
+STEP_START db-gate-418 2026-11-11T11:42:42+07:00
+=== db-gate-418
+STEP_TIME db-gate-418 34s
+STEP_EXIT db-gate-418 0
+STEP_START db-gate-419 2026-11-11T11:42:39+07:00
+=== db-gate-419
+STEP_TIME db-gate-419 49s
+STEP_EXIT db-gate-419 0
+STEP_START db-gate-420 2026-11-11T11:42:21+07:00
+=== db-gate-420
+STEP_TIME db-gate-420 77s
+STEP_EXIT db-gate-420 0
+STEP_START db-gate-421 2026-11-11T11:43:08+07:00
+=== db-gate-421
+STEP_TIME db-gate-421 64s
+STEP_EXIT db-gate-421 0
+STEP_START db-gate-422 2026-11-11T11:43:16+07:00
+=== db-gate-422
+STEP_TIME db-gate-422 68s
+STEP_EXIT db-gate-422 0
+STEP_START db-gate-423 2026-11-11T11:41:59+07:00
+=== db-gate-423
+STEP_TIME db-gate-423 147s
+STEP_EXIT db-gate-423 0
+STEP_START db-gate-424 2026-11-11T11:43:38+07:00
+=== db-gate-424
+STEP_TIME db-gate-424 82s
+STEP_EXIT db-gate-424 0
+STEP_START db-gate-425 2026-11-11T11:40:44+07:00
+=== db-gate-425
+STEP_TIME db-gate-425 343s
+STEP_EXIT db-gate-425 0
+STEP_START db-gate-426 2026-11-11T11:43:13+07:00
+=== db-gate-426
+STEP_TIME db-gate-426 199s
+STEP_EXIT db-gate-426 0
+STEP_START db-gate-427 2026-11-11T11:43:28+07:00
+=== db-gate-427
+STEP_TIME db-gate-427 242s
+STEP_EXIT db-gate-427 0
+STEP_START db-gate-428 2026-11-11T11:43:15+07:00
+=== db-gate-428
+STEP_TIME db-gate-428 299s
+STEP_EXIT db-gate-428 0
+STEP_START step-026 2026-11-11T11:48:14+07:00
+=== step-026
+STEP_TIME step-026 3s
+STEP_EXIT step-026 0
+STEP_START step-027 2026-11-11T11:48:17+07:00
+=== step-027
+STEP_TIME step-027 0s
+STEP_EXIT step-027 0
+RED_SUMMARY: e2e-001(rc=1)
+GATES_DONE
