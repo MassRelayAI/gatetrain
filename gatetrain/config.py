@@ -60,6 +60,7 @@ class Host:
     lock_max_age_hours: float = 6
     chain_pattern: Optional[str] = None
     cache_server_check: Optional[str] = None
+    tidy: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -76,6 +77,7 @@ class Config:
     needs: Needs = field(default_factory=Needs)
     hosts: List[Host] = field(default_factory=list)
     models: List[Model] = field(default_factory=list)
+    tidy: dict = field(default_factory=dict)
 
 
 def _num(d, key, where, default):
@@ -112,6 +114,13 @@ def _list(d, key, where, kind, default=()):
 
 def _opt_int(d, key, where):
     return int(_num(d, key, where, 0)) if key in d else None
+
+
+def _table(d, key, where):
+    v = d.get(key, {})
+    if not isinstance(v, dict):
+        raise ConfigError(f"{where}.{key}: must be a table")
+    return dict(v)
 
 
 def _disk(d, where):
@@ -152,7 +161,8 @@ def _host(d, i):
         reserved_port_ranges=_list(d, "reserved_port_ranges", w, str),
         container_prefix=_str(d, "container_prefix", w), watcher_max_age_min=_num(d, "watcher_max_age_min", w, 0) if "watcher_max_age_min" in d else None,
         worktrees=wts, lock_file=_str(d, "lock_file", w), lock_max_age_hours=_num(d, "lock_max_age_hours", w, 6),
-        chain_pattern=_str(d, "chain_pattern", w), cache_server_check=_str(d, "cache_server_check", w))
+        chain_pattern=_str(d, "chain_pattern", w), cache_server_check=_str(d, "cache_server_check", w),
+        tidy=_table(d, "tidy", w))
 
 
 def parse(data: dict) -> Config:
@@ -177,7 +187,7 @@ def parse(data: dict) -> Config:
     b = data.get("budget", {})
     if not isinstance(b, dict):
         raise ConfigError("budget: must be a table")
-    return Config(profile, b, needs, hosts, models)
+    return Config(profile, b, needs, hosts, models, _table(data, "tidy", "").copy())
 
 
 def load(path: str) -> Config:

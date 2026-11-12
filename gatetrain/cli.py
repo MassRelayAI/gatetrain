@@ -226,6 +226,16 @@ def cmd_lanes(a):
     return lanes.cmd_lanes(a)
 
 
+def cmd_check(a):
+    from . import tidy
+    return tidy.cmd_check(a)
+
+
+def cmd_tidy(a):
+    from . import tidy
+    return tidy.cmd_tidy(a)
+
+
 def build():
     ap = argparse.ArgumentParser(prog="gatetrain")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -254,6 +264,13 @@ def build():
     p = sub.add_parser("lanes"); p.add_argument("--repo", default="."); p.add_argument("--main", required=True)
     p.add_argument("lane_ref", nargs="+"); p.add_argument("--json", action="store_true"); p.add_argument("--shared-files")
     p.add_argument("--resource-regex", action="append"); p.set_defaults(f=cmd_lanes)
+    p = sub.add_parser("check"); p.add_argument("--config", default="hosts.toml"); p.add_argument("--host"); p.add_argument("--json", action="store_true")
+    p.set_defaults(f=cmd_check)
+    p = sub.add_parser("tidy"); p.add_argument("--config", default="hosts.toml"); p.add_argument("--host")
+    p.add_argument("--apply", action="store_true", help="execute the plan (the default is a dry run)")
+    p.add_argument("--class", dest="cls", help="comma list of: targets,worktrees,containers,images,cache,trash")
+    p.add_argument("--auto", action="store_true", help="for schedulers: check, then apply only the unattended classes")
+    p.set_defaults(f=cmd_tidy)
     return ap
 
 

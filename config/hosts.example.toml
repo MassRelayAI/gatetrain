@@ -93,3 +93,15 @@ cost_per_mtok_usd = 3
 name = "cloud-reviewer"
 kind = "api"
 cost_per_mtok_usd = 15
+
+
+[tidy]                      # gatetrain check / tidy: see README "Tidy and check"
+main_checkout = "/srv/repo/main"
+root_checkout = "/srv/repo/root"
+target_roots = ["/srv/build/targets"]     # one child folder per lane, named after the lane
+targets = [{ path = "/srv/build/chain", budget_gb = 300 }]
+trash_dir = "/srv/trash"
+trash_days = 7
+container_prefix = "gate-"
+image_patterns = ["gate-img:*"]
+unattended = ["targets", "containers", "trash"]

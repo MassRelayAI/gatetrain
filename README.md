@@ -202,6 +202,54 @@ tick 14:53  batch-42 run 2: 255/440 steps, 0 red, merger armed
 
 **Mandatory, not suggestions:** claims carry counts, tests fail before they pass, nothing merges unless the tested commit is the merged one.
 
+## Tidy and check
+
+Disks fill with leftovers: build folders of merged lanes, a shared chain target that outgrew its budget, exited throwaway containers,
+unused test images, a recycle bin nobody empties. The tool finds and cleans them itself.
+
+```
+gatetrain check [--config hosts.toml] [--host NAME] [--json]     # read-only; exit 1 when a threshold is crossed
+gatetrain tidy  [--host NAME] [--class targets,worktrees,containers,images,cache,trash]   # dry run
+gatetrain tidy  --apply [--class ...]                             # execute, class by class
+gatetrain tidy  --auto                                            # for a scheduler: check, then the unattended classes only
+```
+
+`check` prints one table per host (disk free against its minimum, build targets with size, idle time, lane, merged, CACHEDIR.TAG,
+worktrees with branch, merged, dirty and links inside, exited containers, images, build cache, recycle bin, browser profiles in the
+wrong place) and a "would tidy" plan with bytes per item. Exit code 1 means a threshold is crossed: a disk below its minimum, a target over
+its budget, a profile inside an evidence folder.
+
+```toml
+[tidy]                                  # defaults for every host; [hosts.tidy] overrides per host
+main_checkout = "/srv/repo/main"        # needed for lane / worktree logic
+root_checkout = "/srv/repo/root"        # pinned, never touched
+keep_paths    = ["/srv/repo/chain-wt"]  # worktrees or folders in use
+keep_lanes    = ["lane-x"]
+target_roots  = ["/srv/build/targets"]  # each child folder is one lane's target, named after the lane
+targets       = [{ path = "/srv/build/chain", budget_gb = 300 }]   # a shared target: reported, cleaned only by hand
+min_idle_min  = 60                      # a folder used more recently is kept
+trash_dir     = "/srv/trash"
+trash_days    = 7
+container_prefix = "gate-"
+image_patterns   = ["gate-img:*"]
+cache_days    = 0                       # > 0 opts in to pruning docker build cache older than N days
+evidence_dirs = ["/srv/evidence"]
+unattended    = ["targets", "containers", "trash"]    # the default; add images / cache / worktrees to opt in
+log           = "tidy-log.jsonl"
+# Windows: scratch_dir for generated scripts; link_canary / link_canary_count for a known folder with a known link count
+```
+
+Safety rules (lessons L43-L50):
+
+- Dry run by default. `--apply` runs the plan class by class, appends one JSON line per action (before and after bytes, free space) to the
+  log, and stops at the first guard violation.
+- Never `docker system prune`, never a glob, never a recursive force-remove. Containers and images are removed by exact name; the wrapper refuses a bulk command.
+- Never the main or root checkout, anything on the keep lists, a running container, a worktree with uncommitted work, or a lane whose
+  branch content is not on main (ancestor, or every added line present in main).
+- `cargo clean` is never run quiet. If it frees nothing on a folder that is clearly a cargo target and lacks `CACHEDIR.TAG`, the standard tag is written and it runs again.
+- On Windows, links inside a folder are listed (and the listing proven to have run), unlinked with `rmdir` from a generated `.cmd` file, confirmed gone, and only then is the folder removed; afterwards the main checkout tracked-file count and status must be unchanged.
+- A folder that is not a cargo target is moved to the recycle bin, not deleted. Browser profiles inside evidence folders are reported, never removed.
+
 ## When something goes wrong
 
 A batch went red three times, a run is slower than it should be, an agent claimed green and was not, the bill jumped. Ask your agent to
