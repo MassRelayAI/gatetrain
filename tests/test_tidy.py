@@ -32,6 +32,11 @@ class SimHost:
         self.clean_needs_tag = True      # cargo refuses, quietly, without CACHEDIR.TAG
         self.tags, self.deleted_branches = [], []
         self.main = "C:/repo/main" if win else "/repo/main"
+        self.slow = ()                   # path prefixes whose du never finishes; ("",) = every path
+
+    def slow_du(self, cmd):
+        c = n(cmd.replace('"', "").replace("'", ""))
+        return any(x in c for x in self.slow)
 
     def add(self, path, type="dir", size=0, age_s=10 * DAY, target=None):
         self.fs[n(path)] = dict(type=type, size=size, mtime=NOW - age_s, target=n(target) if target else None)
@@ -62,8 +67,10 @@ class SimHost:
                     self.fs.pop(t, None)
             self.fs.pop(k, None)
 
-    def run(self, cmd):
+    def run(self, cmd, timeout=None):
         self.calls.append(cmd)
+        if re.match(r"(du -sk|powershell .*Measure-Object)", cmd) and self.slow_du(cmd):
+            raise subprocess.TimeoutExpired(cmd, timeout or 60)
         c = cmd.replace("\\", "/").replace('"', "").replace("'", "")
         if c.startswith("df -Pk"):
             return 0, f"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 9 9 {int(self.free * 1024 * 1024)} 1% /m\n"
@@ -288,6 +295,105 @@ def cli(sim, *argv):
     return rc, buf.getvalue()
 
 
+class UnknownSizeTests(unittest.TestCase):
+    def test_du_timeout_does_not_crash_check_and_shows_question_mark(self):
+        sim = linux_sim()
+        sim.slow = ("/trash/old",)
+        h, t, inv = gather(sim)
+        old = next(x for x in inv.trash if x["path"] == "/trash/old")
+        self.assertIsNone(old["bytes"])                                  # unknown, never a fake 0
+        self.assertEqual(len(by_key(inv, "/trash/old")), 1)               # age still decides removal
+        self.assertIsNone(by_key(inv, "/trash/old")[0].bytes)
+        out = T.format_check(inv)
+        self.assertIn("?", next(l for l in out.splitlines() if l.startswith("/trash/old")))
+        self.assertIn("item(s) of unknown size", out)
+
+    def test_ops_size_is_none_on_timeout_and_error(self):
+        sim = linux_sim()
+        sim.slow = ("/trash/old",)
+        cfg, h = hostcfg()
+        ops = T.Ops(h, sim, T.build_cfg(cfg, h))
+        self.assertIsNone(ops.size("/trash/old"))
+        self.assertEqual(ops.size("/trash/new"), 5 * MB)
+        self.assertEqual(T.human(None), "?")
+
+    def test_everything_slow_check_still_completes(self):
+        sim = linux_sim()
+        sim.slow = ("",)
+        h, t, inv = gather(sim)
+        self.assertTrue(all(w["bytes"] is None for w in inv.worktrees if not w["keep"] or w["bytes"] is not None))
+        self.assertTrue(T.format_check(inv))
+
+    def test_age_only_disk_is_never_sized(self):
+        sim = linux_sim()
+        cfg, h = hostcfg()
+        h.disks.append(__import__("gatetrain.config", fromlist=["Disk"]).Disk("/trash", 0, measure="age-only"))
+        inv = T.gather(h, sim, T.build_cfg(cfg, h), now=NOW)
+        self.assertEqual([c for c in sim.calls if c.startswith("du -sk") and "/trash" in c], [])
+        self.assertTrue(any(c.startswith("df -Pk") and "/trash" in c for c in sim.calls))
+        old = next(x for x in inv.trash if x["path"] == "/trash/old")
+        self.assertIsNone(old["bytes"])
+        self.assertEqual(len(by_key(inv, "/trash/old")), 1)
+
+    def test_measure_config_is_validated(self):
+        base = {"name": "h", "disks": [{"path": "/x", "measure": "age-only"}]}
+        self.assertEqual(parse({"hosts": [base]}).hosts[0].disks[0].measure, "age-only")
+        with self.assertRaises(ConfigError):
+            parse({"hosts": [{"name": "h", "disks": [{"path": "/x", "measure": "guess"}]}]})
+
+    def test_size_timeout_is_configurable_and_passed_to_the_runner(self):
+        seen = []
+        sim = linux_sim()
+        orig = sim.run
+        sim.run = lambda cmd, timeout=None: (seen.append(timeout) if cmd.startswith("du -sk") else None, orig(cmd, timeout))[1]
+        gather(sim, {"size_timeout_s": 7})
+        self.assertTrue(seen and set(seen) == {7})
+        cfg, h = hostcfg()
+        self.assertEqual(T.build_cfg(cfg, h).size_timeout_s, 30)
+
+    def test_unknown_size_target_over_budget_is_not_judged_nor_cleaned(self):
+        sim = linux_sim()
+        sim.slow = ("/build/chain",)
+        h, t, inv = gather(sim)
+        chain = next(x for x in inv.targets if x["path"] == "/build/chain")
+        self.assertIsNone(chain["bytes"])
+        self.assertFalse(chain["over"])
+        self.assertEqual(by_key(inv, "/build/chain"), [])                 # never planned on budget grounds
+        self.assertFalse(any("/build/chain" in b for b in inv.breaches))
+        self.assertIn("size unknown", T.format_check(inv))
+
+    def test_clean_with_unknown_before_uses_df_delta(self):
+        sim = linux_sim()
+        sim.clean_needs_tag = False
+        sim.slow = ("/build/targets/lane-a",)
+        orig = sim.run
+        def run(cmd, timeout=None):
+            if cmd.startswith("cargo clean"):
+                sim.free += 10
+            return orig(cmd, timeout)
+        sim.run = run
+        h, t, inv = gather(sim, {"log": os.path.join(tempfile.mkdtemp(), "l.jsonl")})
+        it = by_key(inv, "/build/targets/lane-a")[0]
+        self.assertIsNone(it.bytes)
+        ops = T.Ops(h, sim, t)
+        after, status, note = T.clean_target(ops, t, it)
+        self.assertEqual(status, "ok")
+        self.assertIn("df", note)
+
+    def test_clean_unmeasurable_never_claims_freed_nothing(self):
+        sim = linux_sim()
+        sim.clean_needs_tag = False
+        sim.slow = ("/build/targets/lane-a",)
+        orig = sim.run
+        sim.run = lambda cmd, timeout=None: (1, "") if cmd.startswith("df -Pk") else orig(cmd, timeout)
+        h, t, inv = gather(sim)
+        it = by_key(inv, "/build/targets/lane-a")[0]
+        after, status, note = T.clean_target(T.Ops(h, sim, t), t, it)
+        self.assertEqual(status, "ok")
+        self.assertIn("freed: unknown", note)
+        self.assertNotIn("nothing", note)
+
+
 class CheckTests(unittest.TestCase):
     def test_inventory_and_plan(self):
         h, t, inv = gather(linux_sim())
@@ -334,7 +440,7 @@ class CheckTests(unittest.TestCase):
     def test_profile_in_evidence_dir_is_a_breach(self):
         sim = linux_sim()
         orig = sim.run
-        sim.run = lambda cmd: (0, "/evidence/profile/SingletonLock\n") if cmd.startswith("find /evidence") else orig(cmd)
+        sim.run = lambda cmd, timeout=None: (0, "/evidence/profile/SingletonLock\n") if cmd.startswith("find /evidence") else orig(cmd, timeout)
         h, t, inv = gather(sim, {"evidence_dirs": ["/evidence"]}, mins=1)
         self.assertEqual(inv.profiles, ["/evidence/profile/SingletonLock"])
         self.assertTrue(any("browser-profile" in b for b in inv.breaches))
@@ -375,7 +481,7 @@ class ApplyTests(unittest.TestCase):
         sim = linux_sim()
         sim.clean_needs_tag = False
         orig = sim.run
-        sim.run = lambda cmd: (0, "") if cmd.startswith("cargo clean") else orig(cmd)     # a clean that does nothing, with a tag present
+        sim.run = lambda cmd, timeout=None: (0, "") if cmd.startswith("cargo clean") else orig(cmd, timeout)     # a clean that does nothing, with a tag present
         sim.add("/build/targets/lane-a/CACHEDIR.TAG", "file", 100, 10 * DAY)
         (done, failed), _ = self.run_apply(sim, ["targets"])
         self.assertEqual((done, failed), (0, 1))
@@ -454,8 +560,8 @@ class ApplyTests(unittest.TestCase):
         sim = self._win_sim()
         orig = sim.run
 
-        def evil(cmd):
-            rc, out = orig(cmd)
+        def evil(cmd, timeout=None):
+            rc, out = orig(cmd, timeout)
             if "worktree remove" in cmd:
                 sim.fs.pop("C:/repo/main/a.rs", None)       # something deletes a tracked file meanwhile
             return rc, out

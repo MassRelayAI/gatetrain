@@ -6,6 +6,7 @@ Nothing here uses a bulk prune, a glob, or a recursive force-remove; every remov
 import fnmatch
 import json
 import re
+import subprocess
 import time
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
@@ -18,6 +19,7 @@ CARGO_TAG = CARGO_TAG_SIG + "\n# This file is a cache directory tag created by c
 CLASSES = ("targets", "worktrees", "containers", "images", "cache", "trash")
 DEFAULT_UNATTENDED = ("targets", "containers", "trash")
 END = "__GT_END__"
+TIMEOUT = "timeout"          # the rc of a command that did not finish in time
 GB = 1024 ** 3
 
 
@@ -51,12 +53,13 @@ class TidyCfg:
     scratch_dir: Optional[str] = None
     link_canary: Optional[str] = None
     link_canary_count: Optional[int] = None
+    size_timeout_s: float = 30                              # a size probe slower than this is unknown, never a crash
 
 
 _LISTS = ("keep_paths", "keep_lanes", "keep_branches", "target_roots", "image_patterns", "evidence_dirs", "unattended")
 _STRS = ("main_checkout", "root_checkout", "main_branch", "worktree_prefix", "orphan_targets", "trash_dir",
          "container_prefix", "log", "scratch_dir", "link_canary")
-_NUMS = ("min_idle_min", "trash_days", "cache_days")
+_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s")
 
 
 def build_cfg(cfg, host) -> TidyCfg:
@@ -91,6 +94,8 @@ def build_cfg(cfg, host) -> TidyCfg:
 # ---------------------------------------------------------------- host operations
 
 def human(n):
+    if n is None:
+        return "?"
     n = float(n)
     for u in ("B", "KB", "MB", "GB", "TB"):
         if abs(n) < 1024 or u == "TB":
@@ -119,11 +124,25 @@ class Ops:
     def psq(self, p):
         return "'" + p.replace("/", "\\").replace("'", "''") + "'"
 
-    def run(self, cmd):
+    def run(self, cmd, timeout=None):
+        """(rc, out). A command that times out returns (TIMEOUT, "") instead of raising; callers treat it as a failure."""
         low = cmd.lower()
         if "system prune" in low or re.search(r"rm\s+-\w*r\w*f?\s.*[*?]", low):
             raise GuardViolation(f"refusing a bulk command: {cmd}")
-        return self.runner.run(cmd)
+        try:
+            return self.runner.run(cmd) if timeout is None else self.runner.run(cmd, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return TIMEOUT, ""
+
+    def age_only(self, p):
+        """True when p sits on a disk configured measure = age-only: never sized there (L51)."""
+        n = norm(p)
+        best = None
+        for d in self.host.disks:
+            dn = norm(d.path)
+            if (n == dn or n.startswith(dn + "/")) and (best is None or len(dn) > len(norm(best.path))):
+                best = d
+        return best is not None and getattr(best, "measure", "du") == "age-only"
 
     def join(self, a, b):
         return a.rstrip("/\\") + ("\\" if self.win else "/") + b
@@ -133,13 +152,19 @@ class Ops:
         return self.run(cmd)[1].strip().startswith("yes")
 
     def size(self, p):
+        """Bytes under p, or None when unknown (timeout, error, age-only disk). Never a fake 0 (L51)."""
+        if self.age_only(p):
+            return None
+        to = self.cfg.size_timeout_s
         if self.win:
-            rc, out = self.run(f"powershell -NoProfile -Command \"(Get-ChildItem -LiteralPath {self.psq(p)} -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum\"")
+            rc, out = self.run(f"powershell -NoProfile -Command \"(Get-ChildItem -LiteralPath {self.psq(p)} -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum\"", timeout=to)
             s = out.strip()
-            return int(s) if s.isdigit() else 0
-        rc, out = self.run(f"du -sk {self.q(p)}")
+            if rc != 0:
+                return None
+            return int(s) if s.isdigit() else 0 if not s else None
+        rc, out = self.run(f"du -sk {self.q(p)}", timeout=to)
         s = out.split()
-        return int(s[0]) * 1024 if rc == 0 and s and s[0].isdigit() else 0
+        return int(s[0]) * 1024 if rc == 0 and s and s[0].isdigit() else None
 
     def mtime(self, p):
         if self.win:
@@ -299,7 +324,7 @@ class Item:
     cls: str
     kind: str                  # clean | move | remove | rm-container | rm-image | prune-cache | remove-worktree
     key: str                   # exact path or name
-    bytes: int = 0
+    bytes: Optional[int] = 0   # None = unknown
     why: str = ""
     keep: Optional[str] = None  # why it is left alone
     attended_only: bool = False
@@ -344,7 +369,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
     # worktrees
     for w in wts:
         n = norm(w["path"])
-        info = {"path": w["path"], "branch": w["branch"], "merged": None, "dirty": None, "links": 0, "bytes": 0, "keep": None}
+        info = {"path": w["path"], "branch": w["branch"], "merged": None, "dirty": None, "links": 0, "bytes": None, "keep": None}
         if n in kept_n:
             info["keep"] = "main/root/keep list"
         elif not w["branch"]:
@@ -380,7 +405,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
         cargo = is_cargo(names)
         t = {"path": path, "lane": lane, "bytes": size, "idle_min": None if mt is None else (now - mt) / 60,
              "cargo": cargo, "tag": ("CACHEDIR.TAG" in names) if cargo else None, "merged": None, "branch": None,
-             "budget_gb": budget, "over": bool(budget and size > budget * GB), "keep": None}
+             "budget_gb": budget, "over": bool(budget and size is not None and size > budget * GB), "keep": None}
         inv.targets.append(t)
         if t["over"]:
             inv.breaches.append(f"target {path}: {human(size)} over budget {budget:g} GB")
@@ -401,7 +426,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
             elif br is not None and t["merged"] is not True:
                 reason = "lane not merged" if t["merged"] is False else "merge state unknown"
             t["keep"] = reason
-            if not reason and size:
+            if not reason and (size or size is None):
                 inv.items.append(Item("targets", "clean" if cargo else "move", path, size,
                                       f"lane {lane}: " + ("branch content is on main" if br else "orphan"), extra={"cargo": cargo, "tag": t["tag"]}))
         elif t["over"] and norm(path) not in kept_n:
@@ -486,6 +511,13 @@ def find_branch(lane, wts, branches, cfg):
 
 # ---------------------------------------------------------------- reports
 
+def total_str(items):
+    """12.0 MB, or 12.0 MB + 2 item(s) of unknown size."""
+    unk = sum(1 for i in items if i.bytes is None)
+    known = human(sum(i.bytes for i in items if i.bytes is not None))
+    return known + (f" + {unk} item(s) of unknown size" if unk else "")
+
+
 def table(rows, head):
     rows = [head] + [tuple(str(c) for c in r) for r in rows]
     w = [max(len(r[i]) for r in rows) for i in range(len(head))]
@@ -503,7 +535,7 @@ def format_check(inv: Inventory) -> str:
                              ("path", "free", "min", "state"))]
     if inv.targets:
         L += ["build targets", table([(t["path"], human(t["bytes"]), "-" if t["idle_min"] is None else f"{t['idle_min'] / 60:.0f}h", t["lane"] or "-",
-                                       yn(t["merged"]), yn(t["tag"]), "OVER" if t["over"] else "-", t["keep"] or "tidy")
+                                       yn(t["merged"]), yn(t["tag"]), "OVER" if t["over"] else "size unknown" if t["budget_gb"] and t["bytes"] is None else "-", t["keep"] or "tidy")
                                       for t in inv.targets], ("path", "size", "idle", "lane", "merged", "tag", "budget", "plan"))]
     if inv.worktrees:
         L += ["worktrees", table([(w["path"], w["branch"] or "-", yn(w["merged"]), yn(w["dirty"]), w["links"], w["keep"] or "tidy") for w in inv.worktrees],
@@ -520,9 +552,9 @@ def format_check(inv: Inventory) -> str:
         L += ["browser profiles in the wrong place (never auto-removed)"] + ["  " + p for p in inv.profiles]
     plan = [i for i in inv.items]
     if plan:
-        L += ["would tidy", table([(i.cls, i.kind, i.key, human(i.bytes) if i.bytes else "-", "attended" if i.attended_only else "", i.why) for i in plan],
+        L += ["would tidy", table([(i.cls, i.kind, i.key, "?" if i.bytes is None else human(i.bytes) if i.bytes else "-", "attended" if i.attended_only else "", i.why) for i in plan],
                                   ("class", "action", "item", "bytes", "mode", "why"))]
-        L += [f"total reclaimable: {human(sum(i.bytes for i in plan))}"]
+        L += [f"total reclaimable: {total_str(plan)}"]
     else:
         L += ["would tidy: nothing"]
     L += [("THRESHOLD: " + b) for b in inv.breaches]
@@ -609,17 +641,39 @@ def clean_target(ops, cfg, it):
     p = it.key
     ops.check_path(p)
     before = ops.size(p)
+    fb = ops.free_gb(p) if before is None else None      # sizing failed: fall back to the disk's free space (L51)
     mp = f"--manifest-path {ops.q(ops.join(cfg.main_checkout, 'Cargo.toml'))} " if cfg.main_checkout else ""
     cmd = f"cargo clean {mp}--target-dir {ops.q(p)}"          # never -q: a quiet clean can refuse and say nothing (L43)
     ops.run(cmd)
     after = ops.size(p)
     note = "cargo clean"
+    if before is None:
+        fa = ops.free_gb(p)
+        if fb is None or fa is None:
+            return after, "ok", "cargo clean ran; freed: unknown (size and free space could not be measured)"
+        d = fa - fb
+        note = ""
+        if d <= 0.001 and "CACHEDIR.TAG" not in ops.listdir(p):
+            ops.runner.put_file(ops.join(p, "CACHEDIR.TAG"), CARGO_TAG)
+            ops.run(cmd)
+            fa = ops.free_gb(p)
+            d = (fa - fb) if fa is not None else None
+            note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran; "
+        if d is None:
+            return after, "ok", note + "cargo clean ran; freed: unknown"
+        if d <= 0.001:
+            return after, "failed", note + "free space did not grow after cargo clean (df)"
+        return after, "ok", note + f"cargo clean; free space grew by about {d:.1f} GB (df)"
+    if before and after is None:
+        return after, "ok", "cargo clean ran; freed: unknown (size after could not be measured)"
     names = ops.listdir(p) if after else []
     if before and after >= before * 0.99 and is_cargo(names) and "CACHEDIR.TAG" not in names:
         ops.runner.put_file(ops.join(p, "CACHEDIR.TAG"), CARGO_TAG)
         ops.run(cmd)
         after = ops.size(p)
         note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran"
+        if after is None:
+            return after, "ok", note + "; freed: unknown"
     if before and after >= before * 0.99:
         return after, "failed", "cargo clean freed nothing"
     return after, "ok", note
@@ -714,9 +768,9 @@ def cmd_tidy(a):
         except GuardViolation as e:
             print(f"guard violation on {h.name}: {e}; stopped, nothing further touched", file=sys.stderr)
             return 3
-        freed = sum(i.bytes for i in plan)
+        freed = total_str(plan)
         print(f"{h.name}: {len(plan)} planned in {','.join(classes)}; {done} done, {failed} failed")
-        print(f"{h.name}: about {human(freed)} reclaimed (planned bytes); log {t.log}")
+        print(f"{h.name}: about {freed} reclaimed (planned bytes); log {t.log}")
         for d in after.disks:
             print(f"{h.name}: disk {d[0]} {'unreadable' if d[1] is None else format(d[1], '.0f') + ' GB free'} (min {d[2]:g})")
         print(f"{h.name}: {len(after.items)} item(s) still plannable, {len(after.breaches)} threshold(s) crossed")

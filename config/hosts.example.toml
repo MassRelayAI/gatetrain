@@ -38,6 +38,7 @@ cache_server_check = "cachectl --show-stats" # exit 0 = the shared cache server 
   min_free_gb = 100
   fast = true
   use = ["chain", "cache"]  # what this disk may hold: preflight | lane-gates | chain | cache | archive
+  # measure = "age-only"    # on a slow disk: never run du under it (age and df only); default "du". See [tidy] size_timeout_s (L51)
 
   [[hosts.worktrees]]       # two worktrees must not share a build output folder (L17)
   name = "lane-a"

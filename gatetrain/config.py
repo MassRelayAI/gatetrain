@@ -20,6 +20,7 @@ class Disk:
     fast: bool = False
     use: List[str] = field(default_factory=lambda: list(USES))
     removable: bool = False
+    measure: str = "du"          # du | age-only (never size paths on this disk; age and df only)
 
 
 @dataclass
@@ -130,8 +131,11 @@ def _disk(d, where):
     bad = [u for u in use if u not in USES]
     if bad:
         raise ConfigError(f"{where}.use: unknown {bad}; allowed {list(USES)}")
+    measure = _str(d, "measure", where, "du")
+    if measure not in ("du", "age-only"):
+        raise ConfigError(f"{where}.measure: must be du or age-only, got {measure!r}")
     return Disk(_str(d, "path", where, required=True), _num(d, "min_free_gb", where, 0), _bool(d, "fast", where, False),
-                use, _bool(d, "removable", where, False))
+                use, _bool(d, "removable", where, False), measure)
 
 
 def _host(d, i):

@@ -219,6 +219,18 @@ worktrees with branch, merged, dirty and links inside, exited containers, images
 wrong place) and a "would tidy" plan with bytes per item. Exit code 1 means a threshold is crossed: a disk below its minimum, a target over
 its budget, a profile inside an evidence folder.
 
+Sizes are best effort (L51). A size probe that times out or fails gives an unknown size, printed as `?`, never a fake 0: a
+recycle-bin entry is still removed by age; a target with a budget and an unknown size is reported as `size unknown` and is never
+cleaned on budget grounds; totals read "X + N item(s) of unknown size"; when `cargo clean` cannot be measured by size, the tool compares the
+disk's free space before and after, and says `freed: unknown` if even that is unavailable. On a slow disk set `measure = "age-only"`
+in its `[[hosts.disks]]` entry: paths under it are never sized, only aged and checked with `df`.
+
+```toml
+[[hosts.disks]]
+path = "/srv/trash-disk"
+measure = "age-only"                    # du | age-only (default du)
+```
+
 ```toml
 [tidy]                                  # defaults for every host; [hosts.tidy] overrides per host
 main_checkout = "/srv/repo/main"        # needed for lane / worktree logic
@@ -235,11 +247,12 @@ image_patterns   = ["gate-img:*"]
 cache_days    = 0                       # > 0 opts in to pruning docker build cache older than N days
 evidence_dirs = ["/srv/evidence"]
 unattended    = ["targets", "containers", "trash"]    # the default; add images / cache / worktrees to opt in
+size_timeout_s = 30                     # a size probe (du) slower than this is "unknown" (shown as ?), never a crash
 log           = "tidy-log.jsonl"
 # Windows: scratch_dir for generated scripts; link_canary / link_canary_count for a known folder with a known link count
 ```
 
-Safety rules (lessons L43-L50):
+Safety rules (lessons L43-L51):
 
 - Dry run by default. `--apply` runs the plan class by class, appends one JSON line per action (before and after bytes, free space) to the
   log, and stops at the first guard violation.
