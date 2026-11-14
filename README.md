@@ -269,8 +269,8 @@ Safety rules (lessons L43-L51):
 
 A batch went red three times, a run is slower than it should be, an agent claimed green and was not, the bill jumped. Ask your agent to
 "diagnose this run": the **diagnose-run** skill collects the evidence lines, classifies the red (stacking artefact, flaky, real defect,
-environment, process), names the fix, and turns anything seen twice into a lesson. Of the 51 lessons today, 32 are checked by code (`doctor`, `check`,
-`tidy`, `stop`, `lanes`, the ledger); 19 are written rules in a module page that an agent follows, marked as such in
+environment, process), names the fix, and turns anything seen twice into a lesson. Of the 57 lessons today, 37 are checked by code (`doctor`, `check`, `diagnose`,
+`tidy`, `stop`, `lanes`, the ledger); 20 are written rules in a module page that an agent follows, marked as such in
 [the lessons](docs/lessons.md) until a check exists.
 
 ## What's inside
