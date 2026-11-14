@@ -41,6 +41,11 @@ def diag(text, **kw):
     return diagnose_text(text, **kw)
 
 
+def format_text_of(findings):
+    from gatetrain.diagnose import format_findings
+    return format_findings(findings)
+
+
 def only(findings):
     assert len(findings) == 1, findings
     return findings[0]
