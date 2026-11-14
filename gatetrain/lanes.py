@@ -79,7 +79,11 @@ def matches(path, pats):
     return any(fnmatch.fnmatch(path, p) or fnmatch.fnmatch(base, p) for p in pats)
 
 
-def analyse(repo, main, refs, shared=None, resources=None):
+DEFAULT_NEW_ITEM = [r"\b(?:app|router|server|fastify)\.(?:get|post|put|patch|delete)\(\s*['\"`]", r"\.route\(\s*['\"`]",
+                    r"(?i)\bCREATE TABLE\b", r"#\[(?:get|post|put|patch|delete)\("]
+
+
+def analyse(repo, main, refs, shared=None, resources=None, baseline=None, new_item=None):
     g = Git(repo)
     shared = shared or DEFAULT_SHARED
     resources = resources or dict(DEFAULT_RESOURCE)
@@ -252,6 +256,17 @@ def analyse(repo, main, refs, shared=None, resources=None):
                             paired.append({"lane": r, "name": name, "old": o, "new": n_, "file": f, "stale_in": parts[1],
                                            "line": int(parts[2]), "heuristic": True,
                                            "action": f"count changed here but its check still says {o}: update {parts[1]}:{parts[2]}"})
+    # baseline radar: a lane adds routes or tables and touches none of the configured shrink-only / must-join list files
+    base_warn = []
+    if baseline:
+        rxs = [re.compile(x) for x in (new_item or DEFAULT_NEW_ITEM)]
+        for r in live:
+            adds = [ln.strip() for f, hs in D[r]["hunks"].items() if not matches(f, baseline) and not matches(f, NOT_CHECKS)
+                    for h in hs for ln in h["added"] if any(x.search(ln) for x in rxs)]
+            if adds and not any(matches(f, baseline) for f in D[r]["touched"]):
+                base_warn.append({"lane": r, "adds": adds[:5], "count": len(adds),
+                                  "action": "this lane adds a route or table but touches no baseline file: add it to the list it must join, "
+                                            "with a reason, in the same commit (a red `baseline-missing` otherwise)"})
     # plan: greedy colouring of the conflict graph
     edges = {r: set() for r in live}
     for h in hot:
@@ -276,7 +291,7 @@ def analyse(repo, main, refs, shared=None, resources=None):
     lanes_out = [{k: v for k, v in L[r].items() if k not in ("set", "parents", "carries")} for r in order]
     return {"main": main, "lanes": lanes_out, "contained": contained, "carried": carried_out,
             "passes": [[{k: v for k, v in x.items()} for x in p] for p in passes],
-            "hotspots": hot, "doubled_line_risk": doubled, "resource_clashes": clashes, "paired_counts": paired,
+            "hotspots": hot, "doubled_line_risk": doubled, "resource_clashes": clashes, "paired_counts": paired, "baseline_warnings": base_warn,
             "groups": groups_out, "conflict_edges": {k: sorted(v) for k, v in edges.items() if v},
             "summary": summary, "summary_line": line}
 
@@ -338,6 +353,10 @@ def render(rep):
     for p in rep["paired_counts"]:
         o.append(f"   {p['lane']}: {p['name']} {p['old']} -> {p['new']} in {p['file']}; count changed here but its check still says {p['old']} "
                  f"in {p['stale_in']}:{p['line']} -> update it")
+    if rep.get("baseline_warnings"):
+        o += ["", "5b. baseline radar (heuristic)"]
+        for w in rep["baseline_warnings"]:
+            o.append(f"   {w['lane']}: adds {w['count']} route/table line(s), e.g. {w['adds'][0]} -> {w['action']}")
     o += ["", "6. parallel plan"]
     for i, gp in enumerate(rep["groups"], 1):
         o.append(f"   group {i}: {', '.join(gp)}" + ("" if i == 1 else "  (after the groups above; conflicts with them)"))
@@ -362,7 +381,8 @@ def parse_resource(items):
 def cmd_lanes(a):
     shared = [x.strip() for x in a.shared_files.split(",") if x.strip()] if a.shared_files else None
     try:
-        rep = analyse(a.repo, a.main, a.lane_ref, shared, parse_resource(a.resource_regex))
+        bl = [x.strip() for x in a.baseline_files.split(",") if x.strip()] if a.baseline_files else None
+        rep = analyse(a.repo, a.main, a.lane_ref, shared, parse_resource(a.resource_regex), bl, a.new_item_regex or None)
     except GitError as e:
         print(f"git failed: {e}", file=sys.stderr)
         return 2

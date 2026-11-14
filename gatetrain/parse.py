@@ -34,6 +34,7 @@ class ParsedLog:
     red_now: List[Tuple[str, int, Optional[datetime]]] = field(default_factory=list)
     red_summary: Optional[str] = None
     gates_done: bool = False
+    parallel: Optional[int] = None
 
     @property
     def last_ts(self) -> Optional[datetime]:
@@ -102,6 +103,10 @@ def parse_log(text: str) -> ParsedLog:
             r.red_summary = m[1].strip() if m else ""
         elif line.startswith("GATES_DONE"):
             r.gates_done = True
+        elif line.startswith("CHAIN_PARALLEL"):
+            m = re.match(r"CHAIN_PARALLEL\s+(\d+)", line)
+            if m:
+                r.parallel = int(m[1])
         elif line.startswith("CHAIN_MODE"):
             parts = line.split(None, 1)
             r.mode = parts[1].strip() if len(parts) > 1 else None

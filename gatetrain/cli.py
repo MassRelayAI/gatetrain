@@ -59,6 +59,38 @@ def _need(a):
         raise SystemExit("give a log path or --run ID")
 
 
+def _configured_parallel(a):
+    """Configured parallelism: --parallel, else max_parallel_steps of --host in --config."""
+    if getattr(a, "parallel", None):
+        return a.parallel
+    if getattr(a, "config", None) and getattr(a, "host", None):
+        from . import config as cfgm
+        h = next((x for x in cfgm.load(a.config).hosts if x.name == a.host), None)
+        return h.max_parallel_steps if h else None
+    return None
+
+
+def cmd_diagnose(a):
+    from . import diagnose as dg
+    text = _read(a.log)
+    rules = dg.RULES
+    if a.rules:
+        rules = dg.load_rules(a.rules) + dg.RULES
+    hist = None
+    if a.db and a.db != ":memory:" and Path(a.db).exists():
+        hist = dbm.history_durations(dbm.connect(a.db), exclude_run=_run_id(a.log))
+    print(dg.format_findings(dg.diagnose_text(text, hist, rules)))
+    note = dg.parallelism_note(parse_log(text), _configured_parallel(a))
+    if note:
+        print(note)
+    return 0
+
+
+def cmd_generated(a):
+    from . import stackcheck
+    return stackcheck.cmd_generated(a)
+
+
 def cmd_report(a):
     if not a.run and not a.log:
         c = dbm.connect(a.db)
@@ -68,6 +100,11 @@ def cmd_report(a):
         a.run = r[0]
     rid, meta, steps = _load(a)
     print(an.report_text(rid, meta, steps))
+    if a.log:
+        from . import diagnose as dg
+        text = _read(a.log)
+        if any(s.exit_code not in (None, 0) for s in steps) or _configured_parallel(a):
+            print(dg.diagnosis_block(text, _configured_parallel(a)))
     return 0
 
 
@@ -93,6 +130,10 @@ def cmd_eta(a):
         raise SystemExit("no steps in log")
     pred = an.predict(p.steps, hist, ref)
     print(an.eta_text(pred, ref, sum(1 for s in p.steps if s.finished)))
+    from . import diagnose as dg
+    note = dg.parallelism_note(p, _configured_parallel(a))
+    if note:
+        print(note)
     if p.gates_done:
         print("note: this run already printed GATES_DONE")
     return 0
@@ -247,10 +288,17 @@ def build():
     p.add_argument("--run-id"); p.add_argument("--host"); p.add_argument("--replace", action="store_true")
     p.add_argument("--stale-min", type=float, default=30); p.add_argument("--now"); p.set_defaults(f=cmd_ingest)
     p = sub.add_parser("report"); p.add_argument("log", nargs="?"); db(p); p.add_argument("--run"); p.add_argument("--now")
+    p.add_argument("--parallel", type=int, help="the host's configured parallel steps"); p.add_argument("--config"); p.add_argument("--host")
     p.set_defaults(f=cmd_report)
     p = sub.add_parser("trace"); p.add_argument("log", nargs="?"); db(p); p.add_argument("--run"); p.add_argument("--now")
     p.set_defaults(f=cmd_trace)
-    p = sub.add_parser("eta"); p.add_argument("log"); db(p); p.add_argument("--now"); p.set_defaults(f=cmd_eta)
+    p = sub.add_parser("eta"); p.add_argument("log"); db(p); p.add_argument("--now")
+    p.add_argument("--parallel", type=int, help="the host's configured parallel steps"); p.add_argument("--config"); p.add_argument("--host"); p.set_defaults(f=cmd_eta)
+    p = sub.add_parser("diagnose", help="classify every red step: class, evidence, remedy, rerun needed"); p.add_argument("log")
+    p.add_argument("--db", default=""); p.add_argument("--rules", help="JSON list of extra rules (same keys as diagnose.RULES), tried first")
+    p.add_argument("--parallel", type=int, help="the host's configured parallel steps"); p.add_argument("--config"); p.add_argument("--host"); p.set_defaults(f=cmd_diagnose)
+    p = sub.add_parser("generated", help="list untracked files under the generated directories"); p.add_argument("--repo", default=".")
+    p.add_argument("--dir", action="append"); p.add_argument("--config"); p.set_defaults(f=cmd_generated)
     p = sub.add_parser("next-tick"); p.add_argument("--log", action="append"); db(p); p.add_argument("--now")
     p.add_argument("--min", type=int, default=5); p.add_argument("--max", type=int, default=60); p.set_defaults(f=cmd_next_tick)
     p = sub.add_parser("flaky"); db(p); p.set_defaults(f=cmd_flaky)
@@ -263,7 +311,9 @@ def build():
     p.add_argument("--yes", action="store_true"); p.add_argument("--config"); p.add_argument("--host"); p.set_defaults(f=cmd_stop)
     p = sub.add_parser("lanes"); p.add_argument("--repo", default="."); p.add_argument("--main", required=True)
     p.add_argument("lane_ref", nargs="+"); p.add_argument("--json", action="store_true"); p.add_argument("--shared-files")
-    p.add_argument("--resource-regex", action="append"); p.set_defaults(f=cmd_lanes)
+    p.add_argument("--resource-regex", action="append")
+    p.add_argument("--baseline-files", help="comma list of globs: the lists a new route or table must join (enables the baseline radar)")
+    p.add_argument("--new-item-regex", action="append", help="regex for an added line that counts as a new route or table"); p.set_defaults(f=cmd_lanes)
     p = sub.add_parser("check"); p.add_argument("--config", default="hosts.toml"); p.add_argument("--host"); p.add_argument("--json", action="store_true")
     p.set_defaults(f=cmd_check)
     p = sub.add_parser("tidy"); p.add_argument("--config", default="hosts.toml"); p.add_argument("--host")

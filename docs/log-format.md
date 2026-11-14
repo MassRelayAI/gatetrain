@@ -7,6 +7,7 @@ Steps may run in parallel and their lines may interleave: lines are matched to a
 |---|---|
 | `branch <name> at <sha> on <host>` | once, first: what is being proven, the commit, the machine |
 | `CHAIN_MODE <mode>` | once: for example `full` |
+| `CHAIN_PARALLEL <n>` | optional, once: how many steps the run was allowed in parallel; `report`, `eta` and `diagnose` compare it with the host's configured parallelism (L56) |
 | `STEP_START <step> <ISO 8601 time with zone>` | a step began |
 | `=== <step>` | optional banner before the step's own output |
 | `STEP_TIME <step> <N>s` | the step's wall time in seconds; end time = `STEP_START` + `STEP_TIME` |

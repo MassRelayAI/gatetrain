@@ -232,6 +232,44 @@ def check_ports(h, runner):
     return out
 
 
+def check_random_ports(h, runner):
+    """Random port defaults in gate scripts whose range reaches the host's ephemeral range collide with outgoing connections (L52)."""
+    if not h.gate_scripts:
+        return []
+    from .portscan import scan_random_ports, uncovered
+    win = host_os(h) == "windows"
+    names = " ".join(_q(p, host_os(h)) for p in h.gate_scripts)
+    cmd = (f'for %f in ({names}) do @(echo @@FILE %f & type "%f")' if win
+           else f'for f in {names}; do echo "@@FILE $f"; cat "$f"; done')
+    rc, out = runner.run(cmd)
+    if rc != 0 and not out:
+        return [Result(h.name, "random-ports", "WARN", ["L52"], "cannot read the gate scripts", "check the gate_scripts paths")]
+    ranges = _ranges_windows(runner) if win else _ranges_linux(runner)
+    eph = next(((a, b) for a, b, w in ranges or [] if w in ("ephemeral range", "dynamic range")), (49152, 65535) if win else (32768, 60999))
+    reserved = [] if win else _kernel_reserved_linux(runner)
+    for r in h.reserved_port_ranges:
+        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", r)
+        if m:
+            reserved.append((int(m[1]), int(m[2])))
+    res, cur, body = [], None, {}
+    for ln in out.splitlines():
+        if ln.startswith("@@FILE "):
+            cur = ln[7:].strip()
+            body[cur] = []
+        elif cur is not None:
+            body[cur].append(ln)
+    for name, lines in body.items():
+        for n, lo, hi in scan_random_ports(chr(10).join(lines)):
+            gaps = uncovered(lo, hi, eph, reserved)
+            if gaps:
+                res.append(Result(h.name, "random-ports", "FAIL", ["L52"],
+                                  f"{name}:{n} picks a random port in {lo}-{hi}, which reaches the ephemeral range {eph[0]}-{eph[1]}",
+                                  "keep random port ranges below the ephemeral range, for example 20000-31999"))
+            else:
+                res.append(Result(h.name, "random-ports", "PASS", ["L52"], f"{name}:{n} random range {lo}-{hi} stays clear of the ephemeral range"))
+    return res
+
+
 def _norm(path, os_):
     p = posixpath.normpath(path.replace("\\", "/"))
     return p.lower() if os_ == "windows" else p
@@ -319,7 +357,7 @@ def check_pollers(h, runner):
     return [Result(h.name, "pollers", "PASS", ["L25"], f"{n} ssh sessions <= max_pollers {h.max_pollers}")]
 
 
-CHECKS = [check_disks, check_capacity, check_containers, check_watchers, check_tools, check_ports,
+CHECKS = [check_disks, check_capacity, check_containers, check_watchers, check_tools, check_ports, check_random_ports,
           check_shared_build, check_lock, check_chain, check_cache, check_pollers]
 
 

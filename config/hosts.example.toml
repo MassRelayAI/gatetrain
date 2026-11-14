@@ -26,6 +26,7 @@ cost_per_hour_usd = 0
 tools = ["git", "node", "cargo"]            # must resolve and print a version (L29)
 ports = [5500, 5501]                         # fixed test ports: outside the ephemeral range, unique (L21, L22)
 reserved_port_ranges = ["55400-58399"]
+gate_scripts = ["tools/gates/db-gate.mjs"]  # scanned for RANDOM port defaults whose range reaches the ephemeral range (L52)
 container_prefix = "gate-"                   # leftover exited containers with this prefix are listed (L31)
 watcher_max_age_min = 30                     # a tail -F older than this is a stray watcher (L24)
 chain_pattern = "run-chain"                  # a process matching this means a chain is running (L26)
@@ -95,6 +96,9 @@ name = "cloud-reviewer"
 kind = "api"
 cost_per_mtok_usd = 15
 
+
+[stack]                     # gatetrain generated: untracked files under these directories fail the check (L53)
+generated_dirs = ["generated", "docs/_generated"]
 
 [tidy]                      # gatetrain check / tidy: see README "Tidy and check"
 main_checkout = "/srv/repo/main"

@@ -13,6 +13,9 @@ description: Stack finished lanes into a batch, pre-flight it on a free machine,
    list). Anything else stays red for a person.
 
 ## Pre-flight (on a free host)
+After regenerating files, run `gatetrain generated --config hosts.toml` (`[stack] generated_dirs`): a NEW generated file left untracked
+makes a later "disk equals build" test red (L53). Before stacking, `gatetrain lanes ... --baseline-files <globs>` warns when a lane adds
+routes or tables and touches none of the lists they must join (L54).
 Every check under ~10 minutes: type checks, lints, structure and dependency rules, tracker and doc checks, the fast unit suites, the
 "every test is listed" and "every gate is in the full run" checks. The chain starts only when this is green.
 

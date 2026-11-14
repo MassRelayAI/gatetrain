@@ -61,6 +61,7 @@ class Host:
     lock_max_age_hours: float = 6
     chain_pattern: Optional[str] = None
     cache_server_check: Optional[str] = None
+    gate_scripts: List[str] = field(default_factory=list)
     tidy: dict = field(default_factory=dict)
 
 
@@ -79,6 +80,7 @@ class Config:
     hosts: List[Host] = field(default_factory=list)
     models: List[Model] = field(default_factory=list)
     tidy: dict = field(default_factory=dict)
+    stack: dict = field(default_factory=dict)
 
 
 def _num(d, key, where, default):
@@ -166,7 +168,7 @@ def _host(d, i):
         container_prefix=_str(d, "container_prefix", w), watcher_max_age_min=_num(d, "watcher_max_age_min", w, 0) if "watcher_max_age_min" in d else None,
         worktrees=wts, lock_file=_str(d, "lock_file", w), lock_max_age_hours=_num(d, "lock_max_age_hours", w, 6),
         chain_pattern=_str(d, "chain_pattern", w), cache_server_check=_str(d, "cache_server_check", w),
-        tidy=_table(d, "tidy", w))
+        gate_scripts=_list(d, "gate_scripts", w, str), tidy=_table(d, "tidy", w))
 
 
 def parse(data: dict) -> Config:
@@ -191,7 +193,9 @@ def parse(data: dict) -> Config:
     b = data.get("budget", {})
     if not isinstance(b, dict):
         raise ConfigError("budget: must be a table")
-    return Config(profile, b, needs, hosts, models, _table(data, "tidy", "").copy())
+    st = _table(data, "stack", "").copy()
+    _list(st, "generated_dirs", "stack", str)
+    return Config(profile, b, needs, hosts, models, _table(data, "tidy", "").copy(), st)
 
 
 def load(path: str) -> Config:

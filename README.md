@@ -32,6 +32,7 @@ line moving without lying to yourself.
 | An agent says "tests pass". | **Every claim carries its counts**, red first: a test that never failed has not proven anything. |
 | Risky changes (money, permissions, data, network) slip through with the rest. | An **independent review** that gets the diff, not your conclusion, before the change is stacked. |
 | Machines sit idle while work queues; the bill or the disk surprises you. | One **ledger** of every run and step: waiting time, idle hosts, flaky steps, cost per batch, agent quality. |
+| A red is read as a real defect (or waved through as a flake) and the whole run is repeated. | **Diagnose** classifies every red from its own output: load flake, port collision, uncommitted generated file, shrink-only list drift, Windows-only artefact; anything unknown stays `real`. |
 | Cleanup deletes real work. | **Tidy** that cannot: archive tags first, links unlinked first, exact names only, never the main checkout. |
 
 <p align="center"><img src="docs/assets/preflight.svg" alt="Cheap before expensive: the same mistake costs 6 hours 10 minutes without a pre-flight, and 3 hours 40 minutes with one" width="100%"></p>
@@ -70,6 +71,7 @@ Needs Python 3 only (standard library). Your chain prints a few marker lines, se
 ```bash
 bin/gatetrain ingest my-chain.log --db gatetrain.db        # parse it into the ledger (append-only)
 bin/gatetrain report --db gatetrain.db --run my-chain      # totals, reds, slowest steps, busiest stretch
+bin/gatetrain diagnose run-chain.log                       # per red step: class, evidence, remedy, full rerun needed
 bin/gatetrain trace my-chain.log > trace.json              # open trace.json in https://ui.perfetto.dev
 bin/gatetrain eta my-running.log --db gatetrain.db         # when will it end (needs earlier runs in the ledger)
 bin/gatetrain next-tick --log my-running.log --db gatetrain.db   # when to look next

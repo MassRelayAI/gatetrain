@@ -1,0 +1,181 @@
+"""gatetrain diagnose: classify every red step of a chain log with evidence, a remedy and whether a full rerun is needed.
+
+The classifier is DATA: RULES is a table of dicts, first match wins, so a new failure class is a new row (or a row in a JSON
+file given with --rules), never new code. Keys per rule:
+  id        short name of the rule
+  cls       the class printed (flake-load, infra-port, ...)
+  pattern   regex searched in the step's output (multiline)
+  absent    optional regex; when it matches anywhere in the output, the rule does not apply (a real assertion beats a flake)
+  also      optional regex that must ALSO match somewhere in the output
+  when      optional condition on the step: "slow" = duration far above the step's median
+  shrink    optional true: the pattern's groups 1 and 2 are (expected, got) and the rule applies only when got < expected
+  remedy    what to do
+  rerun     true when the red needs only a rerun (plus the remedy), false when a lane fix comes first
+A red that no rule matches is `real`: never silently a flake.
+"""
+import json
+import re
+from dataclasses import dataclass
+from statistics import median
+from typing import Dict, List, Optional
+
+from .analysis import concurrency, fmt_dur
+from .parse import parse_log
+
+SLOW_FACTOR = 3.0
+
+RULES = [
+    {"id": "port-collision", "cls": "infra-port",
+     "pattern": r"failed to bind host port|address already in use|EADDRINUSE|port is already allocated",
+     "remedy": "a gate's port was taken: keep random port ranges below the ephemeral range (for example 20000-31999) or inside "
+               "ip_local_reserved_ports, and give every gate a unique fixed port; run `gatetrain doctor`",
+     "rerun": True},
+    {"id": "windows-artefact", "cls": "platform-windows",
+     "pattern": r"The command line is too long|path separator|"
+                r"expected ['\"][^'\"\n]*/[^'\"\n]*['\"],? (?:got|received) ['\"][^'\"\n]*\\[^'\"\n]*['\"]|"
+                r"expected ['\"][^'\"\n]*\\[^'\"\n]*['\"],? (?:got|received) ['\"][^'\"\n]*/[^'\"\n]*['\"]",
+     "remedy": "this red only happens on Windows (long command line, backslash vs slash in an allow-list): run that step on Linux "
+               "for the merge decision",
+     "rerun": True},
+    {"id": "generated-not-committed", "cls": "generated-uncommitted",
+     "pattern": r"(?i)\bmissing:|\bstray\b",
+     "also": r"(?i)on[- ]disk|disk (?:equals|==|vs|matches)|differs from (?:the )?build",
+     "remedy": "a generator made a NEW file that was never committed (the stack committed tracked changes only): regenerate, "
+               "`git add` the new file by name, commit on the batch; `gatetrain generated` lists such files before the chain",
+     "rerun": True},
+    {"id": "baseline-shrink-count", "cls": "baseline-shrink",
+     "pattern": r"expected length (\d+),? (?:got|received) (\d+)", "shrink": True,
+     "remedy": "a shrink-only list got shorter because a lane fixed something: delete the entry and lower the pinned count "
+               "in the same commit",
+     "rerun": True},
+    {"id": "baseline-shrink-entry", "cls": "baseline-shrink",
+     "pattern": r"(?i)now (?:witnessed|reaches the gate)\b.*\bdelete\b|\bdelete (?:the|this) entry\b",
+     "remedy": "a shrink-only list still names something that is now fixed: delete the entry and lower the pinned count "
+               "in the same commit",
+     "rerun": True},
+    {"id": "baseline-missing", "cls": "baseline-missing",
+     "pattern": r"\bNEW\b.*\bnot in\b|nobody classified",
+     "remedy": "a new route or table is not yet on a list it must join: add it with a reason, in the same commit",
+     "rerun": True},
+    {"id": "load-flake", "cls": "flake-load",
+     "pattern": r"(?i)(?:hook|test) timed out in \d+ ?m?s|timed out after \d+ ?m?s",
+     "absent": r"AssertionError|^\s*Tests\s.*?(?<!\d)[1-9]\d* failed", "when": "slow",
+     "remedy": "a timeout with no failed test on a slow, loaded step: raise the hook or test timeout for the slow engine, or reduce "
+               "the step's parallel neighbours. Under a zero-red merge rule it still needs a full green rerun",
+     "rerun": True},
+]
+
+REAL_REMEDY = "a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane"
+
+
+@dataclass
+class Finding:
+    step: str
+    rc: Optional[int]
+    cls: str
+    evidence: str
+    remedy: str
+    rerun: bool
+    rule: str = ""
+
+    def as_dict(self):
+        return self.__dict__.copy()
+
+
+def load_rules(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def step_output(text: str) -> Dict[str, List[str]]:
+    """Lines between a `=== <step>` banner and the next marker line, per step (a banner names its step)."""
+    out, cur = {}, None
+    for line in text.splitlines():
+        if line.startswith("=== "):
+            cur = line[4:].strip()
+            out.setdefault(cur, [])
+        elif re.match(r"(STEP_|RED_|GATES_DONE|CHAIN_|branch )", line):
+            if not line.startswith("STEP_START"):
+                continue
+            cur = None
+        elif cur is not None:
+            out[cur].append(line.rstrip())
+    return out
+
+
+def _is_slow(step, steps, history):
+    ref = list((history or {}).get(step.name, []))
+    if not ref:
+        ref = [s.duration for s in steps if s is not step and s.duration is not None and s.exit_code in (0, None)]
+    m = median(ref) if ref else 0
+    return bool(step.duration and m > 0 and step.duration > SLOW_FACTOR * m)
+
+
+def _line_of(text, pos):
+    a = text.rfind("\n", 0, pos) + 1
+    b = text.find("\n", pos)
+    return text[a:b if b >= 0 else len(text)].strip()
+
+
+def classify(step, lines, steps, history=None, rules=None) -> Finding:
+    body = "\n".join(lines)
+    for r in rules if rules is not None else RULES:
+        m = re.search(r["pattern"], body, re.M)
+        if not m:
+            continue
+        if r.get("absent") and re.search(r["absent"], body, re.M):
+            continue
+        if r.get("also") and not re.search(r["also"], body, re.M):
+            continue
+        if r.get("shrink") and not (m.lastindex and m.lastindex >= 2 and int(m[2]) < int(m[1])):
+            continue
+        if r.get("when") == "slow" and not _is_slow(step, steps, history):
+            continue
+        return Finding(step.name, step.exit_code, r["cls"], _line_of(body, m.start()), r["remedy"], bool(r["rerun"]), r.get("id", ""))
+    ev = next((ln.strip() for ln in reversed(lines) if ln.strip()), "(no output captured for this step)")
+    return Finding(step.name, step.exit_code, "real", ev, REAL_REMEDY, False, "default")
+
+
+def diagnose_text(text: str, history=None, rules=None) -> List[Finding]:
+    p = parse_log(text)
+    outs = step_output(text)
+    return [classify(s, outs.get(s.name, []), p.steps, history, rules) for s in p.steps if s.exit_code not in (None, 0)]
+
+
+def recorded_parallelism(p):
+    """(value, source): the CHAIN_PARALLEL marker when the log has one, else the highest concurrency seen."""
+    if p.parallel is not None:
+        return p.parallel, "recorded"
+    mc = concurrency(p.steps)[0]
+    return (mc, "observed") if mc else (None, "")
+
+
+def parallelism_note(p, configured) -> Optional[str]:
+    """A run whose parallelism is below the host's configured one is slow for a reason that is not the code."""
+    if not configured:
+        return None
+    got, how = recorded_parallelism(p)
+    if got is None or got >= configured:
+        return None
+    return (f"note: {how} parallelism {got} is below the configured {configured}: this run is slower than the host can do "
+            f"(expect about {configured / got:.1f}x the wall time on its parallel stretch)")
+
+
+def format_findings(findings: List[Finding]) -> str:
+    if not findings:
+        return "no red steps"
+    L = []
+    for f in findings:
+        L += [f"{f.step}: {f.cls} (rc={f.rc})", f"  evidence: {f.evidence}", f"  remedy: {f.remedy}",
+              "  full rerun needed: " + ("yes (no lane defect found; a green run under the zero-red merge rule is still required)"
+                                         if f.rerun else "after the fix, the lane's defect comes first")]
+    n = sum(1 for f in findings if f.cls == "real")
+    L.append(f"{len(findings)} red: {n} real, {len(findings) - n} classified as flake, infrastructure or baseline drift")
+    return "\n".join(L)
+
+
+def diagnosis_block(text, parallel=None, history=None, rules=None) -> str:
+    p = parse_log(text)
+    block = "diagnosis:\n" + "\n".join("  " + ln for ln in format_findings(diagnose_text(text, history, rules)).splitlines())
+    note = parallelism_note(p, parallel)
+    return block + ("\n" + note if note else "")
