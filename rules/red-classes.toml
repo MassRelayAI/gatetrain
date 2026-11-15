@@ -66,3 +66,60 @@ absent = '''AssertionError|^\s*Tests\s(?:.*?\D)?[1-9]\d* failed'''
 when = "slow"
 remedy = "a timeout with no failed test on a slow, loaded step: raise the hook or test timeout for the slow engine, or reduce the step's parallel neighbours. Under a zero-red merge rule it still needs a full green rerun"
 rerun = true
+
+# ---- environment classes (audit GT-COVER rows 41, 66, 68, 69, 70, 96, 106): each cost a whole chain and was labelled `real` by hand ----
+
+[[rule]]
+id = "build-folder-missing"
+cls = "infra-build-folder"
+pattern = '''(?i)failed to create (?:the )?(?:target |build )?(?:dir|directory|folder)[^\n]*(?:\n[^\n]*){0,3}?(?:No such file or directory|cannot find the path specified|File exists|Not a directory|dangling)'''
+absent = '''AssertionError|^\s*Tests\s(?:.*?\D)?[1-9]\d* failed'''
+remedy = "the build folder is a dangling link or missing (a cleaned linked folder was not re-created): every cargo step dies at once. Run `gatetrain doctor` (build folders resolve), re-create the folder the link points to, then rerun the step"
+rerun = true
+
+[[rule]]
+id = "service-never-came-up"
+cls = "infra-service"
+pattern = '''(?i)\bconnection refused\b|\bECONNREFUSED\b|could not connect to server|container (?:start|startup)(?: timed? ?out|\s+failed)|did not become (?:ready|healthy)|cannot connect to the docker daemon|is the docker daemon running'''
+absent = '''AssertionError|^\s*Tests\s(?:.*?\D)?[1-9]\d* failed'''
+remedy = "a service the gate needs never came up (connection refused, daemon race, container start timeout): not a code defect. Check `gatetrain doctor`, wait for the service to be healthy, then rerun the step"
+rerun = true
+
+[[rule]]
+id = "cache-server-died"
+cls = "infra-cache-server"
+pattern = '''(?i)sccache: (?:error|caused by)[^\n]*(?:server startup failed|failed to (?:connect|start)|no such file or directory|connection refused)|sccache: caused by[^\n]*(?:server startup failed|failed to (?:connect|start))'''
+remedy = "the shared compile-cache server died (it inherited a job's temporary folder and lost it): restart it with its own environment and no idle timeout (L20), then rerun; a burst of compile failures after one job ended is this, not the code"
+rerun = true
+
+[[rule]]
+id = "packages-not-built"
+cls = "setup-packages"
+pattern = '''Cannot find module|ERR_MODULE_NOT_FOUND|Failed to resolve (?:entry|import)|error TS2307'''
+absent = '''AssertionError|^\s*Tests\s(?:.*?\D)?[1-9]\d* failed'''
+remedy = "a fresh checkout without the workspace packages built (or a linked node_modules that is stale): build the packages first, then rerun; this is the order in the repository's preflight, not a defect of the lane"
+rerun = true
+
+[[rule]]
+id = "windows-linker"
+cls = "platform-windows"
+pattern = '''(?i)LINK : fatal error LNK\d+|linker `link\.exe` (?:failed|not found)|error: linking with `(?:link|cl)(?:\.exe)?` failed|link\.exe[^\n]*not found'''
+remedy = "a linker failure on Windows is the environment, not a test: use the MSVC wrapper shell, or run that step on Linux for the merge decision"
+rerun = true
+
+[[rule]]
+id = "generated-stale"
+cls = "generated-stale"
+pattern = '''(?i)\b(?:is|are)\s+(?:out of date|stale)\b[^\n]*\bregenerat|\bstale\b[^\n]*\bregenerat|regenerate (?:it|them|with|using)\b'''
+absent = '''AssertionError|^\s*Tests\s(?:.*?\D)?[1-9]\d* failed'''
+remedy = "a tracked generated file is stale (a fix moved lines): run the generators, commit the result by name on the batch, and prove again; `gatetrain generated` and the settle step catch this before the chain"
+rerun = true
+
+[[rule]]
+id = "browser-timeout"
+cls = "flake-load"
+pattern = '''(?i)Test timeout of \d+ ?m?s exceeded|\bTimeout \d+ ?m?s exceeded|page\.\w+: Timeout|TimeoutError: [^\n]*\d+ ?ms|waiting for (?:selector|locator)[^\n]*timeout'''
+absent = '''AssertionError|^\s*Tests\s(?:.*?\D)?[1-9]\d* failed'''
+when = "slow"
+remedy = "a browser-suite timeout with no failed assertion on a slow, loaded step: raise the suite timeout for the loaded host or reduce the step's parallel neighbours. Under a zero-red merge rule it still needs a full green rerun"
+rerun = true

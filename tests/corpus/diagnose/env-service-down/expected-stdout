@@ -1,0 +1,7 @@
+db-gate-001: infra-service (rc=1, 1 block(s))
+  [infra-service] Error: connect ECONNREFUSED 127.0.0.1:5432
+    evidence: Error: connect ECONNREFUSED 127.0.0.1:5432
+    remedy: a service the gate needs never came up (connection refused, daemon race, container start timeout): not a code defect. Check `gatetrain doctor`, wait for the service to be healthy, then rerun the step
+    full rerun needed: yes (no lane defect found; a green run under the zero-red merge rule is still required)
+1 red steps: 0 real step(s), 1 flake or infrastructure, 0 baseline
+1 blocks: 0 real, 1 flake or infrastructure, 0 baseline

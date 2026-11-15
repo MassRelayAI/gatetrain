@@ -24,7 +24,10 @@ class TestCorpus(unittest.TestCase):
     def test_rule_file_is_the_single_source(self):
         from gatetrain.diagnose import RULES, RULES_FILE, load_toml_rules
         self.assertEqual(RULES, load_toml_rules(RULES_FILE))
-        self.assertEqual([r["id"] for r in RULES][-1], "load-flake")
+        ids = [r["id"] for r in RULES]
+        self.assertIn("load-flake", ids)
+        # the seven environment classes (audit rows 41, 66, 68, 69, 70, 96, 106) sit behind the original eight
+        self.assertEqual(ids[8:], ["build-folder-missing", "service-never-came-up", "cache-server-died", "packages-not-built", "windows-linker", "generated-stale", "browser-timeout"])
 
     def test_shrink_wording_now_reach_gates(self):
         fs = diag(mklog(normal() + [("u", 100, 20, 1, ["FAIL  a > b", "AssertionError: these now reach gates - delete their FROZEN entries"])]))

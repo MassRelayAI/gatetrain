@@ -1,0 +1,7 @@
+cargo-003: platform-windows (rc=1, 1 block(s))
+  [platform-windows] error: linking with `link.exe` failed: exit code: 1181
+    evidence: error: linking with `link.exe` failed: exit code: 1181
+    remedy: a linker failure on Windows is the environment, not a test: use the MSVC wrapper shell, or run that step on Linux for the merge decision
+    full rerun needed: yes (no lane defect found; a green run under the zero-red merge rule is still required)
+1 red steps: 0 real step(s), 1 flake or infrastructure, 0 baseline
+1 blocks: 0 real, 1 flake or infrastructure, 0 baseline

@@ -466,12 +466,14 @@ mod tests {
     const SHRINK: [&str; 2] = ["FAIL  src/f.test.ts > frozen > only shrinks", "AssertionError: these routes now reach gates - delete their FROZEN entries: expected [ 'x' ] to deeply equal []"];
 
     #[test]
-    fn builtin_table_loads_eight_rules_in_order() {
+    fn builtin_table_loads_fifteen_rules_in_order() {
         let ids: Vec<&str> = builtin_rules().iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids[0], "out-of-memory", "the infra-memory row comes first, as the extra file used to be tried first");
         assert_eq!(ids[1], "port-collision");
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 15);
         assert_eq!(ids[7], "load-flake");
+        // the seven environment classes (audit rows 41, 66, 68, 69, 70, 96, 106) sit behind the original eight
+        assert_eq!(&ids[8..], ["build-folder-missing", "service-never-came-up", "cache-server-died", "packages-not-built", "windows-linker", "generated-stale", "browser-timeout"]);
     }
 
     #[test]
