@@ -223,6 +223,29 @@ class TestDoctorChecks(unittest.TestCase):
         h2 = host(worktrees=[{"name": "a", "build_dir": "/w/a/target"}, {"name": "b", "build_dir": "/w/b/target"}])
         self.assertEqual(status_of(check_shared_build(h2, FakeRunner())), ["PASS"])
 
+    def test_build_folders_must_resolve_to_a_directory(self):
+        from gatetrain.doctor import check_build_folders
+        wts = [{"name": "a", "build_dir": "/b/a"}, {"name": "b", "build_dir": "/b/b"}, {"name": "c", "build_dir": "/b/c"}]
+        h = host(worktrees=wts)
+        ok = check_build_folders(h, FakeRunner([("test -d", 0, "dir\n")]))
+        self.assertEqual(status_of(ok), ["PASS"])
+        bad = check_build_folders(h, FakeRunner([("/b/a", 0, "dir\n"), ("/b/b", 0, "dangling\n"), ("/b/c", 0, "missing\n")]))
+        self.assertEqual(status_of(bad), ["FAIL"])
+        self.assertIn("b: /b/b is dangling", bad[0].message)
+        self.assertIn("c: /b/c is missing", bad[0].message)
+        self.assertNotIn("a:", bad[0].message)
+        # a probe that could not run is never read as "fine"
+        self.assertEqual(status_of(check_build_folders(h, FakeRunner())), ["FAIL"])
+        self.assertIn("is unknown", check_build_folders(h, FakeRunner())[0].message)
+        self.assertEqual(check_build_folders(host(), FakeRunner()), [])
+
+    def test_build_folders_on_windows_use_a_trailing_separator(self):
+        from gatetrain.doctor import check_build_folders
+        h = host(os="windows", worktrees=[{"name": "a", "build_dir": "D:/b/x/"}])
+        r = FakeRunner([('if exist "D:\\b\\x\\" (echo dir)', 0, "dir\n")])
+        self.assertEqual(status_of(check_build_folders(h, r)), ["PASS"])
+        self.assertEqual(status_of(check_build_folders(h, FakeRunner([("if exist", 0, "missing\n")]))), ["FAIL"])
+
     def test_shared_build_output_through_a_link(self):
         from gatetrain.doctor import check_shared_build
         h = host(worktrees=[{"name": "a", "build_dir": "/w/a/target"}, {"name": "b", "build_dir": "/w/b/target"}])

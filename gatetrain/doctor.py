@@ -293,6 +293,27 @@ def check_shared_build(h, runner):
                    "point each worktree at its own build output folder")]
 
 
+def check_build_folders(h, runner):
+    """L68: a build folder that is a dangling link (or gone) kills every cargo step within seconds; each must resolve to a directory."""
+    if not h.worktrees:
+        return []
+    os_ = host_os(h)
+    bad = []
+    for w in h.worktrees:
+        if os_ == "windows":
+            rc, o = runner.run('if exist "' + w.build_dir.replace("/", "\\").rstrip("\\") + '\\" (echo dir) else (echo missing)')
+        else:
+            q = shlex.quote(w.build_dir)
+            rc, o = runner.run(f"test -d {q} && echo dir || {{ test -L {q} && echo dangling || echo missing; }}")
+        kind = o.strip().splitlines()[-1].strip() if rc == 0 and o.strip() else "unknown"
+        if kind != "dir":
+            bad.append(f"{w.name}: {w.build_dir} is {kind}")
+    if not bad:
+        return [Result(h.name, "build-folders", "PASS", ["L68"], f"{len(h.worktrees)} build folder(s), each resolves to a directory")]
+    return [Result(h.name, "build-folders", "FAIL", ["L68"], "; ".join(bad),
+                   "re-create the folder each build link points to (or fix the link) before any build step")]
+
+
 def check_lock(h, runner):
     if not h.lock_file:
         return []
@@ -358,7 +379,7 @@ def check_pollers(h, runner):
 
 
 CHECKS = [check_disks, check_capacity, check_containers, check_watchers, check_tools, check_ports, check_random_ports,
-          check_shared_build, check_lock, check_chain, check_cache, check_pollers]
+          check_shared_build, check_build_folders, check_lock, check_chain, check_cache, check_pollers]
 
 
 def run_checks(h, runner, needs: Needs = None) -> List[Result]:

@@ -23,6 +23,14 @@
   "powershell -NoProfile -Command \"Get-CimInstance Win32_Process | ForEach-Object { $_.ProcessId.ToString() + ' ' + $_.CommandLine }\"": [
    0,
    "10 node chain.js\n11 node other\n"
+  ],
+  "if exist \"D:\\B\\x\\\" (echo dir) else (echo missing)": [
+   0,
+   "dir\n"
+  ],
+  "if exist \"d:\\b\\x\\\" (echo dir) else (echo missing)": [
+   0,
+   "missing\n"
   ]
  },
  "boom": {

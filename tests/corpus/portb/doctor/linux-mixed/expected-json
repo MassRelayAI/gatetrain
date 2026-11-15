@@ -204,6 +204,16 @@
   },
   {
     "host": "builder-1",
+    "check": "build-folders",
+    "status": "FAIL",
+    "lessons": [
+      "L68"
+    ],
+    "message": "c: /b/y is dangling",
+    "fix": "re-create the folder each build link points to (or fix the link) before any build step"
+  },
+  {
+    "host": "builder-1",
     "check": "lock",
     "status": "FAIL",
     "lessons": [

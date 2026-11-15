@@ -93,6 +93,16 @@
   },
   {
     "host": "pc",
+    "check": "build-folders",
+    "status": "FAIL",
+    "lessons": [
+      "L68"
+    ],
+    "message": "b: d:/b/x/ is missing",
+    "fix": "re-create the folder each build link points to (or fix the link) before any build step"
+  },
+  {
+    "host": "pc",
     "check": "lock",
     "status": "WARN",
     "lessons": [

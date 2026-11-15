@@ -433,6 +433,32 @@ fn check_shared_build(h: &Host, runner: &dyn Runner, _n: &Needs) -> Out {
     Ok(vec![DResult::new(&h.name, "shared-build", "FAIL", &["L17"], msg, "point each worktree at its own build output folder")])
 }
 
+/// L68: a build folder that is a dangling link (or gone) kills every cargo step within seconds; each must resolve to a directory.
+fn check_build_folders(h: &Host, runner: &dyn Runner, _n: &Needs) -> Out {
+    if h.worktrees.is_empty() {
+        return Ok(vec![]);
+    }
+    let os = host_os(h);
+    let mut bad: Vec<String> = vec![];
+    for w in &h.worktrees {
+        let cmd = if os == "windows" {
+            format!("if exist \"{}\\\" (echo dir) else (echo missing)", w.build_dir.replace('/', "\\").trim_end_matches('\\'))
+        } else {
+            let q = shlex_quote(&w.build_dir);
+            format!("test -d {q} && echo dir || {{ test -L {q} && echo dangling || echo missing; }}")
+        };
+        let (rc, o) = runner.run(&cmd)?;
+        let kind = if rc == 0 && !o.trim().is_empty() { o.trim().lines().last().unwrap_or("").trim().to_string() } else { "unknown".to_string() };
+        if kind != "dir" {
+            bad.push(format!("{}: {} is {}", w.name, w.build_dir, kind));
+        }
+    }
+    if bad.is_empty() {
+        return Ok(vec![DResult::new(&h.name, "build-folders", "PASS", &["L68"], format!("{} build folder(s), each resolves to a directory", h.worktrees.len()), "")]);
+    }
+    Ok(vec![DResult::new(&h.name, "build-folders", "FAIL", &["L68"], bad.join("; "), "re-create the folder each build link points to (or fix the link) before any build step")])
+}
+
 fn check_lock(h: &Host, runner: &dyn Runner, _n: &Needs) -> Out {
     let Some(lock) = &h.lock_file else { return Ok(vec![]) };
     if win(h) {
@@ -526,6 +552,7 @@ pub const CHECKS: &[Check] = &[
     Check { name: "ports", run: check_ports },
     Check { name: "random_ports", run: check_random_ports },
     Check { name: "shared_build", run: check_shared_build },
+    Check { name: "build_folders", run: check_build_folders },
     Check { name: "lock", run: check_lock },
     Check { name: "chain", run: check_chain },
     Check { name: "cache", run: check_cache },

@@ -7,6 +7,7 @@ FAIL  L21      pc ports: port 51000 is inside the dynamic range 49152-65535  -> 
 FAIL  L21      pc ports: port 54000 is inside the dynamic range 49152-65535  -> fix: move port 54000 outside 49152-65535
 FAIL  L52      pc random-ports: C:\g\a.js:1 picks a random port in 55000-55799, which reaches the ephemeral range 49152-65535  -> fix: keep random port ranges below the ephemeral range, for example 20000-31999
 FAIL  L17      pc shared-build: a, b share d:/b/x  -> fix: point each worktree at its own build output folder
+FAIL  L68      pc build-folders: b: d:/b/x/ is missing  -> fix: re-create the folder each build link points to (or fix the link) before any build step
 WARN  L32      pc lock: skipped on windows: needs stat and date  -> fix: run this check on a host where it is supported
 WARN  L26      pc chain: a chain is running (pid 10): logs and light reads only  -> fix: wait for the chain to finish before heavy work on this host
 WARN  L25      pc pollers: skipped on windows: counts sshd sessions with ps  -> fix: run this check on a host where it is supported

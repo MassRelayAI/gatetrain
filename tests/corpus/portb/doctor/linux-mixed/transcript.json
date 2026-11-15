@@ -79,6 +79,18 @@
   "ps -eo args=": [
    0,
    "sshd: a@pts/0\nsshd: b@pts/1\nsshd: c@notty\nsshd: root [priv]\n"
+  ],
+  "test -d /b/x/ && echo dir || { test -L /b/x/ && echo dangling || echo missing; }": [
+   0,
+   "dir\n"
+  ],
+  "test -d /b/./x && echo dir || { test -L /b/./x && echo dangling || echo missing; }": [
+   0,
+   "dir\n"
+  ],
+  "test -d /b/y && echo dir || { test -L /b/y && echo dangling || echo missing; }": [
+   0,
+   "dangling\n"
   ]
  }
 }

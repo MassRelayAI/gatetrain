@@ -18,6 +18,7 @@ FAIL  L52      builder-1 random-ports: /g/a.sh:1 picks a random port in 50000-52
 PASS  L52      builder-1 random-ports: /g/b sh.sh:1 random range 20000-24999 stays clear of the ephemeral range
 PASS  L52      builder-1 random-ports: /g/b sh.sh:2 random range 30000-31999 stays clear of the ephemeral range
 FAIL  L17      builder-1 shared-build: a, b share /real/x  -> fix: point each worktree at its own build output folder
+FAIL  L68      builder-1 build-folders: c: /b/y is dangling  -> fix: re-create the folder each build link points to (or fix the link) before any build step
 FAIL  L32      builder-1 lock: /tmp/it's.lock: 27.5 h old with no released line (holder died?)  -> fix: find the holder, then remove the lock by hand after checking no chain is running
 WARN  L26      builder-1 chain: a chain is running (pid 77): logs and light reads only  -> fix: wait for the chain to finish before heavy work on this host
 FAIL  L20      builder-1 cache: cache server check failed (rc=1)  -> fix: restart the server with its own environment and no idle timeout
