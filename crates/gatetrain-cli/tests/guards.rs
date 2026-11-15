@@ -43,10 +43,15 @@ fn a_hold_without_a_step_list_is_admitted_on_its_own_recorded_chain_peak() {
     assert_eq!(o.status.code(), Some(76), "{}", out(&o));
     assert!(out(&o).contains("REFUSED-MEMORY") && !out(&o).contains("RAN"), "{}", out(&o));
     assert!(decisions(&d.path().join("gatetrain.db")).iter().any(|(k, _)| k == "host.refuse-memory"));
-    // with no history at all nothing is invented: the run is admitted
+    // with no history at all nothing is invented: step_default_gb is REQUIRED once memory is configured
     let d2 = tempfile::tempdir().unwrap();
     std::fs::write(d2.path().join("hosts.toml"), HOSTS).unwrap();
     let o = gt(d2.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--", python(), "-c", "print('RAN')"]);
+    assert_eq!(o.status.code(), Some(76), "{}", out(&o));
+    assert!(out(&o).contains("step_default_gb") && !out(&o).contains("RAN"), "{}", out(&o));
+    // with the default set, the unknown chain counts it and fits
+    std::fs::write(d2.path().join("hosts.toml"), format!("{HOSTS}step_default_gb = 4\n")).unwrap();
+    let o = gt(d2.path(), &["hold", "r2", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--", python(), "-c", "print('RAN')"]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     assert!(out(&o).contains("RAN"));
 }

@@ -677,3 +677,107 @@ fn health_that_stays_down_past_its_timeout_is_refused_once_and_a_late_recovery_s
     std::fs::write(fx.outside("ready"), "").unwrap();
     assert!(matches!(fx.adv_at("b1", &LATER).unwrap(), Outcome::Advanced { to, .. } if to == "live"));
 }
+
+
+// ============================================================ real seams, exit codes and generated-delta (audit items 2 and 4)
+
+struct Rule(&'static str);
+impl gatetrain_core::batch::Admission for Rule {
+    fn admit(&self, _: &str, _: &str) -> gatetrain_core::Result<Option<String>> {
+        Ok(Some("refused".into()))
+    }
+    fn admit_rule(&self, _: &str, _: &str) -> gatetrain_core::Result<Option<(String, String)>> {
+        Ok(Some((self.0.to_string(), "the host seam said no".into())))
+    }
+}
+
+#[test]
+fn an_admission_refusal_leaves_with_the_exit_code_of_the_hold_that_would_refuse() {
+    for (rule, code) in [("host.refuse", 75), ("host.refuse-memory", 76), ("host.refuse-disk", 77), ("host.refuse-cwd", 78), ("host.refuse-doctor", 79), ("host.admission", 3)] {
+        let mut fx = Fx::new("");
+        fx.open("b1");
+        fx.step("b1", "stacked");
+        fx.step("b1", "settled");
+        let deny = Rule(rule);
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &deny, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        let o = e.advance("b1").unwrap();
+        assert!(matches!(&o, Outcome::Refused { rule: r, .. } if r == rule), "{o:?}");
+        assert_eq!(o.exit_code(), code, "{rule}");
+        assert_eq!(fx.state("b1"), "settled");
+    }
+}
+
+fn status_fact(fx: &mut Fx, id: &str, path: &[&str]) -> serde_json::Value {
+    let adm = AllowAll;
+    let e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into(), crash_after_effect: None };
+    let mut v = e.status(id).unwrap()["facts"].clone();
+    for p in path {
+        v = v[*p].clone();
+    }
+    v
+}
+
+fn proven_with_chain_output(fx: &mut Fx, files: &[(&str, &str)]) -> String {
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    for (f, text) in files {
+        let p = fx.repo.join(f);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    g(&fx.repo, &["rev-parse", "batch/b1/s1"])
+}
+
+#[test]
+fn files_the_chain_produced_under_the_generated_dirs_are_committed_by_name_when_the_merge_re_settles_them() {
+    let mut fx = Fx::new("");
+    let tested = proven_with_chain_output(&mut fx, &[("gen/chain-made.txt", "made by the chain\n"), ("gen/deeper/also-new.txt", "x\n")]);
+    fx.step("b1", "proven");
+    let delta = status_fact(&mut fx, "b1", &["proof", "generated_delta"]);
+    assert_eq!(delta.as_array().unwrap().len(), 2, "{delta}");
+    fx.step("b1", "merged");
+    let main = g(&fx.repo, &["rev-parse", "main"]);
+    assert_ne!(main, tested, "the merge carries the commit of the generated files");
+    assert_eq!(g(&fx.repo, &["rev-parse", "main~1"]), tested, "and only that commit, on top of what was tested");
+    assert_eq!(g(&fx.repo, &["show", "main:gen/chain-made.txt"]), "made by the chain");
+    assert!(g(&fx.repo, &["log", "-1", "--format=%s"]).contains("generated-delta"));
+    assert_eq!(g(&fx.repo, &["status", "--porcelain"]), "", "nothing is left over");
+    assert_eq!(status_fact(&mut fx, "b1", &["merge_new"]).as_str().unwrap(), main, "deploy and health use the merged sha");
+}
+
+#[test]
+fn a_change_outside_the_generated_dirs_after_the_chain_refuses_the_proof_and_is_never_committed() {
+    let mut fx = Fx::new("");
+    proven_with_chain_output(&mut fx, &[("gen/fine.txt", "ok\n"), ("notes/stray.txt", "oops\n")]);
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "chain.tree-differs");
+    assert!(because.contains("notes/stray.txt") && !because.contains("gen/fine.txt"), "{because}");
+    assert_eq!(fx.state("b1"), "proving");
+    assert!(g(&fx.repo, &["ls-files", "notes"]).is_empty(), "never committed");
+}
+
+#[test]
+fn generated_files_that_the_generators_would_change_again_stop_the_merge() {
+    let mut fx = Fx::new("");
+    proven_with_chain_output(&mut fx, &[("gen/chain-made.txt", "made by the chain\n")]);
+    fx.step("b1", "proven");
+    fx.cfg.regen_command = vec!["sh".into(), "-c".into(), "mkdir -p gen && echo more >> gen/grow.txt".into()]; // never a fixpoint
+    let m = fx.failed_text("b1");
+    assert!(m.contains("not a fixpoint") && m.contains("gen/grow.txt"), "{m}");
+    assert_eq!(fx.state("b1"), "proven");
+    assert_ne!(g(&fx.repo, &["rev-parse", "main"]), g(&fx.repo, &["rev-parse", "HEAD"]), "main did not move");
+}
+
+#[test]
+fn a_crash_after_the_merge_with_generated_files_resumes_as_done_with_the_merged_sha() {
+    let mut fx = Fx::new("");
+    proven_with_chain_output(&mut fx, &[("gen/chain-made.txt", "made by the chain\n")]);
+    fx.step("b1", "proven");
+    fx.crash = Some("T7".into());
+    assert!(fx.adv("b1").is_err());
+    fx.crash = None;
+    fx.step("b1", "merged");
+    let main = g(&fx.repo, &["rev-parse", "main"]);
+    assert_eq!(status_fact(&mut fx, "b1", &["merge_new"]).as_str().unwrap(), main);
+    assert_eq!(g(&fx.repo, &["show", "main:gen/chain-made.txt"]), "made by the chain");
+}

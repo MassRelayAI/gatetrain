@@ -44,10 +44,17 @@ pub trait HostLock {
 pub trait Admission {
     /// `None` admits; `Some(reason)` refuses with that reason.
     fn admit(&self, role: &str, batch: &str) -> Result<Option<String>>;
+    /// The same decision with the rule that refused: `host.refuse` (lock busy, exit 75), `host.refuse-memory` (76), `host.refuse-disk` (77),
+    /// `host.refuse-cwd` (78), `host.refuse-doctor` (79), else `host.admission`. These are the exit codes of `gatetrain hold`.
+    fn admit_rule(&self, role: &str, batch: &str) -> Result<Option<(String, String)>> {
+        Ok(self.admit(role, batch)?.map(|why| ("host.admission".to_string(), why)))
+    }
 }
 
-/// Admits everything (until rs2 lands, and in tests that do not exercise admission).
+/// Admits everything: a test double, compiled only for tests (feature `test-fakes`); the engine of the binary is given the real seams.
+#[cfg(any(test, feature = "test-fakes"))]
 pub struct AllowAll;
+#[cfg(any(test, feature = "test-fakes"))]
 impl Admission for AllowAll {
     fn admit(&self, _: &str, _: &str) -> Result<Option<String>> {
         Ok(None)
@@ -55,11 +62,13 @@ impl Admission for AllowAll {
 }
 
 /// A fake lock for tests: records launches; `named` is the set of run ids a live lock names.
+#[cfg(any(test, feature = "test-fakes"))]
 #[derive(Default)]
 pub struct FakeLock {
     pub named: Mutex<HashSet<String>>,
     pub launches: Mutex<Vec<LaunchRequest>>,
 }
+#[cfg(any(test, feature = "test-fakes"))]
 impl HostLock for FakeLock {
     fn names_run(&self, run_id: &str) -> Result<bool> {
         Ok(self.named.lock().unwrap().contains(run_id))
@@ -72,7 +81,9 @@ impl HostLock for FakeLock {
 }
 
 /// Fake admission: refuses one role with a reason.
+#[cfg(any(test, feature = "test-fakes"))]
 pub struct DenyRole(pub &'static str, pub &'static str);
+#[cfg(any(test, feature = "test-fakes"))]
 impl Admission for DenyRole {
     fn admit(&self, role: &str, _: &str) -> Result<Option<String>> {
         Ok(if role == self.0 { Some(self.1.to_string()) } else { None })
@@ -167,10 +178,18 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// 0 advanced or nothing to do, 1 failed, 3 refused by a rule (design 6.7).
+    /// 0 advanced or nothing to do, 1 failed, 3 refused by a rule (design 6.7); a refusal by the host seams uses the exit codes of
+    /// `gatetrain hold`: 75 lock busy, 76 memory, 77 disk, 78 working directory, 79 doctor.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Outcome::Refused { .. } => 3,
+            Outcome::Refused { rule, .. } => match rule.as_str() {
+                "host.refuse" => 75,
+                "host.refuse-memory" => 76,
+                "host.refuse-disk" => 77,
+                "host.refuse-cwd" => 78,
+                "host.refuse-doctor" => 79,
+                _ => 3,
+            },
             Outcome::Failed(_) => 1,
             _ => 0,
         }
@@ -686,7 +705,10 @@ impl<'a> Engine<'a> {
     fn resume(&mut self, id: &str, f: &Folded, p: Ev) -> Result<Outcome> {
         let plan = Plan { tr: p.transition.clone(), to: to_state(&p.transition).into(), input_sha: p.input_sha.clone(), run_id: p.run_id.clone(), attempt: p.attempt, detail: p.detail.clone() };
         match self.probe(f, &plan)? {
-            Probe::Happened(out) => self.finish(id, &plan, out, json!({"resumed": "happened"}), " (resumed: the probe found the effect done)"),
+            Probe::Happened(out) => {
+                let extra = if plan.tr == "T7" { json!({"resumed": "happened", "merge_new": out}) } else { json!({"resumed": "happened"}) };
+                self.finish(id, &plan, out, extra, " (resumed: the probe found the effect done)")
+            }
             Probe::NotHappened => self.execute(id, f, plan),
             Probe::Partly => {
                 // Finish forward under a new attempt; the partial result is kept, never deleted.
@@ -757,6 +779,8 @@ impl<'a> Engine<'a> {
                 let cur = git(&wd, &["rev-parse", &format!("refs/heads/{}", self.cfg.protected)])?;
                 if cur == new {
                     Probe::Happened(Some(new.into()))
+                } else if git_raw(&wd, &["merge-base", "--is-ancestor", new, &cur])?.0 && !git(&wd, &["diff", "--name-only", new, &cur])?.lines().any(|p| !in_dirs(p, &self.cfg.generated_dirs)) {
+                    Probe::Happened(Some(cur)) // the merge also carried the commit of the files the chain produced
                 } else {
                     Probe::NotHappened
                 }
@@ -811,8 +835,8 @@ impl<'a> Engine<'a> {
                 if self.cfg.preflight_command.is_empty() {
                     return Ok(Planned::Refuse("config.preflight-command".into(), "gatetrain.toml has no [preflight] command".into()));
                 }
-                if let Some(why) = self.adm.admit("light", id)? {
-                    return Ok(Planned::Refuse("host.admission".into(), why));
+                if let Some((rule, why)) = self.adm.admit_rule("light", id)? {
+                    return Ok(Planned::Refuse(rule, why));
                 }
                 let tip = self.tip(f)?;
                 if let Some(st) = f.s("settled_tip").filter(|st| *st != tip) {
@@ -836,8 +860,8 @@ impl<'a> Engine<'a> {
                 if self.cfg.chain_command.is_empty() {
                     return Ok(Planned::Refuse("config.chain-command".into(), "gatetrain.toml has no [chain] command".into()));
                 }
-                if let Some(why) = self.adm.admit("proof", id)? {
-                    return Ok(Planned::Refuse("host.admission".into(), why));
+                if let Some((rule, why)) = self.adm.admit_rule("proof", id)? {
+                    return Ok(Planned::Refuse(rule, why));
                 }
                 let run = format!("{id}-p{attempt}");
                 let log = self.state_dir.join("logs").join(format!("{run}.log"));
@@ -879,7 +903,7 @@ impl<'a> Engine<'a> {
                     // floor.production-human: recorded, never deployed by the engine
                     self.decide("refusal", id, Some(n.clone()), "floor.production-human", "refused", format!("target {n} is production and needs a human; skipped"), None)?;
                 }
-                Ok(mk(Some(f.need("merge_new")?), None, json!({"targets": auto, "skipped_production": prod})))
+                Ok(mk(Some(f.s("output_sha").map_or_else(|| f.need("merge_new"), Ok)?), None, json!({"targets": auto, "skipped_production": prod})))
             }
             _ => Err(Error::Batch(format!("no plan for {tr}"))),
         }
@@ -1024,8 +1048,43 @@ impl<'a> Engine<'a> {
                 Ok(Ok(Done { output: None, extra: json!({}) }))
             }
             "T7" => {
-                let new = plan.detail["merge_new"].as_str().unwrap_or_default();
+                let tested = plan.detail["merge_new"].as_str().unwrap_or_default().to_string();
                 let old = plan.detail["merge_old"].as_str().unwrap_or_default();
+                // generated-delta: files the chain itself produced are committed BY NAME (never `add -A`), the generators run again and must
+                // change nothing, and only generated files may differ from what was tested
+                let dirty = dirty_paths(&wd)?;
+                if !dirty.is_empty() {
+                    let stray: Vec<&String> = dirty.iter().filter(|p| !in_dirs(p, &self.cfg.generated_dirs)).collect();
+                    if !stray.is_empty() {
+                        return Ok(Err(format!("chain.tree-differs: the tree holds changes outside the generated directories: {}", stray.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))));
+                    }
+                    let mut args = vec!["add", "--"];
+                    args.extend(dirty.iter().map(String::as_str));
+                    git(&wd, &args)?;
+                    git(&wd, &["commit", "-q", "-m", &format!("chore(batch): commit the generated files the chain produced for {id} (generated-delta)")])?;
+                    if !self.cfg.regen_command.is_empty() {
+                        let env = self.env(id, f, &tested, "", "");
+                        let (rc, err) = run_plugin(&self.cfg.regen_command, &wd, &env)?;
+                        if rc != 0 {
+                            return Ok(Err(format!("regen command exited {rc} while re-settling the chain's generated files: {err}")));
+                        }
+                        let again = dirty_paths(&wd)?;
+                        if !again.is_empty() {
+                            return Ok(Err(format!("the generated files are not a fixpoint after the chain (the generators changed: {})", again.join(", "))));
+                        }
+                    }
+                }
+                let head = git(&wd, &["rev-parse", "HEAD"])?;
+                let mut final_new = tested.clone();
+                if head != tested {
+                    let names = git(&wd, &["diff", "--name-only", &tested, &head])?;
+                    let bad: Vec<&str> = names.lines().filter(|p| !in_dirs(p, &self.cfg.generated_dirs)).collect();
+                    if !bad.is_empty() {
+                        return Ok(Err(format!("chain.tree-differs: the merge would carry changes beyond the generated files that were tested against: {}", bad.join(", "))));
+                    }
+                    final_new = head;
+                }
+                let new: &str = &final_new;
                 if let Some(c) = plan.detail["checkout"].as_str() {
                     // the branch is checked out in `c`: a fast-forward there moves the ref and the working tree together
                     let (ok, _, err) = git_raw(Path::new(c), &["merge", "--ff-only", new])?;
@@ -1043,7 +1102,7 @@ impl<'a> Engine<'a> {
                         return Ok(Err(format!("compare-and-swap of {} failed: {}", self.cfg.protected, err.trim())));
                     }
                 }
-                Ok(Ok(Done { output: Some(new.into()), extra: json!({}) }))
+                Ok(Ok(Done { output: Some(new.into()), extra: json!({"merge_new": new}) }))
             }
             "T8a" => {
                 let sha = plan.input_sha.clone().unwrap_or_default();
@@ -1114,6 +1173,14 @@ impl<'a> Engine<'a> {
         if logged.len() < 7 || !tested.starts_with(&logged) {
             return self.refuse(id, "floor.proven-sha", format!("the log ran commit {logged:?}, the recorded tested sha is {}", short(&tested)));
         }
+        // the tree after the chain: only generated files may differ from the settled tip (generated-delta); anything else means the tested
+        // tree is not the tip that would be merged
+        let dirty = dirty_paths(Path::new(&f.need("workdir")?))?;
+        let (generated, stray): (Vec<String>, Vec<String>) = dirty.into_iter().partition(|p| in_dirs(p, &self.cfg.generated_dirs));
+        if !stray.is_empty() {
+            let shown: Vec<&str> = stray.iter().take(5).map(String::as_str).collect();
+            return self.refuse(id, "chain.tree-differs", format!("after the chain the tree holds changes outside the generated directories ({}), so the tested tree is not the settled tip {}", shown.join(", "), short(&tested)));
+        }
         let cached: Vec<&str> = p.steps.iter().filter(|s| s.cached).map(|s| s.name.as_str()).collect();
         if !cached.is_empty() {
             // a cached step counts only when its entry is verified for this sha on this host (another host's cache is not this host's)
@@ -1130,7 +1197,7 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        let detail = json!({"proof": {"run_ids": [run.clone()], "tested_sha": tested.clone(), "cached_steps": cached, "steps": p.steps.len()}});
+        let detail = json!({"proof": {"run_ids": [run.clone()], "tested_sha": tested.clone(), "cached_steps": cached, "steps": p.steps.len(), "generated_delta": generated}});
         self.plain(id, f, "T5", "proven", Some(tested), Some(run), detail, "allowed", "GATES_DONE, full mode, zero red, log commit equals the tested sha".into())
     }
 

@@ -16,5 +16,10 @@ thiserror.workspace = true    # typed errors
 chrono.workspace = true       # local time stamps (tidy log, trash names)
 toml.workspace = true         # hosts.toml capacity, the shared rule table, gatetrain.toml plugin sections
 
+[features]
+# The fakes of the batch engine (FakeLock, AllowAll, DenyRole). Off in the binary; on for this crate's own tests below.
+test-fakes = []
+
 [dev-dependencies]
 tempfile.workspace = true     # throwaway ledgers
+gatetrain-core = { path = ".", features = ["test-fakes"] }   # the integration tests use the fakes

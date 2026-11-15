@@ -47,6 +47,12 @@ pub struct BatchConfig {
     /// `[postmerge] command`: after the merge, in `dir` (default: the batch checkout), before the deploy targets.
     pub postmerge_command: Vec<String>,
     pub postmerge_dir: Option<String>,
+    /// `[chain] target_dirs`: the build folders the chain writes to (the disk budget is checked against them before a run).
+    pub chain_target_dirs: Vec<String>,
+    /// `[chain] repo_root`: the repository top level the chain must run in (refused, exit 78, when it is not one).
+    pub chain_repo_root: Option<String>,
+    /// `[batch] doctor` (default true): the host must pass `doctor` before a preflight or a chain starts when `--hosts` is given.
+    pub doctor: bool,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -66,6 +72,9 @@ impl Default for BatchConfig {
             cache_verify_command: vec![],
             postmerge_command: vec![],
             postmerge_dir: None,
+            chain_target_dirs: vec![],
+            chain_repo_root: None,
+            doctor: true,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -105,6 +114,11 @@ impl BatchConfig {
             }
         }
         c.cache_verify_command = argv(v.get("chain").and_then(|p| p.get("cache_verify_command")));
+        c.chain_target_dirs = argv(v.get("chain").and_then(|p| p.get("target_dirs")));
+        c.chain_repo_root = v.get("chain").and_then(|p| p.get("repo_root")).and_then(|r| r.as_str()).map(String::from);
+        if let Some(d) = v.get("batch").and_then(|b| b.get("doctor")).and_then(|d| d.as_bool()) {
+            c.doctor = d;
+        }
         if let Some(p) = v.get("postmerge") {
             c.postmerge_command = argv(p.get("command"));
             c.postmerge_dir = p.get("dir").and_then(|d| d.as_str()).map(String::from);

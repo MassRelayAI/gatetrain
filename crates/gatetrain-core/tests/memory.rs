@@ -32,7 +32,7 @@ fn model() -> MemoryModel {
 #[test]
 fn a_31_gb_host_with_a_12_gb_reserve_refuses_a_40_gb_chain_and_admits_the_cheap_set() {
     let m = model();
-    assert_eq!(m.available_gb(), 19.0);
+    assert_eq!(m.available_gb(), Some(19.0));
     let all: Vec<String> = hist().keys().cloned().collect();
     let a = admit(&m, &all, &hist());
     assert!(!a.admitted);
@@ -75,7 +75,7 @@ fn a_wsl_vm_cap_lowers_the_total() {
     assert_eq!(wslconfig_memory_gb("[wsl2]\nmemory = 8192MB\n"), Some(8.0));
     assert_eq!(wslconfig_memory_gb("[wsl2]\nprocessors=8\n"), None);
     let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"w\"\nmemory_gb = 31\nwsl_memory_gb = 20\nmemory_reserve_gb = 4\n", "w").unwrap();
-    assert_eq!(m.available_gb(), 16.0);
+    assert_eq!(m.available_gb(), Some(16.0));
 }
 
 #[test]
@@ -90,4 +90,36 @@ fn step_peaks_are_stored_append_only_and_typical_memory_is_a_median() {
     assert_eq!(typical_mb(&h["test-api"]), 2000.0);
     assert!(l.conn.execute("UPDATE step_memory SET peak_mb = 1", []).is_err(), "append-only");
     assert!(l.conn.execute("DELETE FROM step_memory", []).is_err(), "append-only");
+}
+
+
+#[test]
+fn unknown_total_memory_is_not_unlimited_memory() {
+    let m = MemoryModel { configured: true, total_gb: None, vm_cap_gb: None, reserve_gb: 2.0, per_step_gb: Some(4.0), per_cargo_job_gb: None, step_default_gb: Some(1.0) };
+    assert_eq!(m.available_gb(), None);
+    let a = admit(&m, &["lint".to_string()], &HashMap::new());
+    assert!(!a.admitted && a.rule.contains("unknown"), "{}", a.rule);
+    assert!(cheap_set(&m, &["lint".to_string()], &HashMap::new()).is_empty());
+    assert_eq!(parallelism(&m, 6).memory_based, None, "no memory number is invented for the parallelism either");
+}
+
+#[test]
+fn a_step_with_no_history_needs_step_default_gb_in_the_config() {
+    let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\nmemory_gb = 16\nmemory_reserve_gb = 2\n", "x").unwrap();
+    let a = admit(&m, &["brand-new".to_string(), "lint".to_string()], &hist());
+    assert!(!a.admitted && a.rule.contains("step_default_gb") && a.rule.contains("brand-new"), "{}", a.rule);
+    // with history for every step it is admitted without a default
+    assert!(admit(&m, &["lint".to_string()], &hist()).admitted);
+    // and with the default set the unknown step counts it
+    let m2 = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\nmemory_gb = 16\nmemory_reserve_gb = 2\nstep_default_gb = 3\n", "x").unwrap();
+    let a = admit(&m2, &["brand-new".to_string()], &HashMap::new());
+    assert!(a.admitted && a.predicted_gb == 3.0, "{}", a.rule);
+}
+
+#[test]
+fn a_host_with_no_memory_keys_is_not_checked_at_all() {
+    let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\ncores = 8\n", "x").unwrap();
+    assert!(!m.configured);
+    let a = admit(&m, &["anything".to_string()], &HashMap::new());
+    assert!(a.admitted && a.rule.contains("not checked"), "{}", a.rule);
 }

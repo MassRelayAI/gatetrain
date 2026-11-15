@@ -11,6 +11,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryModel {
+    /// True when `hosts.toml` sets any memory key for the host; with none, memory is simply not checked (nothing is invented).
+    pub configured: bool,
     /// Total memory of the machine or VM; `None` when it was neither configured nor detectable.
     pub total_gb: Option<f64>,
     /// A WSL VM cap (`.wslconfig` memory or `wsl_memory_gb`), when the host is a WSL guest.
@@ -31,8 +33,10 @@ impl MemoryModel {
             .ok_or_else(|| Error::Canon(format!("hosts.toml: no host named {host:?}")))?;
         let f = |k: &str| h.get(k).and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64)));
         let wsl = h.get("wsl").and_then(|x| x.as_bool()).unwrap_or(false);
+        let configured = ["memory_gb", "memory_reserve_gb", "wsl_memory_gb", "memory_per_step_gb", "memory_per_cargo_job_gb", "step_default_gb"].iter().any(|k| h.get(*k).is_some());
         let vm_cap_gb = f("wsl_memory_gb").or_else(|| if wsl { wslconfig_from_home() } else { None });
         Ok(MemoryModel {
+            configured,
             total_gb: f("memory_gb").or_else(detect_total_gb),
             vm_cap_gb,
             reserve_gb: f("memory_reserve_gb").unwrap_or(0.0),
@@ -42,15 +46,16 @@ impl MemoryModel {
         })
     }
 
-    /// `min(total, vm cap) - reserve`, never below 0; infinite when the total is unknown (no limit invented).
-    pub fn available_gb(&self) -> f64 {
+    /// `min(total, vm cap) - reserve`, never below 0. `None` when the total is neither configured nor detectable: unknown memory is
+    /// NOT unlimited memory (admission refuses, parallelism is not lowered by a number nobody has).
+    pub fn available_gb(&self) -> Option<f64> {
         let total = match (self.total_gb, self.vm_cap_gb) {
             (Some(t), Some(c)) => t.min(c),
             (Some(t), None) => t,
             (None, Some(c)) => c,
-            (None, None) => return f64::INFINITY,
+            (None, None) => return None,
         };
-        (total - self.reserve_gb).max(0.0)
+        Some((total - self.reserve_gb).max(0.0))
     }
 }
 
@@ -84,6 +89,9 @@ fn predict_gb(m: &MemoryModel, step: &str, hist: &HashMap<String, Vec<f64>>) -> 
 }
 
 pub fn admit(m: &MemoryModel, steps: &[String], hist: &HashMap<String, Vec<f64>>) -> Admission {
+    if !m.configured {
+        return Admission { admitted: true, predicted_gb: 0.0, available_gb: 0.0, unpredicted: vec![], rule: "no memory settings for this host in hosts.toml: memory is not checked".into() };
+    }
     let mut sum = 0.0;
     let mut unpredicted = Vec::new();
     for s in steps {
@@ -93,7 +101,24 @@ pub fn admit(m: &MemoryModel, steps: &[String], hist: &HashMap<String, Vec<f64>>
             unpredicted.push(s.clone());
         }
     }
-    let avail = m.available_gb();
+    let Some(avail) = m.available_gb() else {
+        return Admission {
+            admitted: false,
+            predicted_gb: sum,
+            available_gb: 0.0,
+            unpredicted,
+            rule: "REFUSED: the total memory of this host is unknown (memory_gb is not set in hosts.toml and could not be detected); unknown memory is not unlimited memory".into(),
+        };
+    };
+    if !unpredicted.is_empty() && m.step_default_gb.is_none() {
+        return Admission {
+            admitted: false,
+            predicted_gb: sum,
+            available_gb: avail,
+            rule: format!("REFUSED: {} step(s) have no recorded peak ({}) and step_default_gb is not set in hosts.toml; set it (it is required once memory is configured)", unpredicted.len(), unpredicted.join(", ")),
+            unpredicted,
+        };
+    }
     let admitted = sum <= avail;
     let total = m.total_gb.map_or("unknown".to_string(), |t| format!("{t:.1}"));
     let rule = format!(
@@ -112,8 +137,9 @@ pub fn cheap_set(m: &MemoryModel, steps: &[String], hist: &HashMap<String, Vec<f
     let mut v: Vec<(f64, &String)> = steps.iter().map(|s| (predict_gb(m, s, hist).0, s)).collect();
     v.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(b.1)));
     let (mut sum, mut out) = (0.0, Vec::new());
+    let avail = m.available_gb().unwrap_or(0.0);
     for (g, s) in v {
-        if sum + g > m.available_gb() {
+        if sum + g > avail {
             break;
         }
         sum += g;
@@ -134,7 +160,7 @@ pub struct Parallelism {
 
 pub fn parallelism(m: &MemoryModel, core_based: u64) -> Parallelism {
     let avail = m.available_gb();
-    let by = |per: Option<f64>| per.filter(|p| *p > 0.0 && avail.is_finite()).map(|p| ((avail / p).floor() as u64).max(1));
+    let by = |per: Option<f64>| per.filter(|p| *p > 0.0).zip(avail).map(|(p, a)| ((a / p).floor() as u64).max(1));
     let memory_based = by(m.per_step_gb);
     Parallelism { core_based, memory_based, parallel: memory_based.map_or(core_based, |x| x.min(core_based)).max(1), cargo_jobs: by(m.per_cargo_job_gb) }
 }

@@ -39,27 +39,6 @@ pub struct HoldArgs {
     pub cmd: Vec<String>,
 }
 
-/// `None` when `root` is the top level of a git repository, else why not.
-fn repo_root_problem(root: &Path) -> Option<String> {
-    if !root.is_dir() {
-        return Some(format!("{} is not a folder", root.display()));
-    }
-    let top = match Command::new("git").arg("-C").arg(root).args(["rev-parse", "--show-toplevel"]).output() {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        Ok(_) => return Some(format!("{} is not inside a git repository", root.display())),
-        Err(e) => return Some(format!("git could not be run to check {}: {e}", root.display())),
-    };
-    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    };
-    if same(root, Path::new(&top)) {
-        None
-    } else {
-        Some(format!("{} is inside the repository {top} but is not its top level", root.display()))
-    }
-}
-
 fn resolve(lock: &Option<PathBuf>, hosts: &Option<PathBuf>, host: &Option<String>) -> Result<(PathBuf, Option<hold::HostCapacity>)> {
     let cap = match (hosts, host) {
         (Some(h), Some(n)) => {
@@ -156,7 +135,7 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
     }
     if let Some(root) = &a.repo_root {
         // the chain runs where it was told to, or not at all (a build that fell back to the wrong folder filled a disk once, L70)
-        if let Some(why) = repo_root_problem(root) {
+        if let Some(why) = gatetrain_core::hostlock::repo_root_problem(root) {
             let ev = json!({"repo_root": root.display().to_string(), "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(), "rule": "the working directory must be the top level of the expected repository"});
             append(&a.db, &entry("host.refuse-cwd", &run_id, "refused", why.clone(), ev))?;
             say(&a.log, &format!("REFUSED-CWD {run_id} {why}"))?;

@@ -429,7 +429,10 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
     };
     let exe = std::env::current_exe().context("locating the gatetrain binary")?.to_string_lossy().into_owned();
     let real = RealLock { lock: lock_path.clone(), db: db.to_path_buf(), hosts: hosts.clone(), holder: vec![exe, "hold".into()] };
-    let adm = MemoryAdmission { lock: lock_path, db: db.to_path_buf(), hosts, chain_steps: cfg.chain_steps.clone() };
+    let mut adm = MemoryAdmission::new(lock_path, db.to_path_buf(), hosts.clone(), cfg.chain_steps.clone());
+    adm.target_dirs = cfg.chain_target_dirs.iter().map(PathBuf::from).collect();
+    adm.repo_root = cfg.chain_repo_root.as_ref().map(PathBuf::from);
+    adm.doctor = cfg.doctor && hosts.is_some();
     let actor = std::env::var("GATETRAIN_ACTOR").unwrap_or_else(|_| "engine".into());
     let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor, crash_after_effect: None };
     let report = |o: Outcome| -> ExitCode {

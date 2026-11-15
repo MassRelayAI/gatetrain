@@ -70,7 +70,7 @@ fn launch_starts_the_real_holder_which_holds_runs_the_chain_and_releases() {
 #[test]
 fn admission_refuses_proof_on_a_held_lock_and_light_still_passes() {
     let d = tempfile::tempdir().unwrap();
-    let a = MemoryAdmission { lock: d.path().join("host.lock"), db: d.path().join("g.db"), hosts: None, chain_steps: vec![] };
+    let a = MemoryAdmission::new(d.path().join("host.lock"), d.path().join("g.db"), None, vec![]);
     assert_eq!(a.admit("proof", "b").unwrap(), None);
     let Acquire::Got(held) = hold::try_acquire(&a.lock, "other").unwrap() else { panic!() };
     let why = a.admit("proof", "b").unwrap().expect("refused");
@@ -84,7 +84,7 @@ fn admission_applies_the_memory_rule_to_the_chain_steps() {
     let d = tempfile::tempdir().unwrap();
     let hosts = d.path().join("hosts.toml");
     std::fs::write(&hosts, "[[hosts]]\nname = \"host-a\"\nmemory_gb = 8\nmemory_reserve_gb = 2\nstep_default_gb = 4\n").unwrap();
-    let mk = |steps: &[&str]| MemoryAdmission { lock: d.path().join("host.lock"), db: d.path().join("g.db"), hosts: Some((hosts.clone(), "host-a".into())), chain_steps: steps.iter().map(|s| s.to_string()).collect() };
+    let mk = |steps: &[&str]| MemoryAdmission::new(d.path().join("host.lock"), d.path().join("g.db"), Some((hosts.clone(), "host-a".into())), steps.iter().map(|s| s.to_string()).collect());
     assert_eq!(mk(&["lint"]).admit("proof", "b").unwrap(), None, "4 GB fits in 6 GB");
     let why = mk(&["lint", "test"]).admit("proof", "b").unwrap().expect("8 GB does not fit in 6 GB");
     assert!(why.contains("REFUSED"), "{why}");
