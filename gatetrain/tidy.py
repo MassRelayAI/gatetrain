@@ -27,6 +27,7 @@ SAFE_BRANCH = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")          # anything
 SAFE_CONTAINER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 SAFE_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$")
 WIN_BAD = set('"%^!&|<>') | {chr(c) for c in range(0x2018, 0x2020)}                                              # never interpolated into a Windows command line
+RESOLVE_SH = 'p="$1"; rest=""; while [ -n "$p" ] && [ "$p" != "/" ] && [ ! -d "$p" ]; do rest="/${p##*/}$rest"; p="${p%/*}"; [ -z "$p" ] && p="/"; done; d=$(cd -- "$p" 2>/dev/null && pwd -P) || exit 1; out="${d%/}$rest"; printf \'%s\n\' "${out:-/}"'
 STAMP = re.compile(r"-(\d{14})$")                                      # the timestamp `move` puts in a recycle-bin name
 
 
@@ -272,6 +273,8 @@ class Ops:
                 rc, out = self.run_argv(["python", "-c", "import os,sys;print(os.path.realpath(sys.argv[1]))", p])
             else:
                 rc, out = self.run_argv(["realpath", "-m", "--", p])
+                if rc != 0:                      # BSD/macOS realpath has no -m: resolve the nearest existing folder with the shell instead
+                    rc, out = self.run_argv(["sh", "-c", RESOLVE_SH, "sh", p])
             o = out.strip()
             cache[p] = norm(o) if rc == 0 and o and "\n" not in o else None
         return cache[p]

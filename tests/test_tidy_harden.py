@@ -606,6 +606,24 @@ class RealFindShapeTests(Base):
             print("REAL-DISK listdir/gather ok:", len(inv.targets), "targets,", len(inv.trash), "trash entries")
 
 
+class ResolveShTests(Base):
+    """macOS/BSD `realpath` has no -m: the shell fallback must resolve links like `realpath -m` does."""
+
+    @unittest.skipIf(os.name == "nt", "needs a POSIX sh")
+    def test_fallback_resolves_links_and_missing_tails(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = os.path.realpath(d)
+            os.makedirs(os.path.join(real, "a", "b"))
+            os.symlink(os.path.join(real, "a"), os.path.join(real, "lnk"))
+            for p, want in ((os.path.join(real, "lnk", "b"), os.path.join(real, "a", "b")),
+                            (os.path.join(real, "lnk", "nope", "x"), os.path.join(real, "a", "nope", "x")),
+                            (os.path.join(real, "a", "b") + "/", os.path.join(real, "a", "b"))):
+                r = subprocess.run(["sh", "-c", T.RESOLVE_SH, "sh", p], capture_output=True, text=True)
+                self.assertEqual((r.returncode, r.stdout.strip()), (0, want), p)
+            r = subprocess.run(["sh", "-c", T.RESOLVE_SH, "sh", "/"], capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), "/")
+
+
 class PowershellQuoteTests(Base):
     def test_typographic_quotes_are_refused(self):
         sim = winsim()

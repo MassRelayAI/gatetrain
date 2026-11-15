@@ -60,6 +60,8 @@ pub struct TidyCfg {
     pub link_canary_count: Option<i64>,
     /// a size probe slower than this is unknown, never a crash
     pub size_timeout_s: f64,
+    /// a removal, move or cargo clean gets this long before it is "stopped"
+    pub remove_timeout_s: f64,
 }
 
 impl Default for TidyCfg {
@@ -88,13 +90,14 @@ impl Default for TidyCfg {
             link_canary: None,
             link_canary_count: None,
             size_timeout_s: 30.0,
+            remove_timeout_s: 1800.0,
         }
     }
 }
 
-const KNOWN: [&str; 23] = [
+const KNOWN: [&str; 24] = [
     "cache_days", "container_prefix", "evidence_dirs", "image_patterns", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
-    "link_canary_count", "log", "main_branch", "main_checkout", "min_idle_min", "orphan_targets", "root_checkout", "scratch_dir",
+    "link_canary_count", "log", "main_branch", "main_checkout", "min_idle_min", "orphan_targets", "remove_timeout_s", "root_checkout", "scratch_dir",
     "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_prefix",
 ];
 
@@ -163,6 +166,7 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             "trash_days" => t.trash_days = number(k, v)?,
             "cache_days" => t.cache_days = number(k, v)?,
             "size_timeout_s" => t.size_timeout_s = number(k, v)?,
+            "remove_timeout_s" => t.remove_timeout_s = number(k, v)?,
             "link_canary_count" => match v {
                 Value::Integer(i) => t.link_canary_count = Some(*i),
                 other => return err(format!("tidy.link_canary_count: must be an integer, got {}", repr(other))),
@@ -198,8 +202,49 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             return err(format!("tidy.unattended: unknown class {}; allowed {}", repr_str(c), repr_list(&CLASSES)));
         }
     }
+    if !super::ops::safe_branch(&t.main_branch) {
+        return err(format!("tidy.main_branch: {} is not a plain branch name", repr_str(&t.main_branch)));
+    }
+    if !d.is_empty() && crate::config::host_os(host) == "windows" && (t.link_canary.is_none() || t.link_canary_count.is_none()) {
+        return err("tidy: a Windows host needs link_canary (a folder with known links) and link_canary_count".into());
+    }
+    if t.trash_dir.is_some() {
+        check_trash_dir(&t)?;
+    }
     if t.container_prefix.is_none() {
         t.container_prefix = host.container_prefix.clone();
     }
     Ok(t)
+}
+
+/// A recycle bin that is a root, a drive, or that holds or sits inside anything we keep would let `remove` delete what it must not.
+pub fn check_trash_dir(t: &TidyCfg) -> Result<(), ConfigError> {
+    use super::ops::{norm, safe_path};
+    let td = t.trash_dir.clone().unwrap_or_default();
+    if let Err(e) = safe_path(&td, None) {
+        return err(format!("tidy.trash_dir: {e}"));
+    }
+    let nt = norm(&td);
+    let mut kept: Vec<String> = vec![];
+    kept.extend(t.main_checkout.clone());
+    kept.extend(t.root_checkout.clone());
+    kept.extend(t.keep_paths.iter().cloned());
+    kept.extend(t.target_roots.iter().cloned());
+    kept.extend(t.targets.iter().map(|x| x.path.clone()));
+    for k in kept.iter().filter(|k| !k.is_empty()) {
+        let nk = norm(k);
+        if nk == nt || nk.starts_with(&format!("{nt}/")) {
+            return err(format!("tidy.trash_dir {td} is, or contains, {k}"));
+        }
+    }
+    let mut inside: Vec<String> = vec![];
+    inside.extend(t.main_checkout.clone());
+    inside.extend(t.root_checkout.clone());
+    inside.extend(t.keep_paths.iter().cloned());
+    for k in inside.iter().filter(|k| !k.is_empty()) {
+        if nt.starts_with(&format!("{}/", norm(k))) {
+            return err(format!("tidy.trash_dir {td} is inside {k}"));
+        }
+    }
+    Ok(())
 }

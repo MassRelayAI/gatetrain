@@ -113,6 +113,17 @@ fn corpus(root: &Path) -> String {
     set_age(&root.join("trash/new"), 86400);
     // a browser profile where none belongs
     write(root.join("evidence/run1/profile/SingletonLock"), "");
+    // a Windows host must prove its link listing works: one folder holding one known junction (the canary)
+    let canary = if cfg!(windows) {
+        std::fs::create_dir_all(root.join("canary-target")).unwrap();
+        std::fs::create_dir_all(root.join("canary")).unwrap();
+        dir_link(&root.join("canary/l"), &root.join("canary-target"));
+        format!("link_canary = \"{}/canary\"
+link_canary_count = 1
+", fwd(root))
+    } else {
+        String::new()
+    };
     let r = fwd(root);
     let toml = format!(
         r#"[[hosts]]
@@ -131,7 +142,7 @@ target_roots = ["{r}/targets"]
 evidence_dirs = ["{r}/evidence"]
 log = "{r}/tidy-log.jsonl"
 targets = [{{ path = "{r}/chain", budget_gb = 0.000001 }}]
-"#
+{canary}"#
     );
     let p = root.join("hosts.toml");
     std::fs::write(&p, toml).unwrap();
@@ -160,7 +171,6 @@ fn run_rust(cwd: &Path, args: &[&str]) -> Ran {
 }
 
 #[test]
-#[ignore = "Rust check/tidy are NOT ported past the hardening of c46717c; the CLI forwards them to Python until a lane ports it (spec tests/test_tidy_harden.py)"]
 fn check_json_and_tidy_dry_run_match_live_python_on_a_real_corpus() {
     let d = tempfile::Builder::new().prefix("gt-parity-").tempdir().unwrap();
     let conf = corpus(d.path());

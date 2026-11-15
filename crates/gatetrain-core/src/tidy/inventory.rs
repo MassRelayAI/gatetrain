@@ -2,8 +2,9 @@
 use super::config::TidyCfg;
 use crate::config::Host;
 use crate::pycompat::J;
-use super::ops::{lane_of, norm, Ops, R};
+use super::ops::{guard, lane_of, norm, safe_branch, Ops, Wt, R};
 use crate::pycompat::{fnmatchcase, fmt_g, split_ws, splitlines, strip};
+use std::collections::HashSet;
 use crate::runner::Runner;
 use regex::Regex;
 
@@ -98,6 +99,7 @@ pub struct TrashInfo {
     pub path: String,
     pub bytes: Option<i64>,
     pub age_days: Option<f64>,
+    pub keep: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -149,15 +151,15 @@ pub fn is_cargo(names: &[String]) -> bool {
 }
 
 /// `find_branch`: the branch of a lane, by worktree folder name, then by branch name.
-pub fn find_branch(lane: &str, wts: &[(String, Option<String>)], branches: &[String], cfg: &TidyCfg) -> Option<String> {
+pub fn find_branch(lane: &str, wts: &[Wt], branches: &[String], cfg: &TidyCfg) -> Option<String> {
     for w in wts {
-        if let Some(b) = &w.1 {
-            if lane_of(&w.0, cfg) == lane.to_lowercase() {
+        if let Some(b) = &w.branch {
+            if lane_of(&w.path, cfg).to_lowercase() == lane.to_lowercase() {
                 return Some(b.clone());
             }
         }
     }
-    let all: Vec<String> = branches.iter().cloned().chain(wts.iter().filter_map(|w| w.1.clone())).collect();
+    let all: Vec<String> = branches.iter().cloned().chain(wts.iter().filter_map(|w| w.branch.clone())).collect();
     all.into_iter().find(|b| b == lane || b.rsplit('/').next().unwrap() == lane)
 }
 
@@ -185,15 +187,48 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         branches = ops.branches()?;
     }
     let kept: Vec<String> = [cfg.main_checkout.clone(), cfg.root_checkout.clone()].into_iter().chain(cfg.keep_paths.iter().cloned().map(Some)).flatten().filter(|k| !k.is_empty()).collect();
-    let kept_n: std::collections::HashSet<String> = kept.iter().map(|k| norm(k)).collect();
+    let kept_n: HashSet<String> = kept.iter().map(|k| norm(k)).collect();
+    let keep_lanes_l: HashSet<String> = cfg.keep_lanes.iter().map(|x| x.to_lowercase()).collect();
+    if let Some(td) = truthy_s(&cfg.trash_dir) {
+        let nt = norm(td);
+        for w in &wts {
+            let nw = norm(&w.path);
+            if nw == nt || nw.starts_with(&format!("{nt}/")) {
+                return guard(format!("the recycle bin {td} holds the registered worktree {}; fix trash_dir", w.path));
+            }
+        }
+    }
+    let mut kept_r: HashSet<String> = HashSet::new();
+    if cfg.main_checkout.is_some() {
+        for k in &kept {
+            if let Some(r) = ops.rp(k)? {
+                kept_r.insert(r);
+            }
+        }
+    }
+    let first_n = wts.first().map(|w| norm(&w.path));
+    let first_r = match wts.first() {
+        Some(w) => ops.rp(&w.path)?,
+        None => None,
+    };
     // worktrees
-    for (wpath, wbranch) in &wts {
+    for (idx, w) in wts.iter().enumerate() {
+        let (wpath, wbranch) = (&w.path, &w.branch);
         let n = norm(wpath);
+        let wr = ops.rp(wpath)?;
         let mut info = WtInfo { path: wpath.clone(), branch: wbranch.clone(), merged: None, dirty: None, links: 0, bytes: None, keep: None };
-        if kept_n.contains(&n) {
+        if kept_n.contains(&n) || wr.as_ref().map(|r| kept_r.contains(r)).unwrap_or(false) {
             info.keep = Some("main/root/keep list".into());
+        } else if idx == 0 || Some(&n) == first_n.as_ref() || (wr.is_some() && wr == first_r) {
+            info.keep = Some("main worktree".into()); // the first entry of `git worktree list` is the main checkout, whatever its spelling
+        } else if w.locked {
+            info.keep = Some("locked".into());
         } else if wbranch.is_none() {
             info.keep = Some("detached head".into());
+        } else if !safe_branch(wbranch.as_deref().unwrap()) {
+            info.keep = Some("unsafe name".into());
+        } else if ops.is_link(wpath)? != Some(false) {
+            info.keep = Some(if ops.is_link(wpath)? == Some(true) { "is a link" } else { "link state unknown" }.into());
         } else {
             let br = wbranch.clone().unwrap();
             info.merged = if br != cfg.main_branch { ops.merged(&br)? } else { None };
@@ -202,7 +237,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             info.bytes = ops.size(wpath)?;
             if br == cfg.main_branch {
                 info.keep = Some("main branch".into());
-            } else if cfg.keep_branches.contains(&br) || cfg.keep_lanes.contains(&lane_of(wpath, cfg)) {
+            } else if cfg.keep_branches.contains(&br) || keep_lanes_l.contains(&lane_of(wpath, cfg).to_lowercase()) {
                 info.keep = Some("keep list".into());
             } else if info.dirty != Some(false) {
                 info.keep = Some(if info.dirty == Some(true) { "uncommitted work" } else { "status unreadable" }.into());
@@ -222,15 +257,56 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
     let mut entries: Vec<(String, Option<String>, Option<f64>)> = cfg.targets.iter().map(|x| (x.path.clone(), x.lane.clone(), x.budget_gb)).collect();
     for root in &cfg.target_roots {
         for nm in ops.listdir(root)? {
+            if ops.win && ops.win_unsafe(&nm) {
+                inv.targets.push(TargetInfo {
+                    path: ops.join(root, &nm),
+                    lane: Some(nm.clone()),
+                    bytes: None,
+                    idle_min: None,
+                    cargo: false,
+                    tag: None,
+                    merged: None,
+                    branch: None,
+                    budget_gb: None,
+                    over: false,
+                    keep: Some("unsafe name".into()),
+                });
+                continue;
+            }
             entries.push((ops.join(root, &nm), Some(nm), None));
         }
     }
     let mut seen = std::collections::HashSet::new();
     for (path, lane, budget) in entries {
-        if seen.contains(&norm(&path)) || !ops.exists(&path)? {
+        if seen.contains(&norm(&path)) {
             continue;
         }
+        match ops.exists(&path)? {
+            None => {
+                inv.breaches.push(format!("cannot tell whether {path} exists; left alone"));
+                continue;
+            }
+            Some(false) => continue,
+            Some(true) => {}
+        }
         seen.insert(norm(&path));
+        let lk = ops.is_link(&path)?;
+        if lk != Some(false) {
+            inv.targets.push(TargetInfo {
+                path: path.clone(),
+                lane: lane.clone(),
+                bytes: None,
+                idle_min: None,
+                cargo: false,
+                tag: None,
+                merged: None,
+                branch: None,
+                budget_gb: budget,
+                over: false,
+                keep: Some(if lk == Some(true) { "is a link" } else { "link state unknown" }.into()),
+            });
+            continue;
+        }
         let names = ops.listdir(&path)?;
         let size = ops.size(&path)?;
         let mt = ops.mtime(&path)?;
@@ -261,7 +337,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 Some(b) => ops.merged(b)?,
                 None => None,
             };
-            let reason: Option<String> = if kept_n.contains(&norm(&path)) || cfg.keep_lanes.contains(&lane) || br.as_ref().map(|b| cfg.keep_branches.contains(b)).unwrap_or(false) {
+            let reason: Option<String> = if kept_n.contains(&norm(&path)) || keep_lanes_l.contains(&lane.to_lowercase()) || br.as_ref().map(|b| cfg.keep_branches.contains(b)).unwrap_or(false) {
                 Some("keep list".into())
             } else if wt_dirty.map(|d| d != Some(false)).unwrap_or(false) {
                 Some("its worktree has uncommitted work".into())
@@ -341,13 +417,25 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
     }
     // recycle bin
     if let Some(td) = truthy_s(&cfg.trash_dir) {
-        if ops.exists(td)? {
+        let te = ops.exists(td)?;
+        if te.is_none() {
+            inv.breaches.push(format!("cannot tell whether the recycle bin {td} exists; left alone"));
+        }
+        if te == Some(true) {
             for nm in ops.listdir(td)? {
                 let p = ops.join(td, &nm);
+                if ops.win && ops.win_unsafe(&nm) {
+                    inv.trash.push(TrashInfo { path: p, bytes: None, age_days: None, keep: Some("unsafe name".into()) });
+                    continue;
+                }
                 let mt = ops.mtime(&p)?;
-                let age = mt.map(|m| (now - m as f64) / 86400.0);
+                let mut age = mt.map(|m| (now - m as f64) / 86400.0);
+                if let Some(secs) = stamp_secs(&nm) {
+                    // the name says when it was moved here; the folder's own mtime is when it was last used
+                    age = Some((now - secs).max(0.0) / 86400.0);
+                }
                 let sz = ops.size(&p)?;
-                inv.trash.push(TrashInfo { path: p.clone(), bytes: sz, age_days: age });
+                inv.trash.push(TrashInfo { path: p.clone(), bytes: sz, age_days: age, keep: None });
                 if let Some(a) = age {
                     if a > cfg.trash_days {
                         inv.items.push(Item::new("trash", "remove", &p, sz, &format!("in the recycle bin {} days (> {})", crate::pycompat::fmt_f(a, 0), fmt_g(cfg.trash_days))));
@@ -360,9 +448,9 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
     let prof = Regex::new(r"(^|[\\/])(SingletonLock|Cookies|Local State|lockfile)$").unwrap();
     for root in &cfg.evidence_dirs {
         let cmd = if ops.win {
-            format!("dir /S /B {}", ops.q(root))
+            format!("dir /S /B {}", ops.q(root)?)
         } else {
-            format!("find {} -maxdepth 5 \\( -name SingletonLock -o -name Cookies -o -name 'Local State' -o -name lockfile \\)", ops.q(root))
+            format!("find {} -maxdepth 5 \\( -name SingletonLock -o -name Cookies -o -name 'Local State' -o -name lockfile \\)", ops.q(root)?)
         };
         let o = ops.run0(&cmd)?;
         for l in splitlines(&o.out) {
@@ -375,6 +463,14 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         }
     }
     Ok(inv)
+}
+
+/// The local time in a recycle-bin name `<name>-YYYYMMDDHHMMSS` (what `move` puts there), as epoch seconds.
+pub fn stamp_secs(name: &str) -> Option<f64> {
+    use chrono::TimeZone;
+    let m = Regex::new(r"-(\d{14})$").unwrap().captures(name)?;
+    let d = chrono::NaiveDateTime::parse_from_str(&m[1], "%Y%m%d%H%M%S").ok()?;
+    chrono::Local.from_local_datetime(&d).earliest().map(|t| t.timestamp() as f64)
 }
 
 pub fn now_secs() -> f64 {

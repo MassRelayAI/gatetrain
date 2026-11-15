@@ -256,6 +256,11 @@ pub fn shlex_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
+/// `shlex.join`.
+pub fn shlex_join(argv: &[String]) -> String {
+    argv.iter().map(|a| shlex_quote(a)).collect::<Vec<_>>().join(" ")
+}
+
 /// `posixpath.normpath`.
 pub fn normpath(path: &str) -> String {
     if path.is_empty() {

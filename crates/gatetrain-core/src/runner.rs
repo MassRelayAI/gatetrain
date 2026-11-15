@@ -46,6 +46,15 @@ pub trait Runner {
     fn run_argv(&self, _cwd: &Path, _argv: &[String]) -> Result<Output, String> {
         Err("run_argv is not supported by this runner".into())
     }
+    /// An argument vector with no working directory and a time limit (`timeout` in seconds, `None` = 60 s). A local runner uses no
+    /// shell at all; the default (ssh) joins the vector with POSIX single quotes into one command line.
+    fn run_argv_to(&self, argv: &[String], timeout: Option<f64>) -> Result<RunOut, String> {
+        self.run_for(&crate::pycompat::shlex_join(argv), timeout)
+    }
+    /// True when [`Runner::run_argv_to`] never involves a shell (every element reaches the program as one argument).
+    fn shell_free(&self) -> bool {
+        false
+    }
     /// Write a generated script as a file (no shell escaping of paths; L43, L45).
     fn put_file(&self, _path: &str, _text: &str) -> Result<(), String> {
         Err("put_file is not supported by this runner".into())
@@ -154,6 +163,14 @@ impl Runner for LocalRunner {
         let mut c = Command::new(&argv[0]);
         c.args(&argv[1..]).current_dir(cwd);
         exec(c, &argv.join(" "))
+    }
+    fn run_argv_to(&self, argv: &[String], timeout: Option<f64>) -> Result<RunOut, String> {
+        let mut c = Command::new(&argv[0]);
+        c.args(&argv[1..]);
+        run_out(c, None, timeout)
+    }
+    fn shell_free(&self) -> bool {
+        true
     }
     fn put_file(&self, path: &str, text: &str) -> Result<(), String> {
         std::fs::write(path, text.as_bytes()).map_err(|e| format!("cannot write {path}: {e}"))

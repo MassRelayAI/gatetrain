@@ -433,30 +433,30 @@ fn config_dump_matches_the_live_python_loader_on_every_case() {
     }
 }
 
-// ---- tidy removal is not ported: --apply and --auto forward to Python (the Rust copy predates the hardening) ----
+// ---- check and tidy (every mode) are answered by the Rust binary and match Python ----
 
 #[test]
-fn tidy_apply_and_auto_forward_to_python_and_never_run_in_rust() {
+fn check_and_tidy_every_mode_run_in_rust_and_match_python() {
     let d = tempfile::tempdir().unwrap();
     let cfg = d.path().join("hosts.toml");
-    std::fs::write(&cfg, "[[hosts]]\nname = \"h\"\nreach = \"local\"\n").unwrap();
-    for flag in ["--apply", "--auto"] {
-        // with forwarding switched off the Rust binary refuses to answer itself: proof it did not run its own tidy
-        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["tidy", "--config", cfg.to_str().unwrap(), flag]).env("GATETRAIN_PYROOT", repo()).env("GATETRAIN_NO_FORWARD", "1").output().unwrap();
-        assert_eq!(o.status.code(), Some(126), "{flag}: {}", String::from_utf8_lossy(&o.stderr));
-        assert!(String::from_utf8_lossy(&o.stderr).contains("would be forwarded"), "{flag}");
-        // with forwarding on, the exit code and output are Python's
-        let ours = gt(&["tidy", "--config", cfg.to_str().unwrap(), flag]);
-        let py = Command::new(python()).args(["-m", "gatetrain", "tidy", "--config", cfg.to_str().unwrap(), flag]).env("PYTHONPATH", repo()).output().unwrap();
-        assert_eq!(ours.status.code(), py.status.code(), "{flag}");
-        assert_eq!(ours.stdout, py.stdout, "{flag}");
-    }
-    // the dry run forwards too: Rust tidy and check are not ported past the hardening
-    for args in [vec!["tidy"], vec!["tidy", "--class", "targets"], vec!["check"], vec!["check", "--json"]] {
+    std::fs::write(&cfg, "[[hosts]]
+name = \"h\"
+reach = \"local\"
+").unwrap();
+    let c = cfg.to_str().unwrap();
+    for args in [vec!["tidy"], vec!["tidy", "--class", "targets"], vec!["tidy", "--apply"], vec!["tidy", "--auto"], vec!["check"], vec!["check", "--json"]] {
         let mut a = args.clone();
-        a.extend(["--config", cfg.to_str().unwrap()]);
+        a.extend(["--config", c]);
+        // forwarding switched off: the Rust binary must answer on its own (a forward would exit 126)
         let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(&a).env("GATETRAIN_NO_FORWARD", "1").output().unwrap();
-        assert_eq!(o.status.code(), Some(126), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        assert_ne!(o.status.code(), Some(126), "{args:?} was forwarded: {}", String::from_utf8_lossy(&o.stderr));
+        // and the exit code and the text are Python's
+        let mut pa = vec!["-m", "gatetrain"];
+        pa.extend(a.iter().copied());
+        let py = Command::new(python()).args(&pa).env("PYTHONPATH", repo()).env("PYTHONUTF8", "1").output().unwrap();
+        let lf = |b: &[u8]| String::from_utf8_lossy(b).replace('\r', "");
+        assert_eq!(o.status.code(), py.status.code(), "{args:?}");
+        assert_eq!(lf(&o.stdout), lf(&py.stdout), "{args:?}");
     }
 }
 
@@ -471,7 +471,6 @@ fn every_clap_subcommand_is_in_ported_and_nothing_else_is() {
         .take_while(|l| l.starts_with("  "))
         .filter_map(|l| l.split_whitespace().next().map(String::from))
         .filter(|c| c != "help")
-        .filter(|c| c != "check" && c != "tidy") // both forward to Python until the hardening is ported
         .collect();
     assert!(cmds.len() >= 15, "{cmds:?}");
     for c in &cmds {

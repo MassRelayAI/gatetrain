@@ -35,7 +35,23 @@ fn tmp() -> tempfile::TempDir {
     tempfile::Builder::new().prefix("gt-real-").tempdir().unwrap()
 }
 
-fn real_host(tidy: Value) -> (Config, Host) {
+/// A Windows host must prove its link listing works: a folder holding one known junction (the canary).
+fn canary(tidy: &mut Value) {
+    if !cfg!(windows) {
+        return;
+    }
+    let d: &'static tempfile::TempDir = Box::leak(Box::new(tmp()));
+    let (target, c) = (d.path().join("target"), d.path().join("canary"));
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&c).unwrap();
+    dir_link(&c.join("l"), &target);
+    let o = tidy.as_object_mut().unwrap();
+    o.insert("link_canary".into(), json!(fwd(&c)));
+    o.insert("link_canary_count".into(), json!(1));
+}
+
+fn real_host(mut tidy: Value) -> (Config, Host) {
+    canary(&mut tidy);
     let h = Host { name: "real".into(), tidy: to_table(&tidy), ..Default::default() };
     (Config { hosts: vec![h.clone()], ..Default::default() }, h)
 }
@@ -81,9 +97,98 @@ fn merged_by_content_against_real_git() {
     let (cfg, h) = real_host(json!({"main_checkout": fwd(p)}));
     let t = build_cfg(&cfg, &h).unwrap();
     let ops = Ops::new(&h, &LocalRunner, &t);
-    assert_eq!(ops.merged("lane-x").unwrap(), Some(true)); // not an ancestor, but every added line is on main
+    assert_eq!(ops.merged("lane-x").unwrap(), Some(false)); // not an ancestor, and merging it conflicts with main: never "merged by content"
     assert_eq!(ops.merged("lane-y").unwrap(), Some(false));
     assert_eq!(ops.merged("main").unwrap(), Some(true));
+}
+
+#[test]
+fn merge_proof_real_git_cases() {
+    // merged means: merging the branch into main changes nothing (git merge-tree --write-tree, git 2.38+)
+    let d = tmp();
+    let p = d.path();
+    git(p, &["init", "-q", "-b", "main"]);
+    write(p.join("f.txt"), "a
+}
+");
+    write(p.join("g.txt"), "keep
+");
+    git(p, &["add", "."]);
+    git(p, &["commit", "-q", "-m", "base"]);
+    git(p, &["checkout", "-q", "-b", "dup-line"]);
+    write(p.join("f.txt"), "a
+}
+}
+");
+    git(p, &["commit", "-q", "-am", "adds a closing brace"]);
+    git(p, &["checkout", "-q", "-b", "same-change", "main"]);
+    write(p.join("g.txt"), "keep
+more
+");
+    git(p, &["commit", "-q", "-am", "x"]);
+    git(p, &["checkout", "-q", "-b", "deletion", "main"]);
+    std::fs::remove_file(p.join("g.txt")).unwrap();
+    git(p, &["commit", "-q", "-am", "drop g"]);
+    git(p, &["checkout", "-q", "main"]);
+    write(p.join("g.txt"), "keep
+more
+");
+    git(p, &["commit", "-q", "-am", "same change made separately"]);
+    let (cfg, h) = real_host(json!({"main_checkout": fwd(p)}));
+    let t = build_cfg(&cfg, &h).unwrap();
+    let ops = Ops::new(&h, &LocalRunner, &t);
+    assert_eq!(ops.merged("dup-line").unwrap(), Some(false)); // every added line "exists" in main, yet the change is not there
+    assert_eq!(ops.merged("same-change").unwrap(), Some(true)); // not an ancestor, but merging it changes nothing
+    assert_eq!(ops.merged("deletion").unwrap(), Some(false));
+    assert_eq!(ops.merged("main").unwrap(), Some(true));
+}
+
+#[test]
+fn a_taken_archive_tag_name_gets_a_suffix_and_the_branch_goes_by_sha() {
+    let d = tmp();
+    let root = d.path();
+    let main = main_repo(root);
+    let wt = root.join("wt/lane-t");
+    add_worktree(&main, &wt, "line/lane-t");
+    write(wt.join("g.txt"), "2
+");
+    git(&wt, &["add", "g.txt"]);
+    git(&wt, &["commit", "-q", "-m", "lane"]);
+    git(&main, &["merge", "-q", "--no-edit", "line/lane-t"]);
+    let sha = git(&main, &["rev-parse", "line/lane-t"]).trim().to_string();
+    let other = git(&main, &["rev-parse", "main~1"]).trim().to_string();
+    git(&main, &["tag", "archive/line/lane-t", &other]); // the name is taken by another commit
+    let (cfg, h) = real_host(json!({"main_checkout": fwd(&main), "log": fwd(root) + "/tidy.jsonl"}));
+    let t = build_cfg(&cfg, &h).unwrap();
+    let inv = gather(&h, &LocalRunner, &t, None).unwrap();
+    assert_eq!(inv.items.len(), 1);
+    let (done, failed) = apply_plan(&h, &LocalRunner, &t, &inv, &["worktrees".to_string()], None, None, false).unwrap();
+    assert_eq!((done, failed), (1, 0));
+    assert!(!wt.exists());
+    assert!(!git(&main, &["branch", "--list"]).contains("line/lane-t"));
+    assert_eq!(git(&main, &["rev-parse", &format!("archive/line/lane-t-{}", &sha[..8])]).trim(), sha);
+    assert_eq!(git(&main, &["rev-parse", "archive/line/lane-t"]).trim(), other, "the old tag is untouched");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_real_junction_is_a_link_and_removed_as_one() {
+    let d = tmp();
+    let root = d.path();
+    let main = main_repo(root);
+    let trash = root.join("trash");
+    std::fs::create_dir_all(&trash).unwrap();
+    let j = trash.join("j");
+    dir_link(&j, &main.join("shared"));
+    let (cfg, h) = real_host(json!({"main_checkout": fwd(&main), "trash_dir": fwd(&trash)}));
+    let t = build_cfg(&cfg, &h).unwrap();
+    let ops = Ops::new(&h, &LocalRunner, &t);
+    let jp = format!("{}/j", fwd(&trash)); // not canonicalised: that would follow the junction
+    assert_eq!(ops.is_link(&jp).unwrap(), Some(true));
+    assert_eq!(ops.is_link(&fwd(&main)).unwrap(), Some(false));
+    assert_eq!(ops.remove_dir(&jp).unwrap().0, "ok");
+    assert!(!j.exists());
+    assert!(main.join("shared/keep.txt").exists());
 }
 
 #[test]

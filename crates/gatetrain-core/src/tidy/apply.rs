@@ -3,8 +3,8 @@ use super::config::{TidyCfg, CLASSES};
 use crate::config::Host;
 use super::inventory::{is_cargo, Extra, Inventory, Item};
 use crate::pycompat::{dumps, round2, J};
-use super::ops::{guard, norm, Fatal, Ops, R};
-use crate::pycompat::{fmt_f, fmt_g, fnmatchcase, shlex_quote, split_ws};
+use super::ops::{guard, safe_branch, safe_container, safe_image, safe_path, Fatal, Ops, R};
+use crate::pycompat::{fmt_f, fmt_g, fnmatchcase, repr_str, split_ws};
 use crate::runner::Runner;
 use chrono::TimeZone;
 use std::io::Write;
@@ -50,8 +50,12 @@ pub fn apply_plan(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, inv: &Invento
                 ("before_bytes".into(), J::opt_int(it.bytes)),
                 ("after_bytes".into(), J::Null),
             ];
+            let mut intent = rec.clone();
+            intent.push(("status".into(), J::s("intent")));
+            intent.push(("note".into(), J::s("about to run")));
+            log_action(log, &J::Obj(intent))?; // written BEFORE the action: a crash mid-action leaves a trace
             let fb = if ["clean", "move", "remove", "remove-worktree"].contains(&it.kind.as_str()) { ops.free_gb(&it.key)? } else { None };
-            let (after, status, note) = match do_item(&ops, cfg, it) {
+            let (after, status, note) = match do_item(&ops, cfg, it, now) {
                 Ok(x) => x,
                 Err(Fatal::Guard(msg)) => {
                     set(&mut rec, "status", J::s("guard-violation"));
@@ -89,7 +93,11 @@ fn set(rec: &mut Vec<(String, J)>, k: &str, v: J) {
 
 type Done = (Option<i64>, &'static str, String);
 
-pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
+pub fn cache_hours(cfg: &TidyCfg) -> i64 {
+    ((cfg.cache_days * 24.0).ceil() as i64).max(1) // a window under an hour is an hour, never `until=0h` (= everything)
+}
+
+pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done> {
     match it.kind.as_str() {
         "clean" => clean_target(ops, cfg, it),
         "move" => {
@@ -97,17 +105,32 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
                 return Ok((it.bytes, "skipped", "not a cargo target and no trash_dir configured; left alone".into()));
             };
             ops.check_path(&it.key)?;
-            let dest = ops.join(trash, &format!("{}-{}", norm(&it.key).rsplit('/').next().unwrap(), local_fmt(super::inventory::now_secs(), "%Y%m%d%H%M%S")));
-            ops.run0(&if ops.win { format!("move {} {}", ops.q(&it.key), ops.q(&dest)) } else { format!("mv -- {} {}", ops.q(&it.key), ops.q(&dest)) })?;
+            let name = it.key.replace('\\', "/").trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+            let dest = ops.join(trash, &format!("{}-{}", name, local_fmt(now.unwrap_or_else(super::inventory::now_secs), "%Y%m%d%H%M%S")));
+            safe_path(&dest, Some(trash))?;
+            if ops.exists(&dest)? != Some(false) {
+                return Ok((it.bytes, "failed", format!("{dest} exists or cannot be probed; not moving onto it")));
+            }
+            let c = ops.run(
+                &if ops.win { format!("move {} {}", ops.q(&it.key)?, ops.q(&dest)?) } else { format!("mv -- {} {}", ops.q(&it.key)?, ops.q(&dest)?) },
+                Some(cfg.remove_timeout_s),
+            )?;
+            let Some(rc) = c.rc else {
+                return Ok((None, "stopped", format!("move did not finish in {}s; not counted as done", fmt_g(cfg.remove_timeout_s))));
+            };
+            let (src, dst) = (ops.exists(&it.key)?, ops.exists(&dest)?);
+            if rc != 0 || src != Some(false) || dst != Some(true) {
+                return Ok((it.bytes, "failed", format!("move did not complete (rc {rc}; source gone: {}; destination exists: {})", py_opt_bool(src), py_opt_bool(dst))));
+            }
             Ok((Some(0), "ok", format!("moved to {dest}")))
         }
         "remove" => {
-            let ok = cfg.trash_dir.as_deref().filter(|t| !t.is_empty()).map(|t| norm(&it.key).starts_with(&format!("{}/", norm(t)))).unwrap_or(false);
-            if !ok {
-                return guard(format!("{} is not inside the configured recycle bin", it.key));
+            if cfg.trash_dir.as_deref().filter(|t| !t.is_empty()).is_none() {
+                return guard(format!("{} is not inside a configured recycle bin", it.key));
             }
-            ops.remove_dir(&it.key)?;
-            Ok((Some(0), "ok", "removed from the recycle bin".into()))
+            ops.check_trash_entry(&it.key)?;
+            let (status, note) = ops.remove_dir(&it.key)?;
+            Ok((if status == "ok" { Some(0) } else { None }, status, note))
         }
         "remove-worktree" => remove_worktree(ops, cfg, it),
         "rm-container" => {
@@ -115,42 +138,63 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
             if split_ws(&o.out).contains(&it.key.as_str()) {
                 return guard(format!("container {} is running", it.key));
             }
-            if !it.key.starts_with(cfg.container_prefix.as_deref().filter(|p| !p.is_empty()).unwrap_or("\0")) {
+            if !safe_container(&it.key) || !it.key.starts_with(cfg.container_prefix.as_deref().filter(|p| !p.is_empty()).unwrap_or("\0")) {
                 return guard(format!("container {} does not match the prefix", it.key));
             }
-            let r = ops.run0(&format!("docker rm {}", shlex_quote(&it.key)))?;
+            let r = ops.run_argv(&["docker".into(), "rm".into(), it.key.clone()], None)?;
             Ok((Some(0), if r.ok() { "ok" } else { "failed" }, "removed by exact name".into()))
         }
         "rm-image" => {
-            if !cfg.image_patterns.iter().any(|p| fnmatchcase(&it.key, p)) {
+            if !safe_image(&it.key) || !cfg.image_patterns.iter().any(|p| fnmatchcase(&it.key, p)) {
                 return guard(format!("image {} matches no configured pattern", it.key));
             }
             let used = ops.run0(r#"docker ps -a --format "{{.Image}}""#)?;
             if split_ws(&used.out).contains(&it.key.as_str()) {
                 return guard(format!("image {} is used by a container", it.key));
             }
-            let r = ops.run0(&format!("docker rmi {}", shlex_quote(&it.key)))?;
+            let r = ops.run_argv(&["docker".into(), "rmi".into(), it.key.clone()], None)?;
             Ok((Some(0), if r.ok() { "ok" } else { "failed" }, "removed by exact name".into()))
         }
         "prune-cache" => {
-            let r = ops.run0(&format!("docker builder prune -f --filter until={}h", (cfg.cache_days * 24.0) as i64))?;
+            let argv: Vec<String> = ["docker", "builder", "prune", "-f", "--filter"].iter().map(|s| s.to_string()).chain([format!("until={}h", cache_hours(cfg))]).collect();
+            let r = ops.run_argv(&argv, None)?;
             Ok((Some(0), if r.ok() { "ok" } else { "failed" }, format!("build cache older than {} days", fmt_g(cfg.cache_days))))
         }
         k => guard(format!("unknown action {k}")),
     }
 }
 
+fn py_opt_bool(b: Option<bool>) -> &'static str {
+    match b {
+        Some(true) => "True",
+        Some(false) => "False",
+        None => "None",
+    }
+}
+
 pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     let p = it.key.as_str();
     ops.check_path(p)?;
+    if ops.is_link(p)? != Some(false) {
+        return Ok((it.bytes, "failed", "is a link (or link state unknown); cargo clean not run".into()));
+    }
+    if !is_cargo(&ops.listdir(p)?) {
+        // re-check at the moment of action: the plan may be minutes old and sizing may have failed
+        return Ok((it.bytes, "failed", "no longer looks like a cargo target (no debug/release with tmp); cargo clean not run".into()));
+    }
     let before = ops.size(p)?;
     let fb = if before.is_none() { ops.free_gb(p)? } else { None }; // sizing failed: fall back to the disk's free space (L51)
-    let mp = match &cfg.main_checkout {
-        Some(m) => format!("--manifest-path {} ", ops.q(&ops.join(m, "Cargo.toml"))),
-        None => String::new(),
-    };
-    let cmd = format!("cargo clean {mp}--target-dir {}", ops.q(p)); // never -q: a quiet clean can refuse and say nothing (L43)
-    ops.run0(&cmd)?;
+    let mut cmd: Vec<String> = vec!["cargo".into(), "clean".into()];
+    if let Some(m) = &cfg.main_checkout {
+        cmd.push("--manifest-path".into());
+        cmd.push(ops.join(m, "Cargo.toml"));
+    }
+    cmd.push("--target-dir".into());
+    cmd.push(p.to_string()); // never -q: a quiet clean can refuse and say nothing (L43)
+    let c = ops.run_argv(&cmd, Some(cfg.remove_timeout_s))?;
+    if c.rc.is_none() {
+        return Ok((None, "stopped", format!("cargo clean did not finish in {}s; not counted as done", fmt_g(cfg.remove_timeout_s))));
+    }
     let mut after = ops.size(p)?;
     let mut note = "cargo clean".to_string();
     let tag = || cargo_tag();
@@ -163,7 +207,7 @@ pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
         note = String::new();
         if d.unwrap() <= 0.001 && !ops.listdir(p)?.iter().any(|n| n == "CACHEDIR.TAG") {
             ops.runner.put_file(&ops.join(p, "CACHEDIR.TAG"), &tag())?;
-            ops.run0(&cmd)?;
+            ops.run_argv(&cmd, Some(cfg.remove_timeout_s))?;
             fa = ops.free_gb(p)?;
             d = fa.map(|fa| fa - fb);
             note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran; ".into();
@@ -181,7 +225,7 @@ pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     let names = if after.map(|a| a != 0).unwrap_or(false) { ops.listdir(p)? } else { vec![] };
     if before_v != 0 && after.unwrap_or(0) as f64 >= before_v as f64 * 0.99 && is_cargo(&names) && !names.iter().any(|n| n == "CACHEDIR.TAG") {
         ops.runner.put_file(&ops.join(p, "CACHEDIR.TAG"), &tag())?;
-        ops.run0(&cmd)?;
+        ops.run_argv(&cmd, Some(cfg.remove_timeout_s))?;
         after = ops.size(p)?;
         note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran".into();
         if after.is_none() {
@@ -194,25 +238,66 @@ pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     Ok((after, "ok", note))
 }
 
+/// Order: resolve the branch to one sha, archive THAT sha under a tag and verify it, unlink links, remove the worktree, then delete
+/// the branch only if it still points at that sha. Any step that cannot be proven stops here with the branch intact.
 pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     let p = it.key.as_str();
     let Extra::Worktree { branch: br, .. } = &it.extra else { return guard(format!("{p} is not a worktree item")) };
-    let Some(main) = cfg.main_checkout.as_deref() else { return guard("worktree removal needs main_checkout in the config".into()) };
+    let Some(m) = cfg.main_checkout.as_deref() else { return guard("worktree removal needs main_checkout in the config".into()) };
+    if !safe_branch(br) {
+        return guard(format!("branch {} has an unsafe name; not removing", repr_str(br)));
+    }
     ops.check_path(p)?;
+    if ops.is_link(p)? != Some(false) {
+        return guard(format!("{p} is a link (or cannot be probed); not removing a worktree through it"));
+    }
     if ops.dirty(p)? != Some(false) {
         return guard(format!("{p} has uncommitted work"));
     }
-    if ops.merged(br)? != Some(true) {
-        return guard(format!("branch {br} is not on {}", cfg.main_branch));
+    let r = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{br}^{{commit}}")])?;
+    let sha = crate::pycompat::strip(&r.out).to_string();
+    if !r.ok() || sha.is_empty() || sha.contains(char::is_whitespace) {
+        return guard(format!("cannot resolve branch {br} to one commit"));
+    }
+    if ops.merged(&sha)? != Some(true) {
+        // proved on the very commit that is archived and deleted
+        return guard(format!("branch {br} ({sha}) is not on {}", cfg.main_branch));
     }
     let before = ops.snapshot_main()?;
+    let mut tag = format!("archive/{br}");
+    let mut ex = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
+    if ex.ok() && crate::pycompat::strip(&ex.out) != sha {
+        tag = format!("{tag}-{}", &sha[..sha.len().min(8)]); // that name belongs to another commit: never overwrite or reuse it
+        ex = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
+    }
+    if !(ex.ok() && crate::pycompat::strip(&ex.out) == sha) {
+        let t = ops.git(m, &["tag", &tag, &sha])?;
+        if !t.ok() {
+            return guard(format!("could not create the archive tag {tag} for {br}; branch and worktree kept"));
+        }
+    }
+    let got = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
+    if !got.ok() || crate::pycompat::strip(&got.out) != sha {
+        return guard(format!("archive tag {tag} does not point at {sha}; branch and worktree kept"));
+    }
     ops.unlink_all(p)?;
-    ops.git(main, &format!("tag archive/{br} {}", ops.q(br)))?;
-    ops.git(main, &format!("worktree remove {}", ops.q(p)))?;
-    if ops.exists(p)? {
+    let w = ops.git_to(m, &["worktree", "remove", p], Some(cfg.remove_timeout_s))?;
+    if w.rc.is_none() {
+        let e = ops.exists(p)?;
+        ops.assert_main(before)?;
+        return Ok((
+            None,
+            "stopped",
+            format!("git worktree remove did not finish in {}s; re-probe: {}; branch {br} kept, archived as {tag}", fmt_g(cfg.remove_timeout_s), super::ops::probe_word(e)),
+        ));
+    }
+    if !ops.gone(p)? {
         return guard(format!("{p} still exists after git worktree remove"));
     }
-    ops.git(main, &format!("branch -D {}", ops.q(br)))?;
+    let d = ops.git(m, &["update-ref", "-d", &format!("refs/heads/{br}"), &sha])?;
+    if !d.ok() {
+        return guard(format!("branch {br} no longer points at {sha} (or could not be deleted); it is kept, archived as {tag}"));
+    }
     ops.assert_main(before)?;
-    Ok((Some(0), "ok", format!("links unlinked, tagged archive/{br}, worktree and branch removed, main checkout unchanged")))
+    Ok((Some(0), "ok", format!("links unlinked, tagged {tag}, worktree and branch removed, main checkout unchanged")))
 }

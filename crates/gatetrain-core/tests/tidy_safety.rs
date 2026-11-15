@@ -338,7 +338,8 @@ fn archive_tag_comes_before_worktree_remove_and_branch_delete() {
     let calls = sim.calls();
     let pos = |needle: &str| calls.iter().position(|c| c.contains(needle)).unwrap_or_else(|| panic!("no call with {needle}"));
     assert!(pos("tag archive/line/lane-a") < pos("worktree remove"));
-    assert!(pos("worktree remove") < pos("branch -D"));
+    assert!(pos("worktree remove") < pos("update-ref -d refs/heads/line/lane-a"));
+    assert!(!calls.iter().any(|c| c.contains("branch -D")), "the branch is deleted by ref and sha, never by name");
 }
 
 #[test]
@@ -428,7 +429,7 @@ fn refused_paths_each_have_their_own_reason() {
     let sim = linux_sim();
     let (h, t, _inv) = gather_sim(&sim, json!({"keep_paths": ["/keep/this"]}), false, 50.0);
     let ops = Ops::new(&h, &sim, &t);
-    for p in ["", "/", "C:", "c:/", "/build/targets/*", "/build/lane-?", "/build/[ab]", "/repo/main", "/REPO/MAIN/", "/repo", "/keep/this", "/keep"] {
+    for p in ["", "/", "C:", "c:/", "/build/targets/*", "/build/lane-?", "/build/[ab]", "/repo/main", "/repo/main/", "relative/x", "/a/../b", "/repo", "/keep/this", "/keep"] {
         is_guard(ops.check_path(p));
     }
     ops.check_path("/build/targets/lane-a").unwrap();
@@ -506,7 +507,7 @@ fn first_violation_stops_the_run() {
 fn poisoned(sim: &Shared, extra: serde_json::Value, it: Item) -> Result<(), Fatal> {
     let (h, t, _inv) = gather_sim(sim, extra, false, 50.0);
     let ops = Ops::new(&h, sim, &t);
-    do_item(&ops, &t, &it).map(|_| ())
+    do_item(&ops, &t, &it, None).map(|_| ())
 }
 
 fn wt_item(path: &str, branch: &str) -> Item {
@@ -546,7 +547,7 @@ fn apply_refuses_worktree_removal_without_a_main_checkout() {
     let mut t = build_cfg(&cfg, &h).unwrap();
     t.main_checkout = None;
     let ops = Ops::new(&h, &sim, &t);
-    let m = is_guard(do_item(&ops, &t, &wt_item("/repo/wt/lane-a", "line/lane-a")));
+    let m = is_guard(do_item(&ops, &t, &wt_item("/repo/wt/lane-a", "line/lane-a"), None));
     assert!(m.contains("needs main_checkout"));
 }
 
@@ -554,7 +555,7 @@ fn apply_refuses_worktree_removal_without_a_main_checkout() {
 fn trash_removal_refuses_a_path_outside_the_recycle_bin() {
     let sim = linux_sim();
     let m = is_guard(poisoned(&sim, json!({}), Item::new("trash", "remove", "/build/targets/lane-a", Some(0), "poisoned")));
-    assert!(m.contains("not inside the configured recycle bin"));
+    assert!(m.contains("not exactly one component below /trash"), "{m}");
     is_guard(poisoned(&sim, json!({}), Item::new("trash", "remove", "/trash", Some(0), "the bin itself")));
     is_guard(poisoned(&sim, json!({"trash_dir": "/trash"}), Item::new("trash", "remove", "/trashy/old", Some(0), "a sibling with the same prefix")));
     assert!(sim.s().has("/build/targets/lane-a/debug/big.o") && sim.s().has("/trash/old/x"));
@@ -611,7 +612,7 @@ fn a_move_without_a_trash_dir_is_skipped_never_deleted() {
     let mut t = build_cfg(&cfg, &h).unwrap();
     t.trash_dir = None;
     let ops = Ops::new(&h, &sim, &t);
-    let (after, status, note) = do_item(&ops, &t, &Item::new("targets", "move", "/build/targets/lane-a", Some(7), "x")).unwrap();
+    let (after, status, note) = do_item(&ops, &t, &Item::new("targets", "move", "/build/targets/lane-a", Some(7), "x"), None).unwrap();
     assert_eq!((after, status), (Some(7), "skipped"));
     assert!(note.contains("no trash_dir configured"));
     assert!(sim.s().has("/build/targets/lane-a/debug/big.o"));
@@ -623,7 +624,7 @@ fn a_move_goes_to_the_recycle_bin_not_to_nothing() {
     let sim = linux_sim();
     let (h, t, _inv) = gather_sim(&sim, json!({}), false, 50.0);
     let ops = Ops::new(&h, &sim, &t);
-    let (_a, status, note) = do_item(&ops, &t, &Item::new("targets", "move", "/build/targets/lane-a", Some(7), "x")).unwrap();
+    let (_a, status, note) = do_item(&ops, &t, &Item::new("targets", "move", "/build/targets/lane-a", Some(7), "x"), None).unwrap();
     assert_eq!(status, "ok");
     assert!(note.starts_with("moved to /trash/lane-a-"), "{note}");
     assert!(!sim.s().has("/build/targets/lane-a/debug/big.o"));

@@ -82,7 +82,6 @@ fn run_python(dir: &Path) -> String {
 }
 
 #[test]
-#[ignore = "Rust check/tidy are NOT ported past the hardening of c46717c; the CLI forwards them to Python until a lane ports it (spec tests/test_tidy_harden.py)"]
 fn check_and_tidy_text_and_json_match_live_python_on_every_scenario() {
     let d = tempfile::tempdir().unwrap();
     let want = run_python(d.path());

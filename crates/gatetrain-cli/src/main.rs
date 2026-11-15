@@ -1,4 +1,4 @@
-//! The `gatetrain` binary. Ported here: `parse --json`, `log verify`, `ledger migrate`, `diagnose`, `hold`, `running`, `memory`, `batch`, `report`, `trace`, `eta`, `config dump`, `doctor`, `lanes`, `generated`, `tidy` (dry run only; `--apply` and `--auto` go to Python), `check` (Linux only).
+//! The `gatetrain` binary. Ported here: `parse --json`, `log verify`, `ledger migrate`, `diagnose`, `hold`, `running`, `memory`, `batch`, `report`, `trace`, `eta`, `config dump`, `doctor`, `lanes`, `generated`, `tidy` (dry run, `--apply` and `--auto`) and `check`, hardened as Python at c46717c (spec tests/test_tidy_harden.py).
 //! Every other subcommand is forwarded to `python -m gatetrain` with the same arguments and exit code (design 9.3).
 mod cmd_portb;
 use anyhow::{Context, Result};
@@ -279,20 +279,13 @@ enum LedgerCmd {
     },
 }
 
-/// `check` and `tidy` (every mode, the dry run included) are NOT ported past the hardening of c46717c on main (argv commands, a
-/// verified archive before branch delete, one safe_path, merge proof by tree, link-first removal, verified moves, timeouts):
-/// the Rust copy predates it, so both forward to Python until a follow-up lane ports it with tests/test_tidy_harden.py.
-fn not_ported_here(args: &[String]) -> bool {
-    matches!(args.first().map(String::as_str), Some("check" | "tidy"))
-}
-
 const PORTED: [&str; 17] = ["parse", "log", "ledger", "diagnose", "hold", "running", "memory", "batch", "report", "trace", "eta", "config", "doctor", "lanes", "generated", "check", "tidy"];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Forward anything not ported (and not a flag of ours such as --help/--version) before clap sees it.
     if let Some(first) = args.first() {
-        if !first.starts_with('-') && (!PORTED.contains(&first.as_str()) || not_ported_here(&args)) {
+        if !first.starts_with('-') && !PORTED.contains(&first.as_str()) {
             return forward(&args);
         }
     }
