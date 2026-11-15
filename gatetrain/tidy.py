@@ -26,7 +26,7 @@ GB = 1024 ** 3
 SAFE_BRANCH = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")          # anything else is kept, never removed
 SAFE_CONTAINER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 SAFE_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$")
-WIN_BAD = set('"%^!&|<>')                                              # never interpolated into a Windows command line
+WIN_BAD = set('"%^!&|<>') | {chr(c) for c in range(0x2018, 0x2020)}                                              # never interpolated into a Windows command line
 STAMP = re.compile(r"-(\d{14})$")                                      # the timestamp `move` puts in a recycle-bin name
 
 
@@ -96,6 +96,8 @@ def build_cfg(cfg, host) -> TidyCfg:
             raise ConfigError(f"tidy.targets[{i}]: needs a table with a path")
     if not SAFE_BRANCH.match(t.main_branch):
         raise ConfigError(f"tidy.main_branch: {t.main_branch!r} is not a plain branch name")
+    if d and dr.host_os(host) == "windows" and (not t.link_canary or t.link_canary_count is None):
+        raise ConfigError("tidy: a Windows host needs link_canary (a folder with known links) and link_canary_count")
     if t.trash_dir:
         check_trash_dir(t)
     if not t.container_prefix:
@@ -174,6 +176,9 @@ class Ops:
         self._canary_ok = False
 
     # -- primitives
+    def win_unsafe(self, v):
+        return any(c in WIN_BAD or ord(c) < 32 for c in v)
+
     def _win_ok(self, v):
         bad = [c for c in v if c in WIN_BAD or ord(c) < 32]
         if bad:
@@ -276,7 +281,7 @@ class Ops:
         s = p.replace("\\", "/").rstrip("/")
         parent, _, base = s.rpartition("/")
         rpar = self.rp(parent or "/")
-        return None if rpar is None else rpar.rstrip("/") + "/" + base.lower()
+        return None if rpar is None else norm(rpar.rstrip("/") + "/" + base)
 
     def size(self, p):
         """Bytes under p, or None when unknown (timeout, error, age-only disk). Never a fake 0 (L51)."""
@@ -308,7 +313,12 @@ class Ops:
             names = [l.strip() for l in out.splitlines() if l.strip()] if rc == 0 else []
         else:
             rc, out = self.run(f"find {self.q(p)} -mindepth 1 -maxdepth 1 -print0")
-            names = [x for x in out.split("\0") if x] if rc == 0 else []
+            names = []
+            pre = p.replace("\\", "/").rstrip("/") + "/"
+            for r in ([x for x in out.split("\0") if x] if rc == 0 else []):
+                if not r.startswith(pre) or len(r) == len(pre):
+                    raise GuardViolation(f"find returned {r!r}, which is not directly inside {p}; not trusted")
+                names.append(r[len(pre):])      # find prints <path>/<name>
         for nm in names:
             if any(ord(c) < 32 or ord(c) == 127 for c in nm):
                 raise GuardViolation(f"{p} holds a name with a control character ({nm!r}); refusing to guess at it")
@@ -383,7 +393,8 @@ class Ops:
         for l in res:
             if not norm(l).startswith(pre):
                 raise GuardViolation(f"the link listing for {path} returned {l!r}, which is not inside it; not trusted")
-        return res
+        ns = [norm(l) for l in res]
+        return [l for l, nl in zip(res, ns) if not any(nl.startswith(o + "/") for o in ns)]      # removing a link removes what hangs below it
 
     def check_canary(self):
         c = self.cfg
@@ -500,7 +511,9 @@ class Ops:
 
 
 def norm(p):
-    return p.replace("\\", "/").rstrip("/").lower()
+    """Compare key. Windows (drive-letter) paths are case-insensitive; POSIX paths keep their case."""
+    s = p.replace("\\", "/").rstrip("/")
+    return s.lower() if re.match(r"[A-Za-z]:(/|$)", s) else s
 
 
 # ---------------------------------------------------------------- inventory
@@ -552,6 +565,12 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
         wts, branches = ops.worktrees(), ops.branches()
     kept = [cfg.main_checkout, cfg.root_checkout] + cfg.keep_paths
     kept_n = {norm(k) for k in kept if k}
+    if cfg.trash_dir:
+        nt = norm(cfg.trash_dir)
+        for w in wts:
+            nw = norm(w["path"])
+            if nw == nt or nw.startswith(nt + "/"):
+                raise GuardViolation(f"the recycle bin {cfg.trash_dir} holds the registered worktree {w['path']}; fix trash_dir")
     kept_r = {ops.rp(k) for k in kept if k} - {None} if cfg.main_checkout else set()
     first_n = norm(wts[0]["path"]) if wts else None
     first_r = ops.rp(wts[0]["path"]) if wts else None
@@ -592,7 +611,12 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
     # targets
     entries = [(x["path"], x.get("lane"), x.get("budget_gb")) for x in cfg.targets]
     for root in cfg.target_roots:
-        entries += [(ops.join(root, n), n, None) for n in ops.listdir(root)]
+        for nm in ops.listdir(root):
+            if ops.win and ops.win_unsafe(nm):
+                inv.targets.append({"path": ops.join(root, nm), "lane": nm, "bytes": None, "idle_min": None, "cargo": False, "tag": None, "merged": None,
+                                    "branch": None, "budget_gb": None, "over": False, "keep": "unsafe name"})
+                continue
+            entries.append((ops.join(root, nm), nm, None))
     seen = set()
     for path, lane, budget in entries:
         if norm(path) in seen:
@@ -685,6 +709,9 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
     if te:
         for nm in ops.listdir(cfg.trash_dir):
             p = ops.join(cfg.trash_dir, nm)
+            if ops.win and ops.win_unsafe(nm):
+                inv.trash.append({"path": p, "bytes": None, "age_days": None, "keep": "unsafe name"})
+                continue
             mt = ops.mtime(p)
             age = None if mt is None else (now - mt) / 86400
             st = STAMP.search(nm)
@@ -713,13 +740,13 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
 def lane_of(path, cfg):
     b = norm(path).rsplit("/", 1)[-1]
     p = cfg.worktree_prefix.lower()
-    return b[len(p):] if p and b.startswith(p) else b
+    return b[len(p):] if p and b.lower().startswith(p) else b
 
 
 def find_branch(lane, wts, branches, cfg):
     cands = [lane]
     for w in wts:
-        if w["branch"] and lane_of(w["path"], cfg) == lane.lower():
+        if w["branch"] and lane_of(w["path"], cfg).lower() == lane.lower():
             return w["branch"]
     for b in branches + [w["branch"] for w in wts if w["branch"]]:
         if b == lane or b.rsplit("/", 1)[-1] == lane:
@@ -934,13 +961,13 @@ def remove_worktree(ops, cfg, it):
         raise GuardViolation(f"{p} is a link (or cannot be probed); not removing a worktree through it")
     if ops.dirty(p) is not False:
         raise GuardViolation(f"{p} has uncommitted work")
-    if ops.merged(br) is not True:
-        raise GuardViolation(f"branch {br} is not on {cfg.main_branch}")
-    before = ops.snapshot_main()
     rc, out = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}^{{commit}}")
     sha = out.strip()
     if rc != 0 or not re.fullmatch(r"\S+", sha):          # exactly one token
         raise GuardViolation(f"cannot resolve branch {br} to one commit")
+    if ops.merged(sha) is not True:                         # proved on the very commit that is archived and deleted
+        raise GuardViolation(f"branch {br} ({sha}) is not on {cfg.main_branch}")
+    before = ops.snapshot_main()
     tag = f"archive/{br}"
     rc, ex = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
     if rc == 0 and ex.strip() != sha:
@@ -954,7 +981,12 @@ def remove_worktree(ops, cfg, it):
     if rc != 0 or got.strip() != sha:
         raise GuardViolation(f"archive tag {tag} does not point at {sha}; branch and worktree kept")
     ops.unlink_all(p)
-    ops.git(m, "worktree", "remove", p)
+    rc, _ = ops.git(m, "worktree", "remove", p, timeout=cfg.remove_timeout_s)
+    if rc == TIMEOUT:
+        e = ops.exists(p)
+        ops.assert_main(before)
+        return None, "stopped", (f"git worktree remove did not finish in {cfg.remove_timeout_s:g}s; re-probe: "
+                                 + ("still there" if e else "gone" if e is False else "unknown") + f"; branch {br} kept, archived as {tag}")
     if not ops.gone(p):
         raise GuardViolation(f"{p} still exists after git worktree remove")
     rc, _ = ops.git(m, "update-ref", "-d", f"refs/heads/{br}", sha)

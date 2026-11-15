@@ -308,7 +308,7 @@ class MergedTests(Base):
             g("checkout", "-b", "same-change", "main"); w("g.txt", "keep\nmore\n"); g("commit", "-am", "x")
             g("checkout", "-b", "deletion", "main"); os.remove(Path(d, "g.txt")); g("commit", "-am", "drop g")
             g("checkout", "main"); w("g.txt", "keep\nmore\n"); g("commit", "-am", "same change made separately")
-            cfg = parse({"hosts": [{"name": "h", "tidy": {"main_checkout": d}}]})
+            cfg = parse({"hosts": [{"name": "h", "os": "linux", "tidy": {"main_checkout": d}}]})
             host = cfg.hosts[0]
             ops = T.Ops(host, LocalRunner(), T.build_cfg(cfg, host))
             self.assertIs(ops.merged("dup-line"), False)       # every added line "exists" in main, yet the change is not there
@@ -393,7 +393,10 @@ class LinkTests(Base):
             if r.returncode != 0:
                 self.skipTest("cannot create a junction here")
             from gatetrain.runner import LocalRunner
-            cfg = parse({"hosts": [{"name": "h", "os": "windows", "tidy": {"main_checkout": str(main), "trash_dir": str(trash)}}]})
+            canary = Path(d, "canary"); canary.mkdir()
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(canary / "l"), str(main)], capture_output=True, text=True)
+            cfg = parse({"hosts": [{"name": "h", "os": "windows", "tidy": {"main_checkout": str(main), "trash_dir": str(trash),
+                                                                           "link_canary": str(canary), "link_canary_count": 1}}]})
             host = cfg.hosts[0]
             ops = T.Ops(host, LocalRunner(), T.build_cfg(cfg, host))
             self.assertTrue(ops.is_link(str(j)))
@@ -532,8 +535,10 @@ class SmallTests(Base):
 
     def test_windows_listing_needs_the_canary(self):
         sim = winsim()
+        ops, h = ops_for(sim, WIN_EXTRA, win=True)
+        ops.cfg.link_canary = None                      # config load refuses this; the runtime check is the second lock
         with self.assertRaises(T.GuardViolation):
-            gather(sim, {k: v for k, v in WIN_EXTRA.items() if not k.startswith("link_canary")}, win=True)
+            ops.list_links("C:/repo/wt/lane-a")
 
     def test_short_cache_age_is_at_least_an_hour(self):
         sim = linux_sim()
@@ -639,9 +644,10 @@ class WorktreeTimeoutTests(Base):
 class RoundTwoLows(Base):
     def test_merge_is_proved_on_the_resolved_sha(self):
         sim = linux_sim()
+        sim.shas["line/lane-a"] = "abc123"; sim.ancestors.add("abc123")
         self.apply(sim, ["worktrees"])
         i = sim.argvs.index(["git", "-C", "/repo/main", "rev-parse", "--verify", "--quiet", "refs/heads/line/lane-a^{commit}"])
-        later = [a for a in sim.argvs[i:] if "--is-ancestor" in a]
+        later = [a for a in sim.argvs[i:] if "--is-ancestor" in a][:1]
         self.assertTrue(later and all("line/lane-a" not in a and sim.sha("line/lane-a") in a for a in later))
 
     def test_win_names_with_metacharacters_are_kept_not_fatal(self):

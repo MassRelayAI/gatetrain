@@ -8,4 +8,6 @@ Archive tag (verified to point at the branch's sha) before a branch is deleted, 
 
 Hardened by lessons L60-L65 (no shell for local commands, one `safe_path`, merge proof by tree, links tested first, verified moves, `stopped` on timeout, an `intent` line before each action).
 
+A lane that was squashed into main and then edited again is now "not merged" and is kept: `merged` means an ancestor, or merging the branch into main changes nothing (`git merge-tree --write-tree`). Review such a lane by hand and remove it yourself.
+
 Status: built. See docs/method.md and docs/lessons.md for the rules this module carries.

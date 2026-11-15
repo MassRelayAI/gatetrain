@@ -209,9 +209,10 @@ class SimHost:
             return 0, self.tree_main + "\n"
         m = re.match(r"merge-tree --write-tree (\S+) (\S+)$", a)
         if m:
-            if m.group(2) in self.conflict:
+            b2 = m.group(2).replace("sha-", "", 1)
+            if b2 in self.conflict:
                 return 1, "TREE_C\n"
-            return 0, self.mtree.get(m.group(2), "TREE_OTHER") + "\n"
+            return 0, self.mtree.get(b2, "TREE_OTHER") + "\n"
         m = re.match(r"update-ref -d refs/heads/(\S+) (\S+)$", a)
         if m:
             if self.sha(m.group(1)) != m.group(2):
@@ -760,7 +761,7 @@ class ConfigAndGitTests(unittest.TestCase):
             g("checkout", "-b", "lane-x"); Path(d, "f.txt").write_text("one\ntwo\nthree\n"); g("commit", "-am", "x")
             g("checkout", "-b", "lane-y", "main"); Path(d, "f.txt").write_text("one\nfour\n"); g("commit", "-am", "y")
             g("checkout", "main"); Path(d, "f.txt").write_text("one\ntwo\nthree\nfive\n"); g("commit", "-am", "squash of x, plus more")
-            cfg = parse({"hosts": [{"name": "h", "tidy": {"main_checkout": d}}]})
+            cfg = parse({"hosts": [{"name": "h", "os": "linux", "tidy": {"main_checkout": d}}]})   # only git runs here; the host kind is not under test
             host = cfg.hosts[0]
             ops = T.Ops(host, LocalRunner(), T.build_cfg(cfg, host))
             self.assertFalse(ops.merged("lane-x"))       # not an ancestor, and merging it conflicts with main: never "merged by content"
