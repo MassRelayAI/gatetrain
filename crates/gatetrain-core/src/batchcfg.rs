@@ -10,6 +10,23 @@ pub struct Target {
     pub health: Vec<String>,
     /// `production` is never deployed automatically (floor.production-human).
     pub tier: String,
+    /// How long `deploying` may wait for a healthy answer before it refuses (`deploy.health-timeout`); 0 = wait for ever.
+    pub health_timeout_min: f64,
+}
+
+/// A shared file ("hub") that is rebuilt, not merged, when two lanes change it: `[stack] hubs = [{ glob, rebuild }]`.
+/// The rebuild command gets `{base}`, `{ours}`, `{theirs}` (files holding the three versions) and `{path}` (the work-tree file to write).
+#[derive(Debug, Clone, Default)]
+pub struct Hub {
+    pub glob: String,
+    pub rebuild: Vec<String>,
+}
+
+/// What to take when a path matching `glob` conflicts and no hub rebuilds it: `lane` (theirs), `stack` (ours) or `manual` (refuse).
+#[derive(Debug, Clone, Default)]
+pub struct Resolver {
+    pub glob: String,
+    pub take: String,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +38,15 @@ pub struct BatchConfig {
     pub chain_command: Vec<String>,
     /// Step names of the chain, for the memory admission (`[chain] steps`).
     pub chain_steps: Vec<String>,
+    /// `[stack] command`: builds the stack itself (the repository's own script with its hub rebuild and guard).
+    pub stack_command: Vec<String>,
+    pub hubs: Vec<Hub>,
+    pub resolvers: Vec<Resolver>,
+    /// `[chain] cache_verify_command`: proves a cached step belongs to this host and sha (env GATETRAIN_STEP, GATETRAIN_SHA).
+    pub cache_verify_command: Vec<String>,
+    /// `[postmerge] command`: after the merge, in `dir` (default: the batch checkout), before the deploy targets.
+    pub postmerge_command: Vec<String>,
+    pub postmerge_dir: Option<String>,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -34,6 +60,12 @@ impl Default for BatchConfig {
             preflight_command: vec![],
             chain_command: vec![],
             chain_steps: vec![],
+            stack_command: vec![],
+            hubs: vec![],
+            resolvers: vec![],
+            cache_verify_command: vec![],
+            postmerge_command: vec![],
+            postmerge_dir: None,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -63,6 +95,20 @@ impl BatchConfig {
         c.preflight_command = argv(v.get("preflight").and_then(|p| p.get("command")));
         c.chain_command = argv(v.get("chain").and_then(|p| p.get("command")));
         c.chain_steps = argv(v.get("chain").and_then(|p| p.get("steps")));
+        if let Some(s) = v.get("stack") {
+            c.stack_command = argv(s.get("command"));
+            for h in s.get("hubs").and_then(|h| h.as_array()).into_iter().flatten() {
+                c.hubs.push(Hub { glob: h.get("glob").and_then(|g| g.as_str()).unwrap_or_default().to_string(), rebuild: argv(h.get("rebuild")) });
+            }
+            for r in s.get("resolvers").and_then(|h| h.as_array()).into_iter().flatten() {
+                c.resolvers.push(Resolver { glob: r.get("glob").and_then(|g| g.as_str()).unwrap_or_default().to_string(), take: r.get("take").and_then(|g| g.as_str()).unwrap_or("manual").to_string() });
+            }
+        }
+        c.cache_verify_command = argv(v.get("chain").and_then(|p| p.get("cache_verify_command")));
+        if let Some(p) = v.get("postmerge") {
+            c.postmerge_command = argv(p.get("command"));
+            c.postmerge_dir = p.get("dir").and_then(|d| d.as_str()).map(String::from);
+        }
         if let Some(p) = v.get("batch").and_then(|b| b.get("protected")).and_then(|p| p.as_str()) {
             c.protected = p.to_string();
         }
@@ -74,6 +120,7 @@ impl BatchConfig {
                         command: argv(t.get("command")),
                         health: argv(t.get("health")),
                         tier: t.get("tier").and_then(|x| x.as_str()).unwrap_or("staging").to_string(),
+                        health_timeout_min: t.get("health_timeout_min").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).unwrap_or(0.0),
                     },
                 );
             }

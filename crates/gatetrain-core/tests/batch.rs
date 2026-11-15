@@ -331,3 +331,349 @@ fn update_and_delete_on_batch_events_abort() {
     assert!(d.unwrap_err().to_string().contains("append-only"));
     assert_eq!(fx.state("b1"), "open", "state is only what the events fold to");
 }
+
+// ============================================================ the guards of the real-batch review (GT-COVER section C)
+
+static LATER: fn() -> String = later;
+fn later() -> String {
+    "2026-11-15T11:00:00+00:00".to_string()
+}
+
+impl Fx {
+    fn adv_at(&mut self, id: &str, now: &'static fn() -> String) -> gatetrain_core::Result<Outcome> {
+        let adm = AllowAll;
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        e.advance(id)
+    }
+
+    /// lane1 and lane2 both add a line after the same line of a.txt: the second pick of the stack conflicts.
+    fn conflicting(extra: &str) -> Fx {
+        let fx = Fx::new(extra);
+        for (lane, line) in [("lane1", "from lane1"), ("lane2", "from lane2")] {
+            g(&fx.repo, &["switch", "-q", lane]);
+            std::fs::write(fx.repo.join("a.txt"), format!("a\n{line}\n")).unwrap();
+            g(&fx.repo, &["commit", "-q", "-am", &format!("fix: {lane} edits a.txt")]);
+        }
+        g(&fx.repo, &["switch", "-q", "main"]);
+        fx
+    }
+
+    fn failed_text(&mut self, id: &str) -> String {
+        match self.adv(id).unwrap() {
+            Outcome::Failed(m) => m,
+            x => panic!("expected a failure, got {x:?}"),
+        }
+    }
+
+    fn refused(&mut self, id: &str) -> (String, String) {
+        match self.adv(id).unwrap() {
+            Outcome::Refused { rule, because, .. } => (rule, because),
+            x => panic!("expected a refusal, got {x:?}"),
+        }
+    }
+
+    fn outside(&self, name: &str) -> PathBuf {
+        self.repo.parent().unwrap().join(name)
+    }
+}
+
+// ---- 1. the stack plugin and the hub resolvers
+
+#[test]
+fn a_stack_command_builds_the_stack_and_the_engine_checks_what_it_left() {
+    let mut fx = Fx::new("[stack]\ncommand = [\"sh\", \"-c\", \"git cherry-pick lane1 lane2 && echo \\\"$GATETRAIN_BRANCH|$GATETRAIN_LANES\\\" > ../stack.ran\"]\n");
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    let subjects = g(&fx.repo, &["log", "--format=%s", "main..batch/b1/s1"]);
+    assert!(subjects.contains("feat: lane1") && subjects.contains("feat: lane2"), "{subjects}");
+    let ran = std::fs::read_to_string(fx.outside("stack.ran")).unwrap();
+    assert_eq!(ran.trim(), "batch/b1/s1|lane1 lane2", "the plugin got the branch and the lanes");
+}
+
+#[test]
+fn a_failing_or_incomplete_stack_command_fails_the_stack() {
+    let mut fx = Fx::new("[stack]\ncommand = [\"sh\", \"-c\", \"exit 7\"]\n");
+    fx.open("b1");
+    assert!(fx.failed_text("b1").contains("stack command exited 7"));
+    assert_eq!(fx.state("b1"), "open");
+    // a plugin that leaves a lane out: the tip subject is missing from the stack (L33)
+    let mut fx = Fx::new("[stack]\ncommand = [\"sh\", \"-c\", \"git cherry-pick lane1\"]\n");
+    fx.open("b1");
+    let m = fx.failed_text("b1");
+    assert!(m.contains("lane2") && m.contains("L33"), "{m}");
+    // a plugin that leaves uncommitted files
+    let mut fx = Fx::new("[stack]\ncommand = [\"sh\", \"-c\", \"git cherry-pick lane1 lane2 && echo x > left.txt\"]\n");
+    fx.open("b1");
+    let m = fx.failed_text("b1");
+    assert!(m.contains("uncommitted") && m.contains("left.txt"), "{m}");
+}
+
+#[test]
+fn a_conflict_with_no_hub_and_no_resolver_stops_the_stack_and_leaves_the_checkout_clean() {
+    let mut fx = Fx::conflicting("");
+    fx.open("b1");
+    let m = fx.failed_text("b1");
+    assert!(m.contains("conflict applying") && m.contains("lane2"), "{m}");
+    assert_eq!(g(&fx.repo, &["status", "--porcelain"]), "", "the pick was aborted");
+}
+
+#[test]
+fn a_resolver_takes_a_side_and_a_hub_is_rebuilt_from_the_three_versions() {
+    let mut fx = Fx::conflicting("[stack]\nresolvers = [{ glob = \"*.txt\", take = \"lane\" }]\n");
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    assert_eq!(g(&fx.repo, &["show", "batch/b1/s1:a.txt"]), "a\nfrom lane2", "the lane (theirs) won");
+    // a hub: both sides kept by the repository's own rebuild command
+    let mut fx = Fx::conflicting("[stack]\nhubs = [{ glob = \"a.*\", rebuild = [\"sh\", \"-c\", \"cat {ours} {theirs} | sort -u > {path}\"] }]\n");
+    fx.open("b2");
+    fx.step("b2", "stacked");
+    assert_eq!(g(&fx.repo, &["show", "batch/b2/s1:a.txt"]), "a\nfrom lane1\nfrom lane2");
+    assert_eq!(g(&fx.repo, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_manual_resolver_a_failing_rebuild_and_leftover_markers_all_stop_the_stack() {
+    let mut fx = Fx::conflicting("[stack]\nresolvers = [{ glob = \"a.txt\", take = \"manual\" }]\n");
+    fx.open("b1");
+    assert!(fx.failed_text("b1").contains("manual"));
+    let mut fx = Fx::conflicting("[stack]\nhubs = [{ glob = \"a.txt\", rebuild = [\"sh\", \"-c\", \"exit 4\"] }]\n");
+    fx.open("b1");
+    assert!(fx.failed_text("b1").contains("hub rebuild for a.txt exited 4"));
+    // the hub guard: a rebuild that writes conflict markers is refused
+    let mut fx = Fx::conflicting("[stack]\nhubs = [{ glob = \"a.txt\", rebuild = [\"sh\", \"-c\", \"printf '<<<<<<< x\\\\nboth\\\\n>>>>>>> y\\\\n' > {path}\"] }]\n");
+    fx.open("b1");
+    assert!(fx.failed_text("b1").contains("conflict markers"), "markers");
+    assert_eq!(g(&fx.repo, &["status", "--porcelain"]), "");
+}
+
+// ---- 2. settle before the chain: tested sha = merged sha
+
+#[test]
+fn settle_is_the_last_commit_before_the_chain() {
+    let mut fx = Fx::new("");
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    // someone commits to the batch branch after settle: preflight refuses, naming the rule
+    std::fs::write(fx.repo.join("late.txt"), "late\n").unwrap();
+    g(&fx.repo, &["add", "--", "late.txt"]);
+    g(&fx.repo, &["commit", "-q", "-m", "late"]);
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "settle.tip-moved");
+    assert!(because.contains("settle must be the last commit"), "{because}");
+    assert_eq!(fx.state("b1"), "settled");
+}
+
+#[test]
+fn the_chain_never_starts_on_a_dirty_tree() {
+    let mut fx = Fx::new("");
+    fx.open("b1");
+    for s in ["stacked", "settled", "preflighted"] {
+        fx.step("b1", s);
+    }
+    std::fs::write(fx.repo.join("generated-by-preflight.txt"), "x\n").unwrap();
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "floor.clean-tree");
+    assert!(because.contains("generated-by-preflight.txt"), "{because}");
+    assert!(fx.lock.launches.lock().unwrap().is_empty(), "nothing was launched");
+    // and a commit after the preflight stamp is the settle rule, before the stamp rule
+    std::fs::remove_file(fx.repo.join("generated-by-preflight.txt")).unwrap();
+    std::fs::write(fx.repo.join("late.txt"), "late\n").unwrap();
+    g(&fx.repo, &["add", "--", "late.txt"]);
+    g(&fx.repo, &["commit", "-q", "-m", "late"]);
+    assert_eq!(fx.refused("b1").0, "settle.tip-moved");
+}
+
+// ---- settle failure paths
+
+#[test]
+fn a_failing_regen_command_fails_settle_and_the_batch_stays_stacked() {
+    let mut fx = Fx::new("");
+    fx.cfg.regen_command = vec!["sh".into(), "-c".into(), "echo boom >&2; exit 3".into()];
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    let m = fx.failed_text("b1");
+    assert!(m.contains("regen command exited 3") && m.contains("boom"), "{m}");
+    assert_eq!(fx.state("b1"), "stacked");
+}
+
+#[test]
+fn a_generator_that_never_reaches_a_fixpoint_stops_after_max_passes() {
+    let mut fx = Fx::new("");
+    fx.cfg.regen_command = vec!["sh".into(), "-c".into(), "mkdir -p gen && echo x >> gen/out.txt".into()]; // grows on every pass
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    let m = fx.failed_text("b1");
+    assert!(m.contains("no fixpoint after 3 regen passes"), "{m}");
+    assert_eq!(fx.state("b1"), "stacked");
+    let n = g(&fx.repo, &["log", "--format=%s", "main..HEAD"]).lines().filter(|s| s.starts_with("chore(batch): regenerate")).count();
+    assert_eq!(n, 3, "the committed passes are kept, never deleted");
+}
+
+#[test]
+fn a_generator_that_writes_outside_its_directories_fails_settle_naming_the_path() {
+    let mut fx = Fx::new("");
+    fx.cfg.regen_command = vec!["sh".into(), "-c".into(), "echo x > outside.txt".into()];
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    let m = fx.failed_text("b1");
+    assert!(m.contains("floor.named-paths") && m.contains("outside.txt"), "{m}");
+}
+
+#[test]
+fn a_stack_that_commits_conflict_markers_is_refused_before_settle_runs() {
+    let mut fx = Fx::new("");
+    g(&fx.repo, &["switch", "-q", "lane1"]);
+    std::fs::write(fx.repo.join("notes.txt"), "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> lane\n").unwrap();
+    g(&fx.repo, &["add", "--", "notes.txt"]);
+    g(&fx.repo, &["commit", "-q", "-m", "chore: oops, markers"]);
+    g(&fx.repo, &["switch", "-q", "main"]);
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "stack.conflict-markers");
+    assert!(because.contains("notes.txt"), "{because}");
+    assert!(!fx.repo.join("gen").exists(), "regen did not run");
+}
+
+// ---- 3. the cached-step guard
+
+const CACHED: &str = "STEP_START a 2026-11-11T09:00:00Z\nSTEP_CACHED a\nSTEP_TIME a 0s\nSTEP_EXIT a 0\nGATES_DONE\n";
+
+#[test]
+fn a_proof_with_a_cached_step_and_no_verifier_is_refused() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1");
+    fx.write_log(CACHED);
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "proof.cached-unverified");
+    assert!(because.contains("step(s) a came from a step cache"), "{because}");
+    assert_eq!(fx.state("b1"), "proving");
+}
+
+#[test]
+fn a_cached_step_counts_only_when_the_verifier_vouches_for_it() {
+    // the verifier sees the step name and the sha; it vouches for step a only
+    let mut fx = Fx::new("cache_verify_command = [\"sh\", \"-c\", \"test \\\"$GATETRAIN_STEP\\\" = a && test -n \\\"$GATETRAIN_SHA\\\"\"]\n");
+    fx.drive_to_proving("b1");
+    fx.write_log(CACHED);
+    fx.step("b1", "proven");
+    let mut fx = Fx::new("cache_verify_command = [\"sh\", \"-c\", \"exit 1\"]\n");
+    fx.drive_to_proving("b1");
+    fx.write_log(CACHED);
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "proof.cached-unverified");
+    assert!(because.contains("not verified"), "{because}");
+}
+
+// ---- 4. the main checkout after a ref swap
+
+#[test]
+fn a_checked_out_protected_branch_is_fast_forwarded_with_its_working_tree() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    fx.step("b1", "proven");
+    // main is checked out in a second working tree (the deploy checkout)
+    let main_wt = fx.outside("main-wt");
+    g(&fx.repo, &["worktree", "add", "-q", &fwd(&main_wt), "main"]);
+    let tip = g(&fx.repo, &["rev-parse", "batch/b1/s1"]);
+    fx.step("b1", "merged");
+    assert_eq!(g(&fx.repo, &["rev-parse", "main"]), tip);
+    assert_eq!(g(&main_wt, &["rev-parse", "HEAD"]), tip, "the checkout moved with the ref");
+    assert!(main_wt.join("one.txt").exists() && main_wt.join("two.txt").exists(), "its working tree has the merged files");
+    assert_eq!(g(&main_wt, &["status", "--porcelain"]), "", "and no phantom reverse changes");
+}
+
+#[test]
+fn a_dirty_checked_out_protected_branch_refuses_the_merge() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    fx.step("b1", "proven");
+    let main_wt = fx.outside("main-wt");
+    g(&fx.repo, &["worktree", "add", "-q", &fwd(&main_wt), "main"]);
+    std::fs::write(main_wt.join("a.txt"), "edited by hand\n").unwrap();
+    let before = g(&fx.repo, &["rev-parse", "main"]);
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "merge.checkout-dirty");
+    assert!(because.contains("a.txt"), "{because}");
+    assert_eq!(g(&fx.repo, &["rev-parse", "main"]), before, "the protected branch did not move");
+    assert_eq!(fx.state("b1"), "proven");
+}
+
+// ---- 5. post-merge plugin, health wait and health timeout
+
+fn deployed(extra: &str) -> Fx {
+    let mut fx = Fx::new(extra);
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    fx.step("b1", "proven");
+    fx.step("b1", "merged");
+    fx
+}
+
+#[test]
+fn the_post_merge_command_runs_before_the_first_deploy_and_its_failure_stops_the_deploy() {
+    let mut fx = deployed(
+        "[postmerge]\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_SHA > ../postmerge.ran\"]\n\
+         [deploy.staging]\ncommand = [\"sh\", \"-c\", \"test -f ../postmerge.ran && echo deployed > ../deploy.ran\"]\nhealth = [\"sh\", \"-c\", \"true\"]\n",
+    );
+    fx.step("b1", "deploying");
+    let tip = g(&fx.repo, &["rev-parse", "main"]);
+    assert_eq!(std::fs::read_to_string(fx.outside("postmerge.ran")).unwrap().trim(), tip, "it got the merged sha");
+    assert!(fx.outside("deploy.ran").exists(), "the deploy saw the post-merge result");
+    // a failing post-merge: the deploy never runs
+    let mut fx = deployed("[postmerge]\ncommand = [\"sh\", \"-c\", \"echo no deps >&2; exit 5\"]\n[deploy.staging]\ncommand = [\"sh\", \"-c\", \"echo x > ../deploy.ran\"]\nhealth = [\"sh\", \"-c\", \"true\"]\n");
+    let m = fx.failed_text("b1");
+    assert!(m.contains("post-merge command exited 5") && m.contains("no deps"), "{m}");
+    assert!(!fx.outside("deploy.ran").exists());
+    assert_eq!(fx.state("b1"), "merged");
+}
+
+#[test]
+fn health_is_asked_about_the_merged_sha_and_the_batch_waits_until_it_answers() {
+    let mut fx = deployed(
+        "[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\n\
+         health = [\"sh\", \"-c\", \"echo $1 > ../health.asked; test -f ../ready\", \"sh\", \"{sha}\"]\n",
+    );
+    fx.step("b1", "deploying");
+    let tip = g(&fx.repo, &["rev-parse", "main"]);
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Waiting(m) if m.contains("healthy")), "not healthy yet: wait");
+    assert_eq!(fx.state("b1"), "deploying");
+    assert_eq!(std::fs::read_to_string(fx.outside("health.asked")).unwrap().trim(), tip, "asked about the new build");
+    std::fs::write(fx.outside("ready"), "").unwrap();
+    fx.step("b1", "live");
+}
+
+#[test]
+fn a_target_with_no_health_check_cannot_go_live() {
+    let mut fx = deployed("[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\n");
+    fx.step("b1", "deploying");
+    assert_eq!(fx.refused("b1").0, "deploy.health-missing");
+    assert_eq!(fx.state("b1"), "deploying");
+}
+
+#[test]
+fn health_that_stays_down_past_its_timeout_is_refused_once_and_a_late_recovery_still_goes_live() {
+    let mut fx = deployed("[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"test -f ../ready\"]\nhealth_timeout_min = 30\n");
+    fx.step("b1", "deploying");
+    // 10:00 deployed; at 10:00 the wait is fresh, at 11:00 it is over the 30 minutes
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Waiting(_)));
+    let o = fx.adv_at("b1", &LATER).unwrap();
+    match &o {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "deploy.health-timeout");
+            assert!(because.contains("30 min"), "{because}");
+        }
+        x => panic!("{x:?}"),
+    }
+    assert_eq!(o.exit_code(), 3);
+    let n = fx.decisions().len();
+    fx.adv_at("b1", &LATER).unwrap();
+    assert_eq!(fx.decisions().len(), n, "an identical refusal is logged once");
+    assert_eq!(fx.state("b1"), "deploying");
+    // the target finally answers: it goes live even after the deadline
+    std::fs::write(fx.outside("ready"), "").unwrap();
+    assert!(matches!(fx.adv_at("b1", &LATER).unwrap(), Outcome::Advanced { to, .. } if to == "live"));
+}

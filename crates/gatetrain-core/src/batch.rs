@@ -9,6 +9,7 @@ use crate::declog::{self, NewEntry};
 use crate::ledger::Ledger;
 use crate::logfmt::parse_log;
 use crate::{Error, Result};
+use regex::Regex;
 use rusqlite::params;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -268,6 +269,113 @@ fn dirty_paths(dir: &Path) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Raw bytes of a git command (a blob must not be trimmed or re-encoded).
+fn git_bytes(dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
+    let o = Command::new("git").arg("-C").arg(dir).args(args).output()?;
+    Ok((o.status.success(), o.stdout))
+}
+
+/// Paths with an unresolved merge conflict.
+fn unmerged_paths(dir: &Path) -> Result<Vec<String>> {
+    Ok(git(dir, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+}
+
+/// `**/` any folders, `**` anything, `*` anything but a slash, `?` one character but a slash.
+fn glob_match(glob: &str, path: &str) -> bool {
+    let mut re = String::from("^");
+    let cs: Vec<char> = glob.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '*' if cs.get(i + 1) == Some(&'*') => {
+                if cs.get(i + 2) == Some(&'/') {
+                    re.push_str("(?:.*/)?");
+                    i += 3;
+                } else {
+                    re.push_str(".*");
+                    i += 2;
+                }
+                continue;
+            }
+            '*' => re.push_str("[^/]*"),
+            '?' => re.push_str("[^/]"),
+            c => re.push_str(&regex::escape(&c.to_string())),
+        }
+        i += 1;
+    }
+    re.push('$');
+    Regex::new(&re).map(|r| r.is_match(path)).unwrap_or(false)
+}
+
+/// A conflict marker line left in a file (the start or the end of a conflict).
+fn has_markers(text: &str) -> bool {
+    text.lines().any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> "))
+}
+
+/// Files whose diff `base..tip` ADDS both a start and an end conflict marker (a file with markers was committed).
+fn marker_paths(dir: &Path, base: &str, tip: &str) -> Result<Vec<String>> {
+    let diff = git(dir, &["diff", "-U0", "--no-color", base, tip])?;
+    let (mut out, mut cur, mut start, mut end) = (vec![], None::<String>, false, false);
+    let flush = |cur: &mut Option<String>, start: &mut bool, end: &mut bool, out: &mut Vec<String>| {
+        if let Some(c) = cur.take() {
+            if *start && *end {
+                out.push(c);
+            }
+        }
+        *start = false;
+        *end = false;
+    };
+    for l in diff.lines() {
+        if let Some(p) = l.strip_prefix("+++ b/") {
+            flush(&mut cur, &mut start, &mut end, &mut out);
+            cur = Some(p.to_string());
+        } else if l.starts_with("+<<<<<<< ") {
+            start = true;
+        } else if l.starts_with("+>>>>>>> ") {
+            end = true;
+        }
+    }
+    flush(&mut cur, &mut start, &mut end, &mut out);
+    Ok(out)
+}
+
+/// The worktree that has the protected branch checked out, if any.
+fn protected_checkout(dir: &Path, protected: &str) -> Result<Option<String>> {
+    let out = git(dir, &["worktree", "list", "--porcelain"])?;
+    let want = format!("branch refs/heads/{protected}");
+    let mut path: Option<String> = None;
+    for l in out.lines() {
+        if let Some(p) = l.strip_prefix("worktree ") {
+            path = Some(p.trim().to_string());
+        } else if l.trim() == want {
+            return Ok(path);
+        }
+    }
+    Ok(None)
+}
+
+/// `YYYY-MM-DDTHH:MM:SS[.fff](Z|+HH:MM|-HH:MM)` as seconds since the epoch.
+fn parse_iso(s: &str) -> Option<i64> {
+    let n = |a: usize, b: usize| s.get(a..b)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, se) = (n(0, 4)?, n(5, 7)?, n(8, 10)?, n(11, 13)?, n(14, 16)?, n(17, 19)?);
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * ((mo + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let mut secs = days * 86400 + h * 3600 + mi * 60 + se;
+    let mut rest = s.get(19..)?;
+    if let Some(r) = rest.strip_prefix('.') {
+        rest = r.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    if let Some(sign) = rest.chars().next().filter(|c| *c == '+' || *c == '-') {
+        let off = n(s.len() - rest.len() + 1, s.len() - rest.len() + 3)? * 3600 + n(s.len() - rest.len() + 4, s.len() - rest.len() + 6)? * 60;
+        secs -= if sign == '+' { off } else { -off };
+    }
+    Some(secs)
+}
+
 fn in_dirs(path: &str, dirs: &[String]) -> bool {
     dirs.iter().any(|d| path.starts_with(&format!("{}/", d.trim_end_matches('/'))))
 }
@@ -311,6 +419,60 @@ fn short(sha: &str) -> &str {
 }
 
 impl<'a> Engine<'a> {
+    /// A cherry-pick stopped on conflicts: hubs are rebuilt by their command, other paths are taken from a side by their resolver,
+    /// anything else (or a result that still holds conflict markers) stops the stack. `Err(why)` leaves the pick for the caller to abort.
+    fn resolve(&self, id: &str, wd: &Path, first_err: &str) -> Result<std::result::Result<(), String>> {
+        let paths = unmerged_paths(wd)?;
+        if paths.is_empty() || (self.cfg.hubs.is_empty() && self.cfg.resolvers.is_empty()) {
+            return Ok(Err(first_err.to_string()));
+        }
+        let tmp = self.state_dir.join("tmp");
+        std::fs::create_dir_all(&tmp)?;
+        for (i, p) in paths.iter().enumerate() {
+            if let Some(h) = self.cfg.hubs.iter().find(|h| glob_match(&h.glob, p)) {
+                let stage = |n: u8, name: &str| -> Result<PathBuf> {
+                    let f = tmp.join(format!("{id}-{i}-{name}"));
+                    let (ok, bytes) = git_bytes(wd, &["show", &format!(":{n}:{p}")])?;
+                    std::fs::write(&f, if ok { bytes } else { vec![] })?; // an add/add conflict has no base
+                    Ok(f)
+                };
+                let (b, o, t) = (stage(1, "base")?, stage(2, "ours")?, stage(3, "theirs")?);
+                let target = wd.join(p);
+                let cmd: Vec<String> = h
+                    .rebuild
+                    .iter()
+                    .map(|a| {
+                        let fwd = |p: &Path| p.to_string_lossy().replace('\\', "/"); // forward slashes work in a POSIX shell and in Windows programs alike
+                        a.replace("{base}", &fwd(&b)).replace("{ours}", &fwd(&o)).replace("{theirs}", &fwd(&t)).replace("{path}", &fwd(&target))
+                    })
+                    .collect();
+                let (rc, err) = run_plugin(&cmd, wd, &[])?;
+                if rc != 0 {
+                    return Ok(Err(format!("the hub rebuild for {p} exited {rc}: {err}")));
+                }
+            } else if let Some(r) = self.cfg.resolvers.iter().find(|r| glob_match(&r.glob, p)) {
+                match r.take.as_str() {
+                    "lane" => git(wd, &["checkout", "--theirs", "--", p]).map(|_| ())?,
+                    "stack" => git(wd, &["checkout", "--ours", "--", p]).map(|_| ())?,
+                    _ => return Ok(Err(format!("{p} conflicts and its resolver says manual"))),
+                }
+            } else {
+                return Ok(Err(format!("{p} conflicts and no hub or resolver covers it")));
+            }
+            // the hub guard: a resolved file never keeps conflict markers
+            let text = std::fs::read(wd.join(p)).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            if has_markers(&text) {
+                return Ok(Err(format!("{p} still holds conflict markers after its resolver")));
+            }
+            git(wd, &["add", "--", p])?;
+        }
+        let (ok, _, err) = git_raw(wd, &["-c", "core.editor=true", "cherry-pick", "--continue"])?;
+        if !ok {
+            return Ok(Err(format!("cherry-pick --continue failed: {}", err.lines().next().unwrap_or(""))));
+        }
+        Ok(Ok(()))
+    }
+
     // ------------------------------------------------------------ persistence
 
     pub fn events(&self, id: &str) -> Result<Vec<Ev>> {
@@ -635,6 +797,10 @@ impl<'a> Engine<'a> {
                 if on != branch {
                     return Ok(Planned::Refuse("stack.branch-checked-out".into(), format!("the checkout is on {on}, the batch branch is {branch}")));
                 }
+                let marked = marker_paths(&wd, &f.need("base_sha")?, &self.tip(f)?)?;
+                if !marked.is_empty() {
+                    return Ok(Planned::Refuse("stack.conflict-markers".into(), format!("the stack commits conflict markers in: {}", marked.join(", "))));
+                }
                 let stray: Vec<String> = dirty_paths(&wd)?.into_iter().filter(|p| !in_dirs(p, &self.cfg.generated_dirs)).collect();
                 if !stray.is_empty() {
                     return Ok(Planned::Refuse("floor.named-paths".into(), format!("paths outside the generated directories are changed: {}", stray.join(", "))));
@@ -648,12 +814,24 @@ impl<'a> Engine<'a> {
                 if let Some(why) = self.adm.admit("light", id)? {
                     return Ok(Planned::Refuse("host.admission".into(), why));
                 }
-                Ok(mk(Some(self.tip(f)?), None, json!({})))
+                let tip = self.tip(f)?;
+                if let Some(st) = f.s("settled_tip").filter(|st| *st != tip) {
+                    return Ok(Planned::Refuse("settle.tip-moved".into(), format!("the batch branch moved from the settled {} to {} after settle; settle must be the last commit before the chain", short(&st), short(&tip))));
+                }
+                Ok(mk(Some(tip), None, json!({})))
             }
             "T4" => {
                 let tip = self.tip(f)?;
+                if let Some(st) = f.s("settled_tip").filter(|st| *st != tip) {
+                    return Ok(Planned::Refuse("settle.tip-moved".into(), format!("the batch branch moved from the settled {} to {} after settle; settle must be the last commit before the chain", short(&st), short(&tip))));
+                }
                 if !self.stamp_path(&tip).exists() {
                     return Ok(Planned::Refuse("preflight.stamp-for-sha".into(), format!("no green preflight stamp for {}", short(&tip))));
+                }
+                let dirty = dirty_paths(&wd)?;
+                if !dirty.is_empty() {
+                    let shown: Vec<&str> = dirty.iter().take(5).map(String::as_str).collect();
+                    return Ok(Planned::Refuse("floor.clean-tree".into(), format!("the checkout has uncommitted paths ({}); the chain would test files that are not in the sha that is merged", shown.join(", "))));
                 }
                 if self.cfg.chain_command.is_empty() {
                     return Ok(Planned::Refuse("config.chain-command".into(), "gatetrain.toml has no [chain] command".into()));
@@ -677,7 +855,16 @@ impl<'a> Engine<'a> {
                 if !ff {
                     return Ok(Planned::Refuse("merge.fast-forward".into(), format!("{} cannot fast-forward to {}; the protected branch moved", self.cfg.protected, short(&tip))));
                 }
-                Ok(mk(Some(tip.clone()), None, json!({"merge_old": old, "merge_new": tip, "protected": self.cfg.protected, "mode": "sha"})))
+                // a checked-out protected branch must move with its working tree: fast-forward it there instead of moving the bare ref
+                let checkout = protected_checkout(&wd, &self.cfg.protected)?;
+                if let Some(c) = &checkout {
+                    let dirty = dirty_paths(Path::new(c))?;
+                    if !dirty.is_empty() {
+                        let shown: Vec<&str> = dirty.iter().take(3).map(String::as_str).collect();
+                        return Ok(Planned::Refuse("merge.checkout-dirty".into(), format!("{} is checked out in {c} with uncommitted changes ({}); commit or stash there so the merge can update it", self.cfg.protected, shown.join(", "))));
+                    }
+                }
+                Ok(mk(Some(tip.clone()), None, json!({"merge_old": old, "merge_new": tip, "protected": self.cfg.protected, "mode": "sha", "checkout": checkout})))
             }
             "T8a" => {
                 let (mut auto, mut prod) = (vec![], vec![]);
@@ -717,18 +904,50 @@ impl<'a> Engine<'a> {
                 let base = f.need("base_sha")?;
                 let branch = plan.detail["branch"].as_str().unwrap_or_default().to_string();
                 git(&wd, &["switch", "-c", &branch, &base])?;
+                let lanes = f.facts.get("lanes").and_then(|l| l.as_array()).cloned().unwrap_or_default();
                 let mut subjects = vec![];
-                for l in f.facts.get("lanes").and_then(|l| l.as_array()).cloned().unwrap_or_default() {
-                    let tip = l["tip"].as_str().unwrap_or_default().to_string();
-                    let commits = git(&wd, &["rev-list", "--reverse", "--no-merges", &format!("{base}..{tip}")])?;
-                    for c in commits.lines() {
-                        let (ok, _, err) = git_raw(&wd, &["cherry-pick", c])?;
-                        if !ok {
-                            let _ = git_raw(&wd, &["cherry-pick", "--abort"]);
-                            return Ok(Err(format!("conflict applying {} from lane {}: {}", short(c), l["ref"].as_str().unwrap_or("?"), err.lines().next().unwrap_or(""))));
-                        }
+                if !self.cfg.stack_command.is_empty() {
+                    // the repository's own stack script (hub rebuild, hub guard) builds the stack; the engine checks what it left
+                    let refs: Vec<String> = lanes.iter().map(|l| l["ref"].as_str().unwrap_or_default().to_string()).collect();
+                    let tips: Vec<String> = lanes.iter().map(|l| format!("{}={}", l["ref"].as_str().unwrap_or_default(), l["tip"].as_str().unwrap_or_default())).collect();
+                    let mut env = self.env(id, f, &base, "", "");
+                    env.push(("GATETRAIN_BRANCH".into(), branch.clone()));
+                    env.push(("GATETRAIN_LANES".into(), refs.join(" ")));
+                    env.push(("GATETRAIN_LANE_TIPS".into(), tips.join(" ")));
+                    let (rc, err) = run_plugin(&self.cfg.stack_command, &wd, &env)?;
+                    if rc != 0 {
+                        return Ok(Err(format!("stack command exited {rc}: {err}")));
                     }
-                    subjects.push((l["ref"].as_str().unwrap_or("?").to_string(), git(&wd, &["log", "-1", "--format=%s", &tip])?));
+                    let on = git(&wd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+                    if on != branch {
+                        return Ok(Err(format!("stack command left the checkout on {on}, not on {branch}")));
+                    }
+                    let left = dirty_paths(&wd)?;
+                    if !left.is_empty() {
+                        return Ok(Err(format!("stack command left uncommitted paths: {}", left.join(", "))));
+                    }
+                    for l in &lanes {
+                        subjects.push((l["ref"].as_str().unwrap_or("?").to_string(), git(&wd, &["log", "-1", "--format=%s", l["tip"].as_str().unwrap_or_default()])?));
+                    }
+                } else {
+                    for l in &lanes {
+                        let tip = l["tip"].as_str().unwrap_or_default().to_string();
+                        let commits = git(&wd, &["rev-list", "--reverse", "--no-merges", &format!("{base}..{tip}")])?;
+                        for c in commits.lines() {
+                            let (ok, _, err) = git_raw(&wd, &["cherry-pick", c])?;
+                            if !ok {
+                                let first = err.lines().next().unwrap_or("").to_string();
+                                let why = match self.resolve(id, &wd, &first) {
+                                    Ok(Ok(())) => continue,
+                                    Ok(Err(why)) => why,
+                                    Err(e) => e.to_string(),
+                                };
+                                let _ = git_raw(&wd, &["cherry-pick", "--abort"]);
+                                return Ok(Err(format!("conflict applying {} from lane {}: {why}", short(c), l["ref"].as_str().unwrap_or("?"))));
+                            }
+                        }
+                        subjects.push((l["ref"].as_str().unwrap_or("?").to_string(), git(&wd, &["log", "-1", "--format=%s", &tip])?));
+                    }
                 }
                 let have = git(&wd, &["log", "--format=%s", &format!("{base}..{branch}")])?;
                 for (lane, s) in subjects {
@@ -742,7 +961,8 @@ impl<'a> Engine<'a> {
             "T2" => {
                 let dirs = self.cfg.generated_dirs.clone();
                 if self.cfg.regen_command.is_empty() {
-                    return Ok(Ok(Done { output: Some(git(&wd, &["rev-parse", "HEAD"])?), extra: json!({"passes": 0, "paths": []}) }));
+                    let head = git(&wd, &["rev-parse", "HEAD"])?;
+                    return Ok(Ok(Done { output: Some(head.clone()), extra: json!({"passes": 0, "paths": [], "settled_tip": head}) }));
                 }
                 let env = self.env(id, f, &plan.input_sha.clone().unwrap_or_default(), "", "");
                 let (mut committed, mut passes) = (vec![], 0usize);
@@ -770,7 +990,8 @@ impl<'a> Engine<'a> {
                     git(&wd, &["commit", "-q", "-m", &format!("chore(batch): regenerate generated files for {id} (pass {passes})")])?;
                     committed.extend(dirty);
                 }
-                Ok(Ok(Done { output: Some(git(&wd, &["rev-parse", "HEAD"])?), extra: json!({"passes": passes, "paths": committed}) }))
+                let head = git(&wd, &["rev-parse", "HEAD"])?;
+                Ok(Ok(Done { output: Some(head.clone()), extra: json!({"passes": passes, "paths": committed, "settled_tip": head}) }))
             }
             "T3" => {
                 let sha = plan.input_sha.clone().unwrap_or_default();
@@ -805,15 +1026,36 @@ impl<'a> Engine<'a> {
             "T7" => {
                 let new = plan.detail["merge_new"].as_str().unwrap_or_default();
                 let old = plan.detail["merge_old"].as_str().unwrap_or_default();
-                // compare-and-swap: update-ref fails when the ref no longer holds `old`
-                let (ok, _, err) = git_raw(&wd, &["update-ref", &format!("refs/heads/{}", self.cfg.protected), new, old])?;
-                if !ok {
-                    return Ok(Err(format!("compare-and-swap of {} failed: {}", self.cfg.protected, err.trim())));
+                if let Some(c) = plan.detail["checkout"].as_str() {
+                    // the branch is checked out in `c`: a fast-forward there moves the ref and the working tree together
+                    let (ok, _, err) = git_raw(Path::new(c), &["merge", "--ff-only", new])?;
+                    if !ok {
+                        return Ok(Err(format!("fast-forward of {} in {c} failed: {}", self.cfg.protected, err.trim())));
+                    }
+                    let cur = git(&wd, &["rev-parse", &format!("refs/heads/{}", self.cfg.protected)])?;
+                    if cur != new || !dirty_paths(Path::new(c))?.is_empty() {
+                        return Ok(Err(format!("after the fast-forward {c} is not at {} with a clean tree", short(new))));
+                    }
+                } else {
+                    // compare-and-swap: update-ref fails when the ref no longer holds `old`
+                    let (ok, _, err) = git_raw(&wd, &["update-ref", &format!("refs/heads/{}", self.cfg.protected), new, old])?;
+                    if !ok {
+                        return Ok(Err(format!("compare-and-swap of {} failed: {}", self.cfg.protected, err.trim())));
+                    }
                 }
                 Ok(Ok(Done { output: Some(new.into()), extra: json!({}) }))
             }
             "T8a" => {
                 let sha = plan.input_sha.clone().unwrap_or_default();
+                if !self.cfg.postmerge_command.is_empty() {
+                    // the target checkout needs its dependencies and packages before anything is deployed from it
+                    let dir = self.cfg.postmerge_dir.as_deref().map(PathBuf::from).unwrap_or_else(|| wd.clone());
+                    let env = self.env(id, f, &sha, "", "");
+                    let (rc, err) = run_plugin(&substitute(&self.cfg.postmerge_command, &sha), &dir, &env)?;
+                    if rc != 0 {
+                        return Ok(Err(format!("post-merge command exited {rc}: {err}")));
+                    }
+                }
                 for n in plan.detail["targets"].as_array().cloned().unwrap_or_default() {
                     let name = n.as_str().unwrap_or_default();
                     let t = &self.cfg.targets[name];
@@ -873,6 +1115,21 @@ impl<'a> Engine<'a> {
             return self.refuse(id, "floor.proven-sha", format!("the log ran commit {logged:?}, the recorded tested sha is {}", short(&tested)));
         }
         let cached: Vec<&str> = p.steps.iter().filter(|s| s.cached).map(|s| s.name.as_str()).collect();
+        if !cached.is_empty() {
+            // a cached step counts only when its entry is verified for this sha on this host (another host's cache is not this host's)
+            if self.cfg.cache_verify_command.is_empty() {
+                return self.refuse(id, "proof.cached-unverified", format!("step(s) {} came from a step cache and no [chain] cache_verify_command proves the entries for {}", cached.join(", "), short(&tested)));
+            }
+            let wd = PathBuf::from(f.need("workdir")?);
+            for s in &cached {
+                let mut env = self.env(id, f, &tested, &run, &log.to_string_lossy());
+                env.push(("GATETRAIN_STEP".into(), s.to_string()));
+                let (rc, _) = run_plugin(&substitute(&self.cfg.cache_verify_command, &tested), &wd, &env)?;
+                if rc != 0 {
+                    return self.refuse(id, "proof.cached-unverified", format!("cached step {s} is not verified for {} (the verify command exited {rc})", short(&tested)));
+                }
+            }
+        }
         let detail = json!({"proof": {"run_ids": [run.clone()], "tested_sha": tested.clone(), "cached_steps": cached, "steps": p.steps.len()}});
         self.plain(id, f, "T5", "proven", Some(tested), Some(run), detail, "allowed", "GATES_DONE, full mode, zero red, log commit equals the tested sha".into())
     }
@@ -883,13 +1140,24 @@ impl<'a> Engine<'a> {
         let sha = f.need("merge_new")?;
         for n in f.facts.get("targets").and_then(|t| t.as_array()).cloned().unwrap_or_default() {
             let name = n.as_str().unwrap_or_default();
-            let t = &self.cfg.targets[name];
-            if t.health.is_empty() {
+            let (health, tmo) = {
+                let t = &self.cfg.targets[name];
+                (t.health.clone(), t.health_timeout_min)
+            };
+            if health.is_empty() {
                 return self.refuse(id, "deploy.health-missing", format!("target {name} has no health check; live cannot be confirmed"));
             }
             let env = self.env(id, f, &sha, "", "");
-            let (rc, _) = run_plugin(&substitute(&t.health, &sha), &wd, &env)?;
+            let (rc, _) = run_plugin(&substitute(&health, &sha), &wd, &env)?;
             if rc != 0 {
+                if tmo > 0.0 {
+                    let since: Option<String> = self.ledger.conn.query_row("SELECT at FROM batch_events WHERE batch=? AND transition='T8a' AND phase='done' ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).ok();
+                    if let (Some(t0), Some(t1)) = (since.as_deref().and_then(parse_iso), parse_iso(&(self.now)())) {
+                        if (t1 - t0) as f64 > tmo * 60.0 {
+                            return self.refuse(id, "deploy.health-timeout", format!("target {name} did not report {} healthy within {tmo} min; the deploy is left as it is for a person to look at", short(&sha)));
+                        }
+                    }
+                }
                 return Ok(Outcome::Waiting(format!("target {name} does not report {} healthy yet", short(&sha))));
             }
         }
