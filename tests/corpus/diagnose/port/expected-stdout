@@ -1,0 +1,7 @@
+unit-001: infra-port (rc=1, 1 block(s))
+  [infra-port] FAIL  gates/db.test.ts > binds
+    evidence: Error: failed to bind host port 127.0.0.1:55501: address already in use
+    remedy: a gate's port was taken: keep random port ranges below the ephemeral range (for example 20000-31999) or inside ip_local_reserved_ports, and give every gate a unique fixed port; run `gatetrain doctor`
+    full rerun needed: yes (no lane defect found; a green run under the zero-red merge rule is still required)
+1 red steps: 0 real step(s), 1 flake or infrastructure, 0 baseline
+1 blocks: 0 real, 1 flake or infrastructure, 0 baseline

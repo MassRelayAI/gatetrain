@@ -1,0 +1,1 @@
+ERROR profile: must be one of ['zero-cost', 'budget', 'speed', 'mixed'], got 'fast'

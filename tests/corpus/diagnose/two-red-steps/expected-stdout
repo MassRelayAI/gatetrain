@@ -1,0 +1,12 @@
+unit-001: real (rc=1, 1 block(s))
+  [real] FAIL  src/golden.test.ts > golden > matches the stored output
+    evidence: FAIL  src/golden.test.ts > golden > matches the stored output
+    remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane
+    full rerun needed: after the fix, the lane's defect comes first
+db-gate-002: infra-port (rc=2, 1 block(s))
+  [infra-port] Error: EADDRINUSE :::3000
+    evidence: Error: EADDRINUSE :::3000
+    remedy: a gate's port was taken: keep random port ranges below the ephemeral range (for example 20000-31999) or inside ip_local_reserved_ports, and give every gate a unique fixed port; run `gatetrain doctor`
+    full rerun needed: yes (no lane defect found; a green run under the zero-red merge rule is still required)
+2 red steps: 1 real step(s), 1 flake or infrastructure, 0 baseline
+2 blocks: 1 real, 1 flake or infrastructure, 0 baseline

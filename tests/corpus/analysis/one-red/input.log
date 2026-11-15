@@ -1,0 +1,11 @@
+branch lane-b at def456 on builder-1
+CHAIN_MODE full
+STEP_START build 2026-11-11T10:00:00Z
+STEP_START test 2026-11-11T10:00:00Z
+STEP_TIME build 61.25s
+STEP_EXIT build 0
+RED_NOW test rc=101 at 2026-11-11T10:02:00Z (cargo test failed)
+STEP_TIME test 120s
+STEP_EXIT test 101
+RED_SUMMARY: test(rc=101)
+GATES_DONE

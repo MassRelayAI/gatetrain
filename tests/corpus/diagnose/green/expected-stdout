@@ -1,0 +1,2 @@
+no red steps
+note: observed parallelism 1 is below the configured 4: this run is slower than the host can do (expect about 4.0x the wall time on its parallel stretch)

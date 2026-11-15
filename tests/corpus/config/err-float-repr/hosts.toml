@@ -1,0 +1,4 @@
+[[hosts]]
+name = "a"
+cores = "2.50"
+lock_max_age_hours = "x"

@@ -1,0 +1,5 @@
+no history - rough estimate (this run's own pace only)
+eta 2026-11-11T09:00:15.999999-03:30
+band p25-p75: 2026-11-11T09:00:12.999999-03:30 .. 2026-11-11T09:00:21.999997-03:30
+basis: 3 steps finished at 0.0/min, parallelism 1.0 (max seen 1), 3 steps remaining, last log line 2026-11-11T09:00:10-03:30
+dominant remaining steps: x (~2s), y (~2s), z (~2s)

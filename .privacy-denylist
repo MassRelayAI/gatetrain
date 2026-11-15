@@ -1,0 +1,9 @@
+# gatetrain privacy deny-list: ONE sha256 per line of a lowercase word that must never appear in any file of this repository
+# (file contents or file paths; words are runs of [a-z0-9] after lower-casing). Hashes only: the words themselves are never
+# written here. Add a word with:  python tools/privacy_check.py --hash <word>
+# Checked by tools/privacy_check.py (CI step "privacy") and tests/test_privacy.py.
+1c5483264189feefd17a23c6a2da7b2b14946b09774df2779aa071eaf03c9a0d
+1a55ae7257d974d6711fb0c483a00ee064080ed7fe06b960067a8ed5af46f359
+a6b70a8a5074fc12ed70d61d05fffa30a5bec120ed140cf009b8a6302328360b
+849b88ae3486d8731dd2e0b42311af9c5a3bd13b4f6c521df1a24b23791c484a
+df0dca8f871e87446d84684c3371c4bb2b675d1296330410d5dd072aca437322

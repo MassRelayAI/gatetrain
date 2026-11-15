@@ -1,0 +1,13 @@
+run input: green  commit 111  host builder-1
+steps 3  finished 3  red 0  cached 0  unknown start 0
+wall time 4s  busy time 5s  average parallelism 1.1
+reds: none
+10 slowest steps:
+         3s  a
+         2s  b
+         0s  c
+steps cached: none
+critical path (approximation, steps overlap):
+  busiest stretch: 2 steps at once from 2026-11-11T12:00:00+07:00 to 2026-11-11T12:00:01.500000+07:00
+  steps that end last: c (0s, ends 12:00:04), a (3s, ends 12:00:03), b (2s, ends 12:00:01)
+  longest single steps bound the wall time from below: 3s

@@ -1,0 +1,12 @@
+run input: stopped  commit 0a0a0a  host wsl
+steps 2  finished 1  red 0  cached 0  unknown start 0
+wall time 5s  busy time 5s  average parallelism 1.0
+reds: none
+10 slowest steps:
+         5s  a
+         0s  b
+steps cached: none
+critical path (approximation, steps overlap):
+  busiest stretch: 1 steps at once from 2026-11-11T11:00:00+00:00 to 2026-11-11T11:00:05+00:00
+  steps that end last: a (5s, ends 11:00:05)
+  longest single steps bound the wall time from below: 5s

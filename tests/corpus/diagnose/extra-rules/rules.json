@@ -1,0 +1,1 @@
+[{"id": "x", "cls": "infra-quota", "pattern": "quota exceeded", "remedy": "wait", "rerun": true}]

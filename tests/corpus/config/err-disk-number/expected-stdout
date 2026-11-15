@@ -1,0 +1,1 @@
+ERROR hosts[0].disks[0].min_free_gb: must be a number, got 'lots'

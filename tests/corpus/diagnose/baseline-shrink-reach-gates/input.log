@@ -1,0 +1,33 @@
+branch batch-a at 0a1b2c3d4 on builder-1
+CHAIN_MODE full
+STEP_START step-000 2026-11-11T09:00:00+07:00
+=== step-000
+STEP_TIME step-000 20s
+STEP_EXIT step-000 0
+STEP_START step-001 2026-11-11T09:00:20+07:00
+=== step-001
+STEP_TIME step-001 20s
+STEP_EXIT step-001 0
+STEP_START step-002 2026-11-11T09:00:40+07:00
+=== step-002
+STEP_TIME step-002 20s
+STEP_EXIT step-002 0
+STEP_START step-003 2026-11-11T09:01:00+07:00
+=== step-003
+STEP_TIME step-003 20s
+STEP_EXIT step-003 0
+STEP_START step-004 2026-11-11T09:01:20+07:00
+=== step-004
+STEP_TIME step-004 20s
+STEP_EXIT step-004 0
+STEP_START unit-001 2026-11-11T09:01:40+07:00
+=== unit-001
+FAIL  src/frozen.test.ts > frozen > the list only shrinks
+AssertionError: these routes now reach gates - delete their FROZEN entries: expected [ 'PATCH /x' ] to deeply equal []
+ ❯ src/frozen.test.ts:9:3
+ Test Files  2 failed | 80 passed (82)
+      Tests  2 failed | 900 passed (902)
+STEP_TIME unit-001 20s
+STEP_EXIT unit-001 1
+RED_SUMMARY: unit-001(rc=1)
+GATES_DONE

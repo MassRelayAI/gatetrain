@@ -1,0 +1,7 @@
+unit-001: real (rc=1, 1 block(s))
+  [real] FAIL  src/golden.test.ts > golden > matches the stored output
+    evidence: FAIL  src/golden.test.ts > golden > matches the stored output
+    remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane
+    full rerun needed: after the fix, the lane's defect comes first
+1 red steps: 1 real step(s), 0 flake or infrastructure, 0 baseline
+1 blocks: 1 real, 0 flake or infrastructure, 0 baseline

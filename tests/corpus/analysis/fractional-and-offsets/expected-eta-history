@@ -1,0 +1,4 @@
+eta 2026-11-12T09:03:47.501000-03:30
+band p25-p75: 2026-11-11T11:07:32.720676-03:30 .. 2026-11-14T01:53:42.495344-03:30
+basis: 3 steps finished at 0.0/min, parallelism 1.0 (max seen 1), 11 steps remaining, last log line 2026-11-11T09:00:10-03:30
+dominant remaining steps: leap (~24h00m00s), build (~1m01s), late (~46s), test (~30s), x (~21s)

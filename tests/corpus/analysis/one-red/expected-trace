@@ -1,0 +1,1 @@
+[{"name": "build", "ph": "X", "ts": 0, "dur": 61250000, "pid": 1, "tid": 0, "cname": "good", "args": {"exit": 0, "cached": false, "start": "2026-11-11T10:00:00+00:00"}}, {"name": "test", "ph": "X", "ts": 0, "dur": 120000000, "pid": 1, "tid": 1, "cname": "terrible", "args": {"exit": 101, "cached": false, "start": "2026-11-11T10:00:00+00:00"}}]

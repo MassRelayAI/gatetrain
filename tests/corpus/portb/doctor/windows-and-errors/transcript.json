@@ -1,0 +1,34 @@
+{
+ "pc": {
+  "python -c \"import shutil,sys;print(shutil.disk_usage(sys.argv[1]).free)\" \"D:\\\"": [
+   0,
+   "5368709120\n"
+  ],
+  "git --version": [
+   0,
+   "git version 2.50\n"
+  ],
+  "netsh int ipv4 show dynamicport tcp": [
+   0,
+   "Start Port      : 49152\nNumber of Ports : 16384\n"
+  ],
+  "netsh int ipv4 show excludedportrange protocol=tcp": [
+   0,
+   "Start    End\n    50000   50059\n    53900   54000\n"
+  ],
+  "for %f in (\"C:\\g\\a.js\") do @(echo @@FILE %f & type \"%f\")": [
+   0,
+   "@@FILE C:\\g\\a.js\nconst p = 55000 + ((process.pid * 7 + Date.now()) % 800);\n"
+  ],
+  "powershell -NoProfile -Command \"Get-CimInstance Win32_Process | ForEach-Object { $_.ProcessId.ToString() + ' ' + $_.CommandLine }\"": [
+   0,
+   "10 node chain.js\n11 node other\n"
+  ]
+ },
+ "boom": {
+  "x --version": {
+   "raise": "connection refused"
+  }
+ },
+ "bare": {}
+}

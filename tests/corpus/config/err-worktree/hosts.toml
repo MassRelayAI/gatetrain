@@ -1,0 +1,4 @@
+[[hosts]]
+name = "a"
+[[hosts.worktrees]]
+name = "w"

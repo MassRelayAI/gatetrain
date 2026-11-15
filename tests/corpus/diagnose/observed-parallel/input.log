@@ -1,0 +1,13 @@
+branch b at 0a1b2c3 on h
+CHAIN_MODE full
+STEP_START a 2026-11-11T09:00:00+07:00
+=== a
+STEP_TIME a 100s
+STEP_EXIT a 0
+STEP_START b 2026-11-11T09:00:10+07:00
+=== b
+FAIL  q > r
+Error: boom
+STEP_TIME b 100s
+STEP_EXIT b 1
+GATES_DONE

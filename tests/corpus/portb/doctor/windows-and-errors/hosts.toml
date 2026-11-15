@@ -1,0 +1,27 @@
+[[hosts]]
+name = "pc"
+os = "windows"
+roles = ["chain"]
+tools = ["git"]
+ports = [51000, 54000]
+watcher_max_age_min = 5
+lock_file = 'C:\l.lock'
+max_pollers = 1
+chain_pattern = "node.*chain"
+gate_scripts = ['C:\g\a.js']
+worktrees = [{name = "a", build_dir = 'D:\B\x'}, {name = "b", build_dir = 'd:/b/x/'}]
+[[hosts.disks]]
+path = 'D:\'
+min_free_gb = 1e3
+use = ["chain"]
+[[hosts]]
+name = "boom"
+os = "linux"
+tools = ["x"]
+container_prefix = "mr-"
+[[hosts]]
+name = "bare"
+os = "linux"
+roles = ["preflight"]
+[[hosts.disks]]
+path = "/gone"

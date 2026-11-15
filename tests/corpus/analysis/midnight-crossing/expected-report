@@ -1,0 +1,12 @@
+run input: green  commit 444  host h
+steps 2  finished 2  red 0  cached 0  unknown start 0
+wall time 10200h00m29s  busy time 24h00m46s  average parallelism 0.0
+reds: none
+10 slowest steps:
+  24h00m00s  leap
+        46s  late
+steps cached: none
+critical path (approximation, steps overlap):
+  busiest stretch: 1 steps at once from 2026-12-31T23:59:30+00:00 to 2027-01-01T00:00:15.500000+00:00
+  steps that end last: leap (24h00m00s, ends 23:59:59), late (46s, ends 00:00:15)
+  longest single steps bound the wall time from below: 24h00m00s

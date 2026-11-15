@@ -1,0 +1,68 @@
+# gatetrain red classes: the ONE rule table, read by gatetrain/diagnose.py (Python, tomllib) and by crates/gatetrain-core
+# (Rust, include_str!). A new failure class is a new [[rule]] here, never new code. FIRST MATCH WINS, per failure block.
+# Keys: id (name), cls (class printed), pattern (regex searched in the block, multiline), absent (optional regex: when it
+# matches anywhere in the block the rule does not apply), also (optional regex that must ALSO match in the block),
+# when ("slow" = the step's duration is far above its median), shrink (true: groups 1 and 2 of pattern are (expected, got)
+# and the rule applies only when got < expected), remedy (text), rerun (true = a rerun after the remedy suffices).
+# Regexes must be valid in BOTH Python re and Rust regex: no lookaround, no backreferences. Use ''''...''' literal strings.
+
+[[rule]]
+id = "out-of-memory"
+cls = "infra-memory"
+pattern = '''(?i)(?:\bexit(?:ed)?(?: with)?(?: code| status)? ?137\b|\brc[= ]137\b|^Killed\s*$|\bout of memory\b|\bOOM\b|cannot allocate memory|stopped because the system is running low on memory|signal: 9, SIGKILL)'''
+absent = '''AssertionError|^\s*Tests\s.*?(?:^|\D)[1-9]\d* failed'''
+remedy = "the host ran out of memory and the step was killed: not a code defect. Lower the parallelism (GATETRAIN_PARALLEL and CARGO_BUILD_JOBS come from `gatetrain hold` with memory in hosts.toml), run the cheap set first, or use a bigger host; then rerun the step (L67)"
+rerun = true
+
+[[rule]]
+id = "port-collision"
+cls = "infra-port"
+pattern = '''failed to bind host port|address already in use|EADDRINUSE|port is already allocated'''
+remedy = "a gate's port was taken: keep random port ranges below the ephemeral range (for example 20000-31999) or inside ip_local_reserved_ports, and give every gate a unique fixed port; run `gatetrain doctor`"
+rerun = true
+
+[[rule]]
+id = "windows-artefact"
+cls = "platform-windows"
+pattern = '''The command line is too long|path separator|expected ['\"][^'\"\n]*/[^'\"\n]*['\"],? (?:got|received) ['\"][^'\"\n]*\\[^'\"\n]*['\"]|expected ['\"][^'\"\n]*\\[^'\"\n]*['\"],? (?:got|received) ['\"][^'\"\n]*/[^'\"\n]*['\"]'''
+remedy = "this red only happens on Windows (long command line, backslash vs slash in an allow-list): run that step on Linux for the merge decision"
+rerun = true
+
+[[rule]]
+id = "generated-not-committed"
+cls = "generated-uncommitted"
+pattern = '''(?i)\bmissing:|\bstray\b'''
+also = '''(?i)on[- ]disk|disk (?:equals|==|vs|matches)|differs from (?:the )?build'''
+remedy = "a generator made a NEW file that was never committed (the stack committed tracked changes only): regenerate, `git add` the new file by name, commit on the batch; `gatetrain generated` lists such files before the chain"
+rerun = true
+
+[[rule]]
+id = "baseline-shrink-count"
+cls = "baseline-shrink"
+pattern = '''expected length (\d+),? (?:got|received) (\d+)'''
+shrink = true
+remedy = "a shrink-only list got shorter because a lane fixed something: delete the entry and lower the pinned count in the same commit"
+rerun = true
+
+[[rule]]
+id = "baseline-shrink-entry"
+cls = "baseline-shrink"
+pattern = '''(?i)now (?:witnessed|reach(?:es)? (?:the )?gates?)\b.*\bdelete\b|\bdelete (?:the|this) entry\b|\bdelete their\b.*\bentries\b'''
+remedy = "a shrink-only list still names something that is now fixed: delete the entry and lower the pinned count in the same commit"
+rerun = true
+
+[[rule]]
+id = "baseline-missing"
+cls = "baseline-missing"
+pattern = '''\bNEW\b.*\bnot in\b|nobody classified'''
+remedy = "a new route or table is not yet on a list it must join: add it with a reason, in the same commit"
+rerun = true
+
+[[rule]]
+id = "load-flake"
+cls = "flake-load"
+pattern = '''(?i)(?:hook|test) timed out in \d+ ?m?s|timed out after \d+ ?m?s'''
+absent = '''AssertionError|^\s*Tests\s(?:.*?\D)?[1-9]\d* failed'''
+when = "slow"
+remedy = "a timeout with no failed test on a slow, loaded step: raise the hook or test timeout for the slow engine, or reduce the step's parallel neighbours. Under a zero-red merge rule it still needs a full green rerun"
+rerun = true

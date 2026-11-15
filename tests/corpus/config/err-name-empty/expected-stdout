@@ -1,0 +1,1 @@
+ERROR hosts[0].name: must be a non-empty string, got ''

@@ -1,0 +1,11 @@
+unit-001: real (rc=1, 2 block(s))
+  [baseline-missing] - route /a: nobody classified it
+    evidence: - route /a: nobody classified it
+    remedy: a new route or table is not yet on a list it must join: add it with a reason, in the same commit
+    full rerun needed: yes (no lane defect found; a green run under the zero-red merge rule is still required)
+  [real] - golden gen/b.json differs
+    evidence: - golden gen/b.json differs
+    remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane
+    full rerun needed: after the fix, the lane's defect comes first
+1 red steps: 1 real step(s), 0 flake or infrastructure, 0 baseline
+2 blocks: 1 real, 0 flake or infrastructure, 1 baseline

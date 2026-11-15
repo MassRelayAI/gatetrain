@@ -1,0 +1,5 @@
+[[hosts]]
+name = "a"
+[[hosts.disks]]
+path = "/x"
+measure = "ls"

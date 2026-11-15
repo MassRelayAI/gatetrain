@@ -1,0 +1,164 @@
+[
+  {
+    "host": "pc",
+    "check": "disk",
+    "status": "FAIL",
+    "lessons": [
+      "L18",
+      "L30"
+    ],
+    "message": "D:\\: 5 GB free, need 1000",
+    "fix": "free space on D:\\ (prune build outputs of merged lanes) before starting a run"
+  },
+  {
+    "host": "pc",
+    "check": "disk-speed",
+    "status": "WARN",
+    "lessons": [
+      "L19"
+    ],
+    "message": "D:\\: allowed for ['chain'] but not marked fast",
+    "fix": "put build outputs on a fast disk, or limit D:\\ to use = [\"archive\"]"
+  },
+  {
+    "host": "pc",
+    "check": "capacity",
+    "status": "FAIL",
+    "lessons": [
+      "L18",
+      "L19"
+    ],
+    "message": "can run now: nothing; cannot: chain (needs 120 GB free on an allowed fast disk)",
+    "fix": "add or mount a disk with use including the missing kind, enough free space and fast = true for chains"
+  },
+  {
+    "host": "pc",
+    "check": "watchers",
+    "status": "WARN",
+    "lessons": [
+      "L24"
+    ],
+    "message": "skipped on windows: needs ps with elapsed time",
+    "fix": "run this check on a host where it is supported"
+  },
+  {
+    "host": "pc",
+    "check": "toolchain",
+    "status": "PASS",
+    "lessons": [
+      "L29"
+    ],
+    "message": "git: git version 2.50",
+    "fix": ""
+  },
+  {
+    "host": "pc",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 51000 is inside the dynamic range 49152-65535",
+    "fix": "move port 51000 outside 49152-65535"
+  },
+  {
+    "host": "pc",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 54000 is inside the dynamic range 49152-65535",
+    "fix": "move port 54000 outside 49152-65535"
+  },
+  {
+    "host": "pc",
+    "check": "random-ports",
+    "status": "FAIL",
+    "lessons": [
+      "L52"
+    ],
+    "message": "C:\\g\\a.js:1 picks a random port in 55000-55799, which reaches the ephemeral range 49152-65535",
+    "fix": "keep random port ranges below the ephemeral range, for example 20000-31999"
+  },
+  {
+    "host": "pc",
+    "check": "shared-build",
+    "status": "FAIL",
+    "lessons": [
+      "L17"
+    ],
+    "message": "a, b share d:/b/x",
+    "fix": "point each worktree at its own build output folder"
+  },
+  {
+    "host": "pc",
+    "check": "lock",
+    "status": "WARN",
+    "lessons": [
+      "L32"
+    ],
+    "message": "skipped on windows: needs stat and date",
+    "fix": "run this check on a host where it is supported"
+  },
+  {
+    "host": "pc",
+    "check": "chain",
+    "status": "WARN",
+    "lessons": [
+      "L26"
+    ],
+    "message": "a chain is running (pid 10): logs and light reads only",
+    "fix": "wait for the chain to finish before heavy work on this host"
+  },
+  {
+    "host": "pc",
+    "check": "pollers",
+    "status": "WARN",
+    "lessons": [
+      "L25"
+    ],
+    "message": "skipped on windows: counts sshd sessions with ps",
+    "fix": "run this check on a host where it is supported"
+  },
+  {
+    "host": "boom",
+    "check": "containers",
+    "status": "WARN",
+    "lessons": [
+      "L31"
+    ],
+    "message": "docker not available; leftover containers not checked",
+    "fix": "install or start docker, or drop container_prefix"
+  },
+  {
+    "host": "boom",
+    "check": "tools",
+    "status": "FAIL",
+    "lessons": [],
+    "message": "check could not run: connection refused",
+    "fix": "fix the connection or the command"
+  },
+  {
+    "host": "bare",
+    "check": "disk",
+    "status": "FAIL",
+    "lessons": [
+      "L18",
+      "L30"
+    ],
+    "message": "/gone: cannot read free space (missing or not mounted)",
+    "fix": "mount /gone or correct the path in the config"
+  },
+  {
+    "host": "bare",
+    "check": "capacity",
+    "status": "WARN",
+    "lessons": [
+      "L18",
+      "L19"
+    ],
+    "message": "can run now: nothing; cannot: preflight (needs 20 GB free on an allowed disk)",
+    "fix": "add or mount a disk with use including the missing kind, enough free space and fast = true for chains"
+  }
+]

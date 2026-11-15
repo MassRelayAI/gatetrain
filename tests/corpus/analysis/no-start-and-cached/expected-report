@@ -1,0 +1,11 @@
+run input: stopped  commit 222  host builder-1
+steps 3  finished 2  red 0  cached 1  unknown start 2
+wall time 0s  busy time 7s  average parallelism 0.0
+reds: none
+10 slowest steps:
+         7s  orphan
+         0s  warm
+         0s  running
+steps cached: warm
+critical path (approximation, steps overlap):
+  no timed steps

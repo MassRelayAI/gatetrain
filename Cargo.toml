@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["crates/gatetrain-core", "crates/gatetrain-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/MassRelayAI/gatetrain"
+
+[workspace.dependencies]
+# serde: typed structs (docs/design/engine-and-governance.md 9.2)
+serde = { version = "1", features = ["derive"] }
+# toml: reads hosts.toml like Python's tomllib (docs/design/engine-and-governance.md 9.2); values are walked as toml::Value (file order kept, like a Python dict) so every error names its field the way config.py does
+toml = { version = "0.8", features = ["preserve_order"] }
+# serde_json: canonical form of the decision log and --json output
+serde_json = "1"
+# rusqlite (bundled): the ledger; SQLite is compiled in, nothing to install
+rusqlite = { version = "0.32", features = ["bundled"] }
+# sha2: the hash chain
+sha2 = "0.10"
+# regex: the anchored log markers, same patterns as parse.py
+regex = "1"
+# thiserror: typed errors in the core
+thiserror = "1"
+# clap (derive): the command line
+clap = { version = "4", features = ["derive"] }
+# anyhow: error context in the CLI crate only
+anyhow = "1"
+# chrono: the local-time stamps of the tidy action log and the trash folder names (Python strftime parity)
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# ctrlc (termination): the holder forwards Ctrl-C, SIGTERM and SIGHUP to its child and still releases
+ctrlc = { version = "3", features = ["termination"] }
+# tempfile (dev only): throwaway ledgers
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1

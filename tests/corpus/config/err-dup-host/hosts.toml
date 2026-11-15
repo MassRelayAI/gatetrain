@@ -1,0 +1,6 @@
+[[hosts]]
+name = "a"
+[[hosts]]
+name = "b"
+[[hosts]]
+name = "a"

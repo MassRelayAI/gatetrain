@@ -9,6 +9,8 @@ from .parse import ParsedLog, Step, parse_iso
 SCHEMA = Path(__file__).resolve().parent.parent / "ledger" / "schema.sql"
 
 
+KNOWN_SCHEMA_VERSION = 3
+
 OPEN: list = []
 
 
@@ -20,6 +22,11 @@ def close_all():
 def connect(path: str) -> sqlite3.Connection:
     c = sqlite3.connect(path)
     OPEN.append(c)
+    # Only the Rust binary migrates the schema (`gatetrain ledger migrate`); refuse a version we do not know.
+    v = c.execute("PRAGMA user_version").fetchone()[0]
+    if v > KNOWN_SCHEMA_VERSION:
+        OPEN.pop().close()
+        raise RuntimeError(f"ledger schema version {v} is newer than this Python side knows ({KNOWN_SCHEMA_VERSION}); upgrade gatetrain")
     c.executescript(SCHEMA.read_text())
     return c
 

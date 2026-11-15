@@ -1,0 +1,1 @@
+ERROR hosts[0].kind: must be one of ['local', 'server', 'cloud'], got 'vm'

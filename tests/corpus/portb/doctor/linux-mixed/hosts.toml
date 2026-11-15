@@ -1,0 +1,40 @@
+
+[needs]
+chain_gb = 100
+[[hosts]]
+name = "builder-1"
+os = "linux"
+roles = ["preflight", "lane-gates", "chain"]
+reach = "ssh builder-1"
+tools = ["node", "cargo", "missing"]
+ports = [55496, 40000, 40000, 20001, 33000]
+reserved_port_ranges = ["20000-20100"]
+container_prefix = "mr-"
+watcher_max_age_min = 30
+lock_file = "/tmp/it's.lock"
+lock_max_age_hours = 2.5
+chain_pattern = "chain-queue"
+cache_server_check = "sccache --show-stats"
+max_pollers = 2
+gate_scripts = ["/g/a.sh", "/g/b sh.sh"]
+worktrees = [{name="a", build_dir="/b/x/"}, {name="b", build_dir="/b/./x"}, {name="c", build_dir="/b/y"}]
+[[hosts.disks]]
+path = "/mnt/fast"
+min_free_gb = 50
+fast = true
+[[hosts.disks]]
+path = "/mnt/hdd"
+min_free_gb = 10
+use = ["preflight", "chain", "archive"]
+[[hosts.disks]]
+path = "/mnt/usb"
+removable = true
+fast = true
+min_free_gb = 5
+[[hosts]]
+name = "off"
+enabled = false
+reach = "local"
+[[hosts]]
+name = "odd"
+reach = "carrier pigeon"

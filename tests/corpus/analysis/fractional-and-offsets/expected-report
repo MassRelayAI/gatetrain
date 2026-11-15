@@ -1,0 +1,13 @@
+run input: stopped  commit 333  host h
+steps 3  finished 3  red 0  cached 0  unknown start 0
+wall time 9h00m10s  busy time 12s  average parallelism 0.0
+reds: none
+10 slowest steps:
+        10s  y
+         2s  x
+         0s  z
+steps cached: none
+critical path (approximation, steps overlap):
+  busiest stretch: 1 steps at once from 2026-11-11T09:00:00.123456+05:30 to 2026-11-11T09:00:02.123455+05:30
+  steps that end last: y (10s, ends 09:00:10), z (0s, ends 09:00:00), x (2s, ends 09:00:02)
+  longest single steps bound the wall time from below: 10s

@@ -1,0 +1,23 @@
+[package]
+name = "gatetrain-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "the gatetrain binary"
+
+[[bin]]
+name = "gatetrain"
+path = "src/main.rs"
+
+[dependencies]
+gatetrain-core = { path = "../gatetrain-core" }
+serde_json.workspace = true   # --json output
+clap.workspace = true         # the command line
+anyhow.workspace = true       # error context
+ctrlc.workspace = true        # holder: release on a signal
+rusqlite.workspace = true     # diagnose reads step durations from a ledger
+
+[dev-dependencies]
+rusqlite.workspace = true     # tamper with a ledger in the integration tests
+tempfile.workspace = true     # throwaway ledgers

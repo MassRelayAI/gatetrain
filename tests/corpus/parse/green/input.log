@@ -1,0 +1,13 @@
+branch lane-a at abc123 on builder-1
+CHAIN_MODE full
+CHAIN_PARALLEL 4
+STEP_START lint 2026-11-11T09:00:00+07:00
+=== lint
+some output that is ignored
+STEP_TIME lint 12.5s
+STEP_EXIT lint 0
+STEP_START test 2026-11-11T09:00:01+07:00
+STEP_TIME test 30s
+STEP_EXIT test 0
+RED_SUMMARY: none
+GATES_DONE

@@ -1,0 +1,20 @@
+[package]
+name = "gatetrain-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "gatetrain core: ledger, decision log, log parser (no terminal, no argument parsing)"
+
+[dependencies]
+serde.workspace = true        # derive Serialize on the loaded Config
+serde_json.workspace = true   # canonical JSON, --json output
+rusqlite.workspace = true     # the ledger
+sha2.workspace = true         # the hash chain
+regex.workspace = true        # log markers, port scan, lanes radar
+thiserror.workspace = true    # typed errors
+chrono.workspace = true       # local time stamps (tidy log, trash names)
+toml.workspace = true         # hosts.toml capacity, the shared rule table, gatetrain.toml plugin sections
+
+[dev-dependencies]
+tempfile.workspace = true     # throwaway ledgers

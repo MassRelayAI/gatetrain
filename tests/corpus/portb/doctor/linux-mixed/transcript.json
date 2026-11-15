@@ -1,0 +1,84 @@
+{
+ "builder-1": {
+  "df -Pk /mnt/fast": [
+   0,
+   "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 100 1 31457280 1% /m\n"
+  ],
+  "df -Pk /mnt/hdd": [
+   0,
+   "Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 100 1 524812288 1% /m\n"
+  ],
+  "df -Pk /mnt/usb": [
+   1,
+   ""
+  ],
+  "docker ps -a --filter status=exited --format \"{{.Names}}\"": [
+   0,
+   "mr-a\nother\nmr-b\n"
+  ],
+  "ps -eo pid=,etimes=,args=": [
+   0,
+   "  12 4000 tail -n 0 -F /x.log\n13 10 tail -F y\n14 9999 /usr/bin/tail --follow=name z\nbad line\n"
+  ],
+  "node --version": [
+   0,
+   "v26.7.0\nmore\n"
+  ],
+  "cargo --version": [
+   0,
+   "cargo 1.98.1\n"
+  ],
+  "missing --version": [
+   127,
+   ""
+  ],
+  "cat /proc/sys/net/ipv4/ip_local_port_range": [
+   0,
+   "32768\t60999\n"
+  ],
+  "cat /proc/sys/net/ipv4/ip_local_reserved_ports": [
+   0,
+   "55400-58399,6000\n"
+  ],
+  "for f in /g/a.sh '/g/b sh.sh'; do echo \"@@FILE $f\"; cat \"$f\"; done": [
+   0,
+   "@@FILE /g/a.sh\nPORT=$((50000 + RANDOM % 3000))\n@@FILE /g/b sh.sh\nconst p = 20000 + ((process.pid * 3 + Date.now()) % 5000);\nrandom.randint(30000, 31999)\n"
+  ],
+  "realpath /b/x/": [
+   0,
+   "/real/x\n"
+  ],
+  "realpath /b/./x": [
+   0,
+   "/real/x\n"
+  ],
+  "realpath /b/y": [
+   1,
+   ""
+  ],
+  "stat -c %Y '/tmp/it'\"'\"'s.lock'": [
+   0,
+   "1000\n"
+  ],
+  "date +%s": [
+   0,
+   "100000\n"
+  ],
+  "grep -c released '/tmp/it'\"'\"'s.lock'": [
+   0,
+   "0\n"
+  ],
+  "ps -eo pid=,args=": [
+   0,
+   "1 init\n 77 /bin/chain-queue --x\n78 ps -eo chain-queue\n"
+  ],
+  "sccache --show-stats": [
+   1,
+   ""
+  ],
+  "ps -eo args=": [
+   0,
+   "sshd: a@pts/0\nsshd: b@pts/1\nsshd: c@notty\nsshd: root [priv]\n"
+  ]
+ }
+}

@@ -1,0 +1,2 @@
+tests/corpus/** -text
+tests/golden/** -text

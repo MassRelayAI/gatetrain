@@ -1,0 +1,1 @@
+{"branch":"first","commit":"aaa","first_ts":"2026-11-11T09:05:00+00:00","gates_done":false,"host":"h1","last_ts":"2026-11-11T09:05:04+00:00","mode":null,"parallel":6,"red_now":[],"red_summary":null,"steps":[{"cached":false,"duration":4.0,"end":"2026-11-11T09:05:04+00:00","exit_code":0,"name":"dup","start":"2026-11-11T09:05:00+00:00"}]}

@@ -1,0 +1,1 @@
+{"branch":"lane-h","commit":"555","first_ts":"2026-11-11T09:00:00+00:00","gates_done":true,"host":"h","last_ts":"2026-11-11T09:00:00+00:00","mode":"quick mode","parallel":null,"red_now":[],"red_summary":null,"steps":[{"cached":false,"duration":null,"end":null,"exit_code":0,"name":"s","start":"2026-11-11T09:00:00+00:00"}]}

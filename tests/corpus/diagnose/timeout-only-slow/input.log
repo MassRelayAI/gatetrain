@@ -1,0 +1,113 @@
+branch batch-a at 0a1b2c3d4 on builder-1
+CHAIN_MODE full
+STEP_START step-000 2026-11-11T09:00:00+07:00
+=== step-000
+STEP_TIME step-000 20s
+STEP_EXIT step-000 0
+STEP_START step-001 2026-11-11T09:00:20+07:00
+=== step-001
+STEP_TIME step-001 20s
+STEP_EXIT step-001 0
+STEP_START step-002 2026-11-11T09:00:40+07:00
+=== step-002
+STEP_TIME step-002 20s
+STEP_EXIT step-002 0
+STEP_START step-003 2026-11-11T09:01:00+07:00
+=== step-003
+STEP_TIME step-003 20s
+STEP_EXIT step-003 0
+STEP_START step-004 2026-11-11T09:01:20+07:00
+=== step-004
+STEP_TIME step-004 20s
+STEP_EXIT step-004 0
+STEP_START unit-001 2026-11-11T09:01:40+07:00
+=== unit-001
+stderr | src/mod0.test.ts > case 0
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod1.test.ts > case 1
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod2.test.ts > case 2
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod3.test.ts > case 3
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod4.test.ts > case 4
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod5.test.ts > case 5
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod6.test.ts > case 6
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod7.test.ts > case 7
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod8.test.ts > case 8
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod9.test.ts > case 9
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod10.test.ts > case 10
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod11.test.ts > case 11
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod12.test.ts > case 12
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod13.test.ts > case 13
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod14.test.ts > case 14
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod15.test.ts > case 15
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod16.test.ts > case 16
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod17.test.ts > case 17
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod18.test.ts > case 18
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod19.test.ts > case 19
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod20.test.ts > case 20
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod21.test.ts > case 21
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod22.test.ts > case 22
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod23.test.ts > case 23
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod24.test.ts > case 24
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod25.test.ts > case 25
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod26.test.ts > case 26
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod27.test.ts > case 27
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod28.test.ts > case 28
+warn: missing: optional.json, stray handle on disk vs build, ignored
+stderr | src/mod29.test.ts > case 29
+warn: missing: optional.json, stray handle on disk vs build, ignored
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+ ✓ src/ok.test.ts (12 tests) 31ms
+FAIL  src/db.test.ts [ src/db.test.ts ]
+Error: Hook timed out in 30000ms.
+ ❯ src/db.test.ts:3:1
+ Test Files  1 failed | 81 passed (82)
+      Tests  0 failed | 900 passed (900)
+STEP_TIME unit-001 400s
+STEP_EXIT unit-001 1
+RED_SUMMARY: unit-001(rc=1)
+GATES_DONE

@@ -1,0 +1,1 @@
+ERROR stack.generated_dirs: must be a list of str, got [1, 2]

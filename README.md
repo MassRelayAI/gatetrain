@@ -272,7 +272,7 @@ Safety rules (lessons L43-L51, L60-L65):
 
 A batch went red three times, a run is slower than it should be, an agent claimed green and was not, the bill jumped. Ask your agent to
 "diagnose this run": the **diagnose-run** skill collects the evidence lines, classifies the red (stacking artefact, flaky, real defect,
-environment, process), names the fix, and turns anything seen twice into a lesson. Of the 64 lessons today, 44 are checked by code (`doctor`, `check`, `diagnose`,
+environment, process), names the fix, and turns anything seen twice into a lesson. Of the 66 lessons today, 46 are checked by code (`doctor`, `check`, `diagnose`,
 `tidy`, `stop`, `lanes`, the ledger); 20 are written rules in a module page that an agent follows, marked as such in
 [the lessons](docs/lessons.md) until a check exists.
 
@@ -324,7 +324,7 @@ gatetrain is not a CI service or a workflow engine; it sits on top of whatever r
 
 ## Lessons it is built on
 
-Sixty-four so far, each with the rule and what enforces it ([`docs/lessons.md`](docs/lessons.md)). Three of them:
+Sixty-six so far, each with the rule and what enforces it ([`docs/lessons.md`](docs/lessons.md)). Three of them:
 
 - A stop that kills the run but not the merger scheduled five minutes later lets that merger attach to the next run. **A stop cancels queued follow-ups too.**
 - Database tests that run as a superuser pass while the real application role is denied. **Every database lane runs one step as the application role.**

@@ -1,0 +1,1 @@
+ERROR hosts[0].cores: must be a number, got True

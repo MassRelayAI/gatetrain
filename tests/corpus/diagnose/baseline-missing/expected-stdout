@@ -1,0 +1,7 @@
+unit-001: baseline-missing (rc=1, 1 block(s))
+  [baseline-missing] FAIL  src/routes.test.ts > routes
+    evidence: AssertionError: NEW route /w is not in the baseline: nobody classified it
+    remedy: a new route or table is not yet on a list it must join: add it with a reason, in the same commit
+    full rerun needed: yes (no lane defect found; a green run under the zero-red merge rule is still required)
+1 red steps: 0 real step(s), 0 flake or infrastructure, 1 baseline
+1 blocks: 0 real, 0 flake or infrastructure, 1 baseline

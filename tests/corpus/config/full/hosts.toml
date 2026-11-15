@@ -1,0 +1,57 @@
+profile = "speed"
+tidy = { keep_days = 3, patterns = ["a", "b"] }
+[budget]
+max_usd = 12.5
+[needs]
+preflight_gb = 10
+lane_gates_gb = 25.5
+chain_gb = 100
+chain_needs_fast = false
+[stack]
+generated_dirs = ["target", "dist"]
+note = "x"
+[[hosts]]
+name = "builder-1"
+kind = "cloud"
+roles = ["chain", "cache"]
+reach = "ssh builder-1"
+os = "linux"
+cores = 40.9
+max_parallel_steps = 12
+cost_per_hour_usd = 0.35
+max_pollers = 4
+awake_hours = "08-22"
+enabled = false
+tools = ["cargo", "node"]
+ports = [55496, 58291]
+reserved_port_ranges = ["55400-58399"]
+container_prefix = "mr-"
+watcher_max_age_min = 7
+lock_file = "/tmp/lock"
+lock_max_age_hours = 2.5
+chain_pattern = "chain-*"
+cache_server_check = "curl x"
+gate_scripts = ["a.sh"]
+[hosts.tidy]
+x = 1
+[[hosts.disks]]
+path = "/mnt/a"
+min_free_gb = 50
+fast = true
+use = ["chain", "cache"]
+removable = true
+measure = "age-only"
+[[hosts.disks]]
+path = "/mnt/b"
+[[hosts.worktrees]]
+name = "wt1"
+build_dir = "/b/1"
+[[hosts]]
+name = "pc"
+[[models]]
+name = "qwen"
+kind = "local"
+cost_per_mtok_usd = 0
+[[models]]
+name = "api"
+cost_per_mtok_usd = 3

@@ -1,0 +1,5 @@
+branch lane-j at 777 on h
+STEP_START tëst-ünïcode 2026-11-11T09:00:00Z
+STEP_TIME tëst-ünïcode 2s
+STEP_EXIT tëst-ünïcode 3
+RED_NOW tëst-ünïcode rc=3 at 2026-11-11T09:00:02Z (é)

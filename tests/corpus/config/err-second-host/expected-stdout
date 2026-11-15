@@ -1,0 +1,1 @@
+ERROR hosts[1].kind: must be a non-empty string, got ['x', {'y': 1}]

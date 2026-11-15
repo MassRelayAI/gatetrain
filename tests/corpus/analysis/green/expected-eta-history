@@ -1,0 +1,5 @@
+eta 2026-11-12T09:00:31+07:00
+band p25-p75: 2026-11-11T11:07:34.529412+07:00 .. 2026-11-14T01:44:16.882353+07:00
+basis: 2 steps finished at 3.9/min, parallelism 1.4 (max seen 2), 6 steps remaining, last log line 2026-11-11T09:00:31+07:00
+dominant remaining steps: leap (~24h00m00s), build (~1m01s), late (~46s), a (~3s), b (~2s)
+note: this run already printed GATES_DONE

@@ -1,6 +1,6 @@
 """gatetrain diagnose: classify every red step of a chain log with evidence, a remedy and whether a full rerun is needed.
 
-The classifier is DATA: RULES is a table of dicts, first match wins, so a new failure class is a new row (or a row in a JSON
+The classifier is DATA: RULES is the table of rules/red-classes.toml (shared with the Rust core), first match wins, so a new failure class is a new row (or a row in a JSON
 file given with --rules), never new code. Keys per rule:
   id        short name of the rule
   cls       the class printed (flake-load, infra-port, ...)
@@ -15,7 +15,9 @@ A red that no rule matches is `real`: never silently a flake.
 """
 import json
 import re
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import median
 from typing import Dict, List, Optional
 
@@ -24,46 +26,16 @@ from .parse import parse_log
 
 SLOW_FACTOR = 3.0
 
-RULES = [
-    {"id": "port-collision", "cls": "infra-port",
-     "pattern": r"failed to bind host port|address already in use|EADDRINUSE|port is already allocated",
-     "remedy": "a gate's port was taken: keep random port ranges below the ephemeral range (for example 20000-31999) or inside "
-               "ip_local_reserved_ports, and give every gate a unique fixed port; run `gatetrain doctor`",
-     "rerun": True},
-    {"id": "windows-artefact", "cls": "platform-windows",
-     "pattern": r"The command line is too long|path separator|"
-                r"expected ['\"][^'\"\n]*/[^'\"\n]*['\"],? (?:got|received) ['\"][^'\"\n]*\\[^'\"\n]*['\"]|"
-                r"expected ['\"][^'\"\n]*\\[^'\"\n]*['\"],? (?:got|received) ['\"][^'\"\n]*/[^'\"\n]*['\"]",
-     "remedy": "this red only happens on Windows (long command line, backslash vs slash in an allow-list): run that step on Linux "
-               "for the merge decision",
-     "rerun": True},
-    {"id": "generated-not-committed", "cls": "generated-uncommitted",
-     "pattern": r"(?i)\bmissing:|\bstray\b",
-     "also": r"(?i)on[- ]disk|disk (?:equals|==|vs|matches)|differs from (?:the )?build",
-     "remedy": "a generator made a NEW file that was never committed (the stack committed tracked changes only): regenerate, "
-               "`git add` the new file by name, commit on the batch; `gatetrain generated` lists such files before the chain",
-     "rerun": True},
-    {"id": "baseline-shrink-count", "cls": "baseline-shrink",
-     "pattern": r"expected length (\d+),? (?:got|received) (\d+)", "shrink": True,
-     "remedy": "a shrink-only list got shorter because a lane fixed something: delete the entry and lower the pinned count "
-               "in the same commit",
-     "rerun": True},
-    {"id": "baseline-shrink-entry", "cls": "baseline-shrink",
-     "pattern": r"(?i)now (?:witnessed|reach(?:es)? the gate)\b.*\bdelete\b|\bdelete (?:the|this) entry\b",
-     "remedy": "a shrink-only list still names something that is now fixed: delete the entry and lower the pinned count "
-               "in the same commit",
-     "rerun": True},
-    {"id": "baseline-missing", "cls": "baseline-missing",
-     "pattern": r"\bNEW\b.*\bnot in\b|nobody classified",
-     "remedy": "a new route or table is not yet on a list it must join: add it with a reason, in the same commit",
-     "rerun": True},
-    {"id": "load-flake", "cls": "flake-load",
-     "pattern": r"(?i)(?:hook|test) timed out in \d+ ?m?s|timed out after \d+ ?m?s",
-     "absent": r"AssertionError|^\s*Tests\s.*?(?<!\d)[1-9]\d* failed", "when": "slow",
-     "remedy": "a timeout with no failed test on a slow, loaded step: raise the hook or test timeout for the slow engine, or reduce "
-               "the step's parallel neighbours. Under a zero-red merge rule it still needs a full green rerun",
-     "rerun": True},
-]
+RULES_FILE = Path(__file__).resolve().parent.parent / "rules" / "red-classes.toml"
+
+
+def load_toml_rules(path=RULES_FILE):
+    """The shared rule table (rules/red-classes.toml); the Rust core embeds the same file."""
+    with open(path, "rb") as f:
+        return tomllib.load(f)["rule"]
+
+
+RULES = load_toml_rules()
 
 REAL_REMEDY = "a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane"
 

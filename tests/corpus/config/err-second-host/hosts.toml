@@ -1,0 +1,5 @@
+[[hosts]]
+name = "ok"
+[[hosts]]
+name = "b"
+kind = ["x", {y = 1}]

@@ -1,0 +1,1 @@
+[{"name": "lint", "ph": "X", "ts": 0, "dur": 12500000, "pid": 1, "tid": 0, "cname": "good", "args": {"exit": 0, "cached": false, "start": "2026-11-11T09:00:00+07:00"}}, {"name": "test", "ph": "X", "ts": 1000000, "dur": 30000000, "pid": 1, "tid": 1, "cname": "good", "args": {"exit": 0, "cached": false, "start": "2026-11-11T09:00:01+07:00"}}]

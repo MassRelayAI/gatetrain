@@ -1,0 +1,7 @@
+unit-001: generated-uncommitted (rc=1, 1 block(s))
+  [generated-uncommitted] FAIL  src/gen.test.ts > generated files
+    evidence: missing: gen/x.json
+    remedy: a generator made a NEW file that was never committed (the stack committed tracked changes only): regenerate, `git add` the new file by name, commit on the batch; `gatetrain generated` lists such files before the chain
+    full rerun needed: yes (no lane defect found; a green run under the zero-red merge rule is still required)
+1 red steps: 0 real step(s), 0 flake or infrastructure, 1 baseline
+1 blocks: 0 real, 0 flake or infrastructure, 1 baseline

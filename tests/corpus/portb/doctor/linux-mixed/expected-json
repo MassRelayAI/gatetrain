@@ -1,0 +1,253 @@
+[
+  {
+    "host": "builder-1",
+    "check": "disk",
+    "status": "FAIL",
+    "lessons": [
+      "L18",
+      "L30"
+    ],
+    "message": "/mnt/fast: 30 GB free, need 50",
+    "fix": "free space on /mnt/fast (prune build outputs of merged lanes) before starting a run"
+  },
+  {
+    "host": "builder-1",
+    "check": "disk",
+    "status": "PASS",
+    "lessons": [
+      "L18",
+      "L30"
+    ],
+    "message": "/mnt/hdd: 500 GB free >= 10",
+    "fix": ""
+  },
+  {
+    "host": "builder-1",
+    "check": "disk-speed",
+    "status": "WARN",
+    "lessons": [
+      "L19"
+    ],
+    "message": "/mnt/hdd: allowed for ['preflight', 'chain'] but not marked fast",
+    "fix": "put build outputs on a fast disk, or limit /mnt/hdd to use = [\"archive\"]"
+  },
+  {
+    "host": "builder-1",
+    "check": "disk",
+    "status": "WARN",
+    "lessons": [
+      "L18"
+    ],
+    "message": "/mnt/usb: removable disk is not mounted",
+    "fix": "attach and mount /mnt/usb; what it enables is dropped meanwhile"
+  },
+  {
+    "host": "builder-1",
+    "check": "capacity",
+    "status": "WARN",
+    "lessons": [
+      "L18",
+      "L19"
+    ],
+    "message": "can run now: preflight; cannot: lane-gates (needs 40 GB free on an allowed disk), chain (needs 100 GB free on an allowed fast disk); /mnt/usb (not mounted) would enable lane-gates; /mnt/usb (not mounted) would enable chain",
+    "fix": "add or mount a disk with use including the missing kind, enough free space and fast = true for chains"
+  },
+  {
+    "host": "builder-1",
+    "check": "containers",
+    "status": "FAIL",
+    "lessons": [
+      "L31"
+    ],
+    "message": "2 leftover exited container(s): mr-a, mr-b",
+    "fix": "docker rm mr-a mr-b  (doctor never removes; exact names only)"
+  },
+  {
+    "host": "builder-1",
+    "check": "watchers",
+    "status": "FAIL",
+    "lessons": [
+      "L24"
+    ],
+    "message": "pid 12 up 66 min: tail -n 0 -F /x.log; pid 14 up 166 min: /usr/bin/tail --follow=name z",
+    "fix": "kill 12 14  (by exact pid)"
+  },
+  {
+    "host": "builder-1",
+    "check": "toolchain",
+    "status": "PASS",
+    "lessons": [
+      "L29"
+    ],
+    "message": "node: v26.7.0",
+    "fix": ""
+  },
+  {
+    "host": "builder-1",
+    "check": "toolchain",
+    "status": "PASS",
+    "lessons": [
+      "L29"
+    ],
+    "message": "cargo: cargo 1.98.1",
+    "fix": ""
+  },
+  {
+    "host": "builder-1",
+    "check": "toolchain",
+    "status": "FAIL",
+    "lessons": [
+      "L29"
+    ],
+    "message": "missing: does not resolve or prints no version",
+    "fix": "install missing or fix the PATH or version file the chain uses"
+  },
+  {
+    "host": "builder-1",
+    "check": "ports",
+    "status": "PASS",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 55496 is inside the ephemeral range but reserved by the kernel (ip_local_reserved_ports)",
+    "fix": ""
+  },
+  {
+    "host": "builder-1",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 40000 is inside the ephemeral range 32768-60999",
+    "fix": "move port 40000 outside 32768-60999"
+  },
+  {
+    "host": "builder-1",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 40000 is inside the ephemeral range 32768-60999",
+    "fix": "move port 40000 outside 32768-60999"
+  },
+  {
+    "host": "builder-1",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 20001 is inside the reserved range 20000-20100",
+    "fix": "move port 20001 outside 20000-20100"
+  },
+  {
+    "host": "builder-1",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 33000 is inside the ephemeral range 32768-60999",
+    "fix": "move port 33000 outside 32768-60999"
+  },
+  {
+    "host": "builder-1",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L22"
+    ],
+    "message": "duplicate port(s): 40000",
+    "fix": "give every gate its own port"
+  },
+  {
+    "host": "builder-1",
+    "check": "random-ports",
+    "status": "FAIL",
+    "lessons": [
+      "L52"
+    ],
+    "message": "/g/a.sh:1 picks a random port in 50000-52999, which reaches the ephemeral range 32768-60999",
+    "fix": "keep random port ranges below the ephemeral range, for example 20000-31999"
+  },
+  {
+    "host": "builder-1",
+    "check": "random-ports",
+    "status": "PASS",
+    "lessons": [
+      "L52"
+    ],
+    "message": "/g/b sh.sh:1 random range 20000-24999 stays clear of the ephemeral range",
+    "fix": ""
+  },
+  {
+    "host": "builder-1",
+    "check": "random-ports",
+    "status": "PASS",
+    "lessons": [
+      "L52"
+    ],
+    "message": "/g/b sh.sh:2 random range 30000-31999 stays clear of the ephemeral range",
+    "fix": ""
+  },
+  {
+    "host": "builder-1",
+    "check": "shared-build",
+    "status": "FAIL",
+    "lessons": [
+      "L17"
+    ],
+    "message": "a, b share /real/x",
+    "fix": "point each worktree at its own build output folder"
+  },
+  {
+    "host": "builder-1",
+    "check": "lock",
+    "status": "FAIL",
+    "lessons": [
+      "L32"
+    ],
+    "message": "/tmp/it's.lock: 27.5 h old with no released line (holder died?)",
+    "fix": "find the holder, then remove the lock by hand after checking no chain is running"
+  },
+  {
+    "host": "builder-1",
+    "check": "chain",
+    "status": "WARN",
+    "lessons": [
+      "L26"
+    ],
+    "message": "a chain is running (pid 77): logs and light reads only",
+    "fix": "wait for the chain to finish before heavy work on this host"
+  },
+  {
+    "host": "builder-1",
+    "check": "cache",
+    "status": "FAIL",
+    "lessons": [
+      "L20"
+    ],
+    "message": "cache server check failed (rc=1)",
+    "fix": "restart the server with its own environment and no idle timeout"
+  },
+  {
+    "host": "builder-1",
+    "check": "pollers",
+    "status": "FAIL",
+    "lessons": [
+      "L25"
+    ],
+    "message": "3 ssh sessions > max_pollers 2",
+    "fix": "stop extra pollers; use one watcher per log"
+  },
+  {
+    "host": "odd",
+    "check": "reach",
+    "status": "WARN",
+    "lessons": [],
+    "message": "reach 'carrier pigeon' is not local or ssh; nothing checked",
+    "fix": "use reach = \"local\" or \"ssh <name>\" to check this host"
+  }
+]

@@ -1,0 +1,9 @@
+run input: green  commit 555  host h
+steps 1  finished 1  red 0  cached 0  unknown start 0
+wall time 0s  busy time 0s  average parallelism 0.0
+reds: none
+10 slowest steps:
+         0s  s
+steps cached: none
+critical path (approximation, steps overlap):
+  no timed steps

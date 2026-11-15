@@ -1,0 +1,11 @@
+unit-001: real (rc=1, 2 block(s))
+  [real] FAIL  src/db.test.ts [ src/db.test.ts ]
+    evidence: Error: Hook timed out in 30000ms.
+    remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane; a timeout next to a failed assertion is not a load flake
+    full rerun needed: after the fix, the lane's defect comes first
+  [real] FAIL  src/golden.test.ts > golden > matches the stored output
+    evidence: FAIL  src/golden.test.ts > golden > matches the stored output
+    remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane
+    full rerun needed: after the fix, the lane's defect comes first
+1 red steps: 1 real step(s), 0 flake or infrastructure, 0 baseline
+2 blocks: 2 real, 0 flake or infrastructure, 0 baseline

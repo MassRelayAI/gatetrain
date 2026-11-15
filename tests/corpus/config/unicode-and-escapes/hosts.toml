@@ -1,0 +1,3 @@
+[[hosts]]
+name = "h\u00e9llo \"q\" \u4e2d"
+roles = ["r\u00e9"]

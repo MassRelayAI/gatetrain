@@ -1,0 +1,1 @@
+ERROR hosts[0].disks[0].fast: must be true or false, got 1
