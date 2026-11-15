@@ -210,7 +210,7 @@ class RealGitRemovalTests(Base):
             t = T.build_cfg(cfg, host)
             runner = LocalRunner()
             inv = T.gather(host, runner, t, now=time.time())
-            self.assertEqual([n(i.key) for i in inv.items if i.cls == "worktrees"], [n(wt)])
+            self.assertEqual([os.path.realpath(i.key) for i in inv.items if i.cls == "worktrees"], [os.path.realpath(wt)])
             T.apply_plan(host, runner, t, inv, ["worktrees"])
             self.assertFalse(os.path.exists(wt))
             self.assertNotIn("line/lane", g("branch", "--list"))
