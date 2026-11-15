@@ -250,26 +250,29 @@ cache_days    = 0                       # > 0 opts in to pruning docker build ca
 evidence_dirs = ["/srv/evidence"]
 unattended    = ["targets", "containers", "trash"]    # the default; add images / cache / worktrees to opt in
 size_timeout_s = 30                     # a size probe (du) slower than this is "unknown" (shown as ?), never a crash
+remove_timeout_s = 1800                 # a removal, move or cargo clean slower than this is "stopped", never counted as done
 log           = "tidy-log.jsonl"
 # Windows: scratch_dir for generated scripts; link_canary / link_canary_count for a known folder with a known link count
 ```
 
-Safety rules (lessons L43-L51):
+Safety rules (lessons L43-L51, L60-L65):
 
 - Dry run by default. `--apply` runs the plan class by class, appends one JSON line per action (before and after bytes, free space) to the
   log, and stops at the first guard violation.
 - Never `docker system prune`, never a glob, never a recursive force-remove. Containers and images are removed by exact name; the wrapper refuses a bulk command.
 - Never the main or root checkout, anything on the keep lists, a running container, a worktree with uncommitted work, or a lane whose
-  branch content is not on main (ancestor, or every added line present in main).
+  branch content is not on main (an ancestor, or `git merge-tree --write-tree` yields main's own tree; git 2.38+, otherwise not merged), a locked worktree, a link, or a branch whose name is not plain.
+- git, docker and cargo run as argument lists (no shell) on a local host; ssh gets strict POSIX quoting; a Windows host refuses `" % ^ ! & | < >` in anything interpolated. Every removal passes one `safe_path` (absolute, no `.`/`..`, no control character); a recycle-bin entry is exactly one component below a bin that is not a root and does not hold or sit inside a kept path.
+- The branch is deleted only after its sha is archived under a verified tag (`update-ref -d` with that sha); a move or removal is verified, a timeout is `stopped`, an unknown existence is a violation, and an `intent` line is logged before every action.
 - `cargo clean` is never run quiet. If it frees nothing on a folder that is clearly a cargo target and lacks `CACHEDIR.TAG`, the standard tag is written and it runs again.
-- On Windows, links inside a folder are listed (and the listing proven to have run), unlinked with `rmdir` from a generated `.cmd` file, confirmed gone, and only then is the folder removed; afterwards the main checkout tracked-file count and status must be unchanged.
+- On Windows, links inside a folder are listed (the listing proven to have run, against a configured canary with a known count), unlinked with `rmdir` or `del` by type from a generated `.cmd` file, confirmed gone, and only then is the folder removed; afterwards the main checkout tracked-file count and status must be unchanged.
 - A folder that is not a cargo target is moved to the recycle bin, not deleted. Browser profiles inside evidence folders are reported, never removed.
 
 ## When something goes wrong
 
 A batch went red three times, a run is slower than it should be, an agent claimed green and was not, the bill jumped. Ask your agent to
 "diagnose this run": the **diagnose-run** skill collects the evidence lines, classifies the red (stacking artefact, flaky, real defect,
-environment, process), names the fix, and turns anything seen twice into a lesson. Of the 58 lessons today, 38 are checked by code (`doctor`, `check`, `diagnose`,
+environment, process), names the fix, and turns anything seen twice into a lesson. Of the 64 lessons today, 44 are checked by code (`doctor`, `check`, `diagnose`,
 `tidy`, `stop`, `lanes`, the ledger); 20 are written rules in a module page that an agent follows, marked as such in
 [the lessons](docs/lessons.md) until a check exists.
 
@@ -321,7 +324,7 @@ gatetrain is not a CI service or a workflow engine; it sits on top of whatever r
 
 ## Lessons it is built on
 
-Forty-two so far, each with the rule and what enforces it ([`docs/lessons.md`](docs/lessons.md)). Three of them:
+Sixty-four so far, each with the rule and what enforces it ([`docs/lessons.md`](docs/lessons.md)). Three of them:
 
 - A stop that kills the run but not the merger scheduled five minutes later lets that merger attach to the next run. **A stop cancels queued follow-ups too.**
 - Database tests that run as a superuser pass while the real application role is denied. **Every database lane runs one step as the application role.**
