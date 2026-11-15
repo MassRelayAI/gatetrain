@@ -117,9 +117,20 @@ fn a_step_with_no_history_needs_step_default_gb_in_the_config() {
 }
 
 #[test]
-fn a_host_with_no_memory_keys_is_not_checked_at_all() {
-    let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\ncores = 8\n", "x").unwrap();
+fn a_host_with_no_memory_keys_is_refused_not_silently_skipped() {
+    // a misspelt or missing memory key must be loud: memory is checked unless the host says `memory_check = false`
+    let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\ncores = 8\nmemroy_gb = 16\n", "x").unwrap();
+    assert!(m.configured);
+    let a = admit(&m, &["anything".to_string()], &HashMap::new());
+    assert!(!a.admitted, "{}", a.rule);
+}
+
+#[test]
+fn memory_check_false_is_the_only_way_to_opt_out() {
+    let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\ncores = 8\nmemory_check = false\n", "x").unwrap();
     assert!(!m.configured);
     let a = admit(&m, &["anything".to_string()], &HashMap::new());
-    assert!(a.admitted && a.rule.contains("not checked"), "{}", a.rule);
+    assert!(a.admitted && a.rule.contains("memory_check = false"), "{}", a.rule);
+    let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\nmemory_check = true\n", "x").unwrap();
+    assert!(m.configured);
 }

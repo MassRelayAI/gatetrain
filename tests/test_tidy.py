@@ -66,7 +66,7 @@ class SimHost:
             # the recycle bin remembers when tidy first saw each entry; a fixture entry that is `age_s` old was first seen `age_s` ago
             sp = parent + "/.gatetrain-seen.json"
             seen = json.loads(self.scripts[sp]) if sp in self.scripts else {}
-            seen[name] = NOW - age_s
+            seen[name] = {"t": NOW - age_s, "m": None}
             self.fs[sp] = dict(type="file", size=10, mtime=NOW, target=None)
             self.scripts[sp] = json.dumps(seen, sort_keys=True)
 
@@ -253,7 +253,7 @@ class SimHost:
         if a == "worktree prune":
             self.worktrees = [w for w in self.worktrees if n(w[0]) in self.fs or n(w[0]) == n(self.main)]
             return 0, ""
-        m = re.match(r"worktree remove (\S+)", a)
+        m = re.match(r"worktree remove (?:--force )?(\S+)", a)
         if m and self.wt_timeout:
             raise subprocess.TimeoutExpired(c, 60)
         if m:

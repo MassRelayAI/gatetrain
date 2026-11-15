@@ -73,12 +73,13 @@ class TidyCfg:
     remove_timeout_s: float = 1800                          # a removal, move or cargo clean gets this long before it is "stopped"
     worktree_min_idle_days: float = 2                       # a worktree with a file changed more recently than this is kept (0 = off)
     idle_walk_depth: float = 12                             # how deep the "newest file inside" walk goes
+    link_list_timeout_s: float = 300                        # the link listing (`dir /AL /S /B`, `find -type l`) walks a whole worktree: it gets this long
 
 
 _LISTS = ("keep_paths", "keep_lanes", "keep_branches", "target_roots", "image_patterns", "evidence_dirs", "unattended")
 _STRS = ("main_checkout", "root_checkout", "main_branch", "worktree_prefix", "orphan_targets", "trash_dir",
          "container_prefix", "log", "scratch_dir", "link_canary")
-_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s", "worktree_min_idle_days", "idle_walk_depth")
+_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s", "worktree_min_idle_days", "idle_walk_depth", "link_list_timeout_s")
 
 
 def build_cfg(cfg, host) -> TidyCfg:
@@ -405,7 +406,7 @@ class Ops:
         out = {}
         for k, v in (j.items() if isinstance(j, dict) else []):
             if isinstance(v, (int, float)) and not isinstance(v, bool):
-                out[k] = {"t": v, "m": None}                        # the older format: a bare time
+                continue                                           # the older format (a bare time, no folder time to compare): first seen now, and upgraded
             elif isinstance(v, dict) and isinstance(v.get("t"), (int, float)):
                 out[k] = {"t": v["t"], "m": v.get("m")}
         return out
@@ -474,7 +475,9 @@ class Ops:
     # -- links (L12, L44)
     def list_links(self, path):
         cmd = f"dir /AL /S /B {self.q(path)} & echo {END}" if self.win else f"find {self.q(path)} -type l; echo {END}"
-        rc, out = self.run(cmd)
+        rc, out = self.run(cmd, timeout=self.cfg.link_list_timeout_s)
+        if rc == TIMEOUT:
+            raise ItemRefused(f"the link listing for {path} timed out after {self.cfg.link_list_timeout_s:g}s (link_list_timeout_s); this item is left alone")
         lines = [l.strip() for l in out.splitlines() if l.strip()]
         if END not in lines:
             raise GuardViolation(f"the link listing for {path} did not run (no end marker); refusing to continue")
@@ -496,7 +499,10 @@ class Ops:
         if self._canary_ok:
             return
         self._canary_ok = True      # set first: the canary listing re-enters list_links
-        rc, out = self.run(f"dir /AL /S /B {self.q(c.link_canary)} & echo {END}")
+        rc, out = self.run(f"dir /AL /S /B {self.q(c.link_canary)} & echo {END}", timeout=c.link_list_timeout_s)
+        if rc == TIMEOUT:
+            self._canary_ok = False
+            raise GuardViolation(f"the link canary listing of {c.link_canary} timed out after {c.link_list_timeout_s:g}s; the listing command is not trusted")
         n = len([l for l in out.splitlines() if l.strip() and l.strip() != END])
         if n != c.link_canary_count:
             self._canary_ok = False
@@ -583,6 +589,11 @@ class Ops:
             return "ok", "link removed; its target was not touched"
         rpp = self.rp(p)
         targets = [(l, self.rp(l)) for l in self.list_links(p)]        # where every link inside points, before anything is removed
+        if self.win:
+            for l, t in targets:                       # a name or a target that can never be put on a Windows command line refuses the item NOW, untouched
+                self._win_ok(l)
+                if t is not None:
+                    self._win_ok(t)
         self.unlink_all(p)
         rc, _ = self.run(f"rmdir /S /Q {self.q(p)}" if self.win else f"rm -r -- {self.q(p)}", timeout=self.cfg.remove_timeout_s)
         if rc == TIMEOUT:
@@ -695,9 +706,14 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
         else:
             info["merged"] = ops.merged(w["branch"]) if w["branch"] != cfg.main_branch else None
             info["dirty"] = ops.dirty(w["path"])
-            info["links"] = len(ops.list_links(w["path"]))
+            try:
+                info["links"] = len(ops.list_links(w["path"]))
+            except ItemRefused as e:                      # a listing that timed out, or a name it cannot be trusted with: this one item is kept
+                info["keep"] = f"cannot list its links ({e})"
             info["bytes"] = ops.size(w["path"])
-            if w["branch"] == cfg.main_branch:
+            if info["keep"]:
+                pass
+            elif w["branch"] == cfg.main_branch:
                 info["keep"] = "main branch"
             elif w["branch"] in cfg.keep_branches or lane_of(w["path"], cfg).lower() in {x.lower() for x in cfg.keep_lanes}:
                 info["keep"] = "keep list"
@@ -1153,15 +1169,11 @@ def remove_worktree(ops, cfg, it):
     status, note = ops.remove_dir(p)
     if status != "ok":
         return None, status, f"{note}; branch {br} kept, archived as {tag}"
-    # `git worktree prune` is repo-wide: it also unregisters another worktree whose folder is only temporarily missing. It runs only when the
-    # ONE worktree git calls prunable is this one.
-    prunable = {norm(w["path"]) for w in ops.worktrees() if w.get("prunable")}
-    if prunable != {norm(p)}:
-        why = "git does not call it prunable (git older than 2.31?)" if norm(p) not in prunable else f"it would also unregister {sorted(prunable - {norm(p)})}"
-        return None, "failed", f"STALE REGISTRATION: {p} is removed but `git worktree prune` was not run ({why}); branch {br} kept, archived as {tag}"
-    rc, _ = ops.git(m, "worktree", "prune", timeout=cfg.remove_timeout_s)
+    # `git worktree remove <path>` on the folder that is already gone unregisters exactly that worktree (never the repo-wide `prune`, which
+    # also unregisters, and deletes the admin directory of, another worktree whose folder is only away)
+    rc, _ = ops.git(m, "worktree", "remove", "--force", p, timeout=cfg.remove_timeout_s)
     if rc != 0:
-        raise GuardViolation(f"git worktree prune failed after removing {p}; branch {br} kept, archived as {tag}")
+        return None, "failed", f"STALE REGISTRATION: {p} is removed but `git worktree remove` could not unregister it (rc {rc}); branch {br} kept, archived as {tag}"
     rc, _ = ops.git(m, "update-ref", "-d", f"refs/heads/{br}", sha)
     if rc != 0:
         raise GuardViolation(f"branch {br} no longer points at {sha} (or could not be deleted); it is kept, archived as {tag}")

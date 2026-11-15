@@ -123,7 +123,7 @@ fn a_boot_id_change_marks_the_old_run_stopped_not_red() {
 fn parallelism_comes_from_hosts_toml_only() {
     let d = tempfile::tempdir().unwrap();
     let hosts = d.path().join("hosts.toml");
-    std::fs::write(&hosts, "[[hosts]]\nname = \"h\"\ncores = 16\nreserve_cores = 4\nmax_parallel_steps = 20\n").unwrap();
+    std::fs::write(&hosts, "[[hosts]]\nname = \"h\"\ncores = 16\nreserve_cores = 4\nmax_parallel_steps = 20\nmemory_check = false\n").unwrap();
     let code = "import os; print('P=' + os.environ.get('GATETRAIN_PARALLEL', 'unset') + ' C=' + os.environ.get('GATETRAIN_CORES', 'unset'))";
     let o = hold(d.path(), "r1", &["--hosts", hosts.to_str().unwrap(), "--host", "h"], code).output().unwrap();
     assert!(out(&o).contains("P=12 C=12"), "{}{}", out(&o), String::from_utf8_lossy(&o.stderr));

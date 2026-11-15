@@ -110,7 +110,7 @@ impl SimState {
                 // the recycle bin remembers when tidy first saw each entry; a fixture entry that is `age_s` old was first seen `age_s` ago
                 let sp = format!("{parent}/.gatetrain-seen.json");
                 let mut seen: serde_json::Map<String, Value> = self.scripts.get(&sp).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
-                seen.insert(name.to_string(), json!(NOW - age_s));
+                seen.insert(name.to_string(), json!({"t": NOW - age_s, "m": null}));
                 self.scripts.insert(sp.clone(), serde_json::to_string(&seen).unwrap());
                 let fe = Entry { typ: "file", size: 10, mtime: NOW, target: None, ltype: None };
                 match self.fs.iter_mut().find(|(x, _)| *x == sp) {
@@ -526,7 +526,7 @@ impl Sim {
             st.worktrees = keep;
             return ok(String::new());
         }
-        if let Some(m) = re(r"^worktree remove (\S+)").captures(&a) {
+        if let Some(m) = re(r"^worktree remove (?:--force )?(\S+)").captures(&a) {
             if st.wt_timeout {
                 return RunOut::TimedOut;
             }

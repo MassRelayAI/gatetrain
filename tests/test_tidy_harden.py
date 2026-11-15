@@ -793,9 +793,9 @@ class ReviewFixTests(Base):
         self.apply(sim, ["worktrees"])
         calls = sim.calls
         i_rm = next(i for i, c in enumerate(calls) if c.startswith("rm -r") and "/repo/wt/lane-a" in c)
-        i_prune = next(i for i, c in enumerate(calls) if c.endswith("worktree prune"))
-        self.assertLess(i_rm, i_prune)
-        self.assertFalse([c for c in calls if "worktree remove" in c])
+        i_unreg = next(i for i, c in enumerate(calls) if "worktree remove --force /repo/wt/lane-a" in c)
+        self.assertLess(i_rm, i_unreg)
+        self.assertFalse([c for c in calls if c.endswith("worktree prune")], "never the repo-wide prune")
 
     def test_cargo_clean_with_a_non_zero_exit_is_a_failure_not_freed_unknown(self):
         sim = linux_sim()
@@ -939,18 +939,65 @@ class ReviewFix3Tests(Base):
         self.assertEqual(failed, 0)
         self.assertNotIn("/repo/wt/lane-a", sim.fs)
 
-    def test_prune_runs_only_when_this_is_the_one_prunable_worktree(self):
+    def test_only_this_worktrees_registration_goes_and_never_a_repo_wide_prune(self):
         sim = linux_sim()
         sim.worktrees.append(("/repo/wt/lane-away", "line/lane-away"))              # registered, its folder only temporarily missing
         sim.branches.append("line/lane-away")
         done, failed = self.apply(sim, ["worktrees"])
         r = [r for r in self.recs() if r["item"] == "/repo/wt/lane-a"][0]
-        self.assertEqual(r["status"], "failed")
-        self.assertIn("STALE REGISTRATION", r["note"])
-        self.assertIn("lane-away", r["note"])
+        self.assertEqual(r["status"], "ok", r)
         self.assertFalse([c for c in sim.calls if c.endswith("worktree prune")], "the repo-wide prune never ran")
-        self.assertNotIn("line/lane-a", sim.deleted_branches)
         self.assertTrue(any(w[0] == "/repo/wt/lane-away" for w in sim.worktrees), "the other registration is untouched")
+        self.assertFalse(any(w[0] == "/repo/wt/lane-a" for w in sim.worktrees), "this one is unregistered")
+        self.assertIn("line/lane-a", sim.deleted_branches)
+
+    def test_a_failed_unregistration_is_reported_with_the_branch_kept(self):
+        sim = linux_sim()
+        orig = sim.run_argv
+        sim.run_argv = lambda argv, timeout=None: (128, "") if argv[3:5] == ["worktree", "remove"] else orig(argv, timeout)
+        done, failed = self.apply(sim, ["worktrees"])
+        self.assertTrue(self.recs() and all(r["status"] == "failed" and "STALE REGISTRATION" in r["note"] for r in self.recs()))
+        self.assertEqual(sim.deleted_branches, [])
+
+    def test_a_link_listing_that_times_out_is_a_timeout_and_an_item_failure_not_a_run_stop(self):
+        import subprocess as sp
+        sim = linux_sim()
+        h, t, inv = self._gather(sim)
+        self.assertTrue(by(inv, "/repo/wt/lane-a"))
+        orig = sim.run
+
+        def slow(cmd, timeout=None):
+            if cmd.startswith("find") and "-type l" in cmd:
+                self.seen_timeout = timeout
+                raise sp.TimeoutExpired(cmd, timeout or 60)
+            return orig(cmd, timeout)
+        sim.run = slow
+        done, failed = T.apply_plan(h, sim, t, inv, ["worktrees"], now=NOW)
+        self.assertEqual(done, 0)
+        rs = self.recs()
+        self.assertTrue(rs and all(r["status"] == "refused" and "timed out" in r["note"] for r in rs), rs)
+        self.assertEqual(self.seen_timeout, 300, "its own, longer timeout")
+        h, t, inv = self._gather(sim)                                        # and `check` keeps the worktree instead of dying
+        self.assertIn("cannot list its links", next(x for x in inv.worktrees if x["path"] == "/repo/wt/lane-a")["keep"])
+
+    def test_a_link_target_that_cannot_be_used_refuses_the_item_before_anything_is_removed(self):
+        sim = winsim()
+        sim.add("C:/repo/wt/lane-a/odd", "link", target="C:/repo/main/a&b")
+        done, failed = self.apply(sim, ["worktrees"], win=True)
+        self.assertEqual((done, failed), (0, 1))
+        self.assertEqual([r["status"] for r in self.recs()], ["refused"])
+        self.assertIn("C:/repo/wt/lane-a/src.rs", sim.fs, "the folder is untouched")
+        self.assertFalse([c for c in sim.calls if "rmdir /S" in c or c.endswith('gatetrain-unlink.cmd"')])
+
+    def test_an_old_format_first_seen_record_is_first_seen_now_and_upgraded(self):
+        sim = linux_sim()
+        sim.fs["/trash/zz"] = dict(type="dir", size=0, mtime=NOW - 30 * DAY, target=None)
+        sim.fs["/trash/zz/f"] = dict(type="file", size=5, mtime=NOW - 30 * DAY, target=None)
+        sim.scripts["/trash/.gatetrain-seen.json"] = json.dumps({"zz": NOW - 20 * DAY, "old": NOW - 10 * DAY, "new": NOW - DAY})   # bare numbers
+        h, t, inv = self._gather(sim)
+        self.assertEqual(by(inv, "/trash/zz"), [], "a bare 20-day-old number is not trusted")
+        rec = json.loads(sim.scripts["/trash/.gatetrain-seen.json"])
+        self.assertEqual(rec["zz"], {"t": NOW, "m": NOW - 30 * DAY})
 
     def test_a_worktree_with_no_git_root_of_its_own_is_unverifiable(self):
         sim = linux_sim()

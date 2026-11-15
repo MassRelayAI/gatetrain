@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryModel {
-    /// True when `hosts.toml` sets any memory key for the host; with none, memory is simply not checked (nothing is invented).
+    /// False only when the host sets `memory_check = false`: the explicit opt-out. A host with no memory keys is NOT skipped.
     pub configured: bool,
     /// Total memory of the machine or VM; `None` when it was neither configured nor detectable.
     pub total_gb: Option<f64>,
@@ -33,7 +33,8 @@ impl MemoryModel {
             .ok_or_else(|| Error::Canon(format!("hosts.toml: no host named {host:?}")))?;
         let f = |k: &str| h.get(k).and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64)));
         let wsl = h.get("wsl").and_then(|x| x.as_bool()).unwrap_or(false);
-        let configured = ["memory_gb", "memory_reserve_gb", "wsl_memory_gb", "memory_per_step_gb", "memory_per_cargo_job_gb", "step_default_gb"].iter().any(|k| h.get(*k).is_some());
+        // memory is checked unless the host says `memory_check = false`: no keys at all is a refusal (unknown total, no default), not a silent skip
+        let configured = h.get("memory_check").and_then(|x| x.as_bool()) != Some(false);
         let vm_cap_gb = f("wsl_memory_gb").or_else(|| if wsl { wslconfig_from_home() } else { None });
         Ok(MemoryModel {
             configured,
@@ -90,7 +91,7 @@ fn predict_gb(m: &MemoryModel, step: &str, hist: &HashMap<String, Vec<f64>>) -> 
 
 pub fn admit(m: &MemoryModel, steps: &[String], hist: &HashMap<String, Vec<f64>>) -> Admission {
     if !m.configured {
-        return Admission { admitted: true, predicted_gb: 0.0, available_gb: 0.0, unpredicted: vec![], rule: "no memory settings for this host in hosts.toml: memory is not checked".into() };
+        return Admission { admitted: true, predicted_gb: 0.0, available_gb: 0.0, unpredicted: vec![], rule: "memory_check = false for this host in hosts.toml: memory is not checked".into() };
     }
     let mut sum = 0.0;
     let mut unpredicted = Vec::new();

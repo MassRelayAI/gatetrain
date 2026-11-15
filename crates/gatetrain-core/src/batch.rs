@@ -272,7 +272,7 @@ fn git_raw(dir: &Path, args: &[&str]) -> Result<(bool, String, String)> {
 
 /// Paths git reports as changed or untracked (new files listed individually).
 fn dirty_paths(dir: &Path) -> Result<Vec<String>> {
-    let o = Command::new("git").arg("-C").arg(dir).args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]).output()?;
+    let o = Command::new("git").arg("-C").arg(dir).args(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]).output()?;
     if !o.status.success() {
         return Err(Error::Batch(format!("git status: {}", String::from_utf8_lossy(&o.stderr).trim())));
     }
@@ -336,7 +336,7 @@ fn has_markers(text: &str) -> bool {
 
 /// Files whose diff `base..tip` ADDS both a start and an end conflict marker (a file with markers was committed).
 fn marker_paths(dir: &Path, base: &str, tip: &str) -> Result<Vec<String>> {
-    let diff = git(dir, &["diff", "-U0", "--no-color", base, tip])?;
+    let diff = git(dir, &["diff", "-U0", "--no-color", "--no-renames", base, tip])?;
     let (mut out, mut cur, mut start, mut end) = (vec![], None::<String>, false, false);
     let flush = |cur: &mut Option<String>, start: &mut bool, end: &mut bool, out: &mut Vec<String>| {
         if let Some(c) = cur.take() {
@@ -782,7 +782,7 @@ impl<'a> Engine<'a> {
                 let cur = git(&wd, &["rev-parse", &format!("refs/heads/{}", self.cfg.protected)])?;
                 if cur == new {
                     Probe::Happened(Some(new.into()))
-                } else if git_raw(&wd, &["merge-base", "--is-ancestor", new, &cur])?.0 && !git(&wd, &["diff", "--name-only", new, &cur])?.lines().any(|p| !in_dirs(p, &self.cfg.generated_dirs)) {
+                } else if git_raw(&wd, &["merge-base", "--is-ancestor", new, &cur])?.0 && !git(&wd, &["diff", "--name-only", "--no-renames", new, &cur])?.lines().any(|p| !in_dirs(p, &self.cfg.generated_dirs)) {
                     Probe::Happened(Some(cur)) // the merge also carried the commit of the files the chain produced
                 } else {
                     Probe::NotHappened
@@ -1014,7 +1014,9 @@ impl<'a> Engine<'a> {
                     let mut args = vec!["add", "--"];
                     args.extend(dirty.iter().map(String::as_str));
                     git(&wd, &args)?;
-                    git(&wd, &["commit", "-q", "-m", &format!("chore(batch): regenerate generated files for {id} (pass {passes})")])?;
+                    let mut c = vec!["commit".to_string(), "-q".into(), "-m".into(), format!("chore(batch): regenerate generated files for {id} (pass {passes})"), "--".into()];
+                    c.extend(dirty.iter().cloned());
+                    git(&wd, &c.iter().map(String::as_str).collect::<Vec<_>>())?; // an explicit pathspec: only these files, whatever else is staged
                     committed.extend(dirty);
                 }
                 let head = git(&wd, &["rev-parse", "HEAD"])?;
@@ -1064,7 +1066,9 @@ impl<'a> Engine<'a> {
                     let mut args = vec!["add", "--"];
                     args.extend(dirty.iter().map(String::as_str));
                     git(&wd, &args)?;
-                    git(&wd, &["commit", "-q", "-m", &format!("chore(batch): commit the generated files the chain produced for {id} (generated-delta)")])?;
+                    let mut c = vec!["commit".to_string(), "-q".into(), "-m".into(), format!("chore(batch): commit the generated files the chain produced for {id} (generated-delta)"), "--".into()];
+                    c.extend(dirty.iter().cloned());
+                    git(&wd, &c.iter().map(String::as_str).collect::<Vec<_>>())?; // an explicit pathspec: only these files, whatever else is staged
                     if !self.cfg.regen_command.is_empty() {
                         let env = self.env(id, f, &tested, "", "");
                         let (rc, err) = run_plugin(&self.cfg.regen_command, &wd, &env)?;
@@ -1080,7 +1084,7 @@ impl<'a> Engine<'a> {
                 let head = git(&wd, &["rev-parse", "HEAD"])?;
                 let mut final_new = tested.clone();
                 if head != tested {
-                    let names = git(&wd, &["diff", "--name-only", &tested, &head])?;
+                    let names = git(&wd, &["diff", "--name-only", "--no-renames", &tested, &head])?;
                     let bad: Vec<&str> = names.lines().filter(|p| !in_dirs(p, &self.cfg.generated_dirs)).collect();
                     if !bad.is_empty() {
                         return Ok(Err(format!("chain.tree-differs: the merge would carry changes beyond the generated files that were tested against: {}", bad.join(", "))));

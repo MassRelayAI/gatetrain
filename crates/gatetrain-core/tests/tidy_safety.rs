@@ -338,8 +338,8 @@ fn archive_tag_comes_before_worktree_remove_and_branch_delete() {
     let calls = sim.calls();
     let pos = |needle: &str| calls.iter().position(|c| c.contains(needle)).unwrap_or_else(|| panic!("no call with {needle}"));
     assert!(pos("tag archive/line/lane-a") < pos("rmdir /S /Q"));
-    assert!(pos("rmdir /S /Q") < pos("worktree prune"));
-    assert!(pos("worktree prune") < pos("update-ref -d refs/heads/line/lane-a"));
+    assert!(pos("rmdir /S /Q") < pos("worktree remove --force"));
+    assert!(pos("worktree remove --force") < pos("update-ref -d refs/heads/line/lane-a"));
     assert!(!calls.iter().any(|c| c.contains("branch -D")), "the branch is deleted by ref and sha, never by name");
 }
 

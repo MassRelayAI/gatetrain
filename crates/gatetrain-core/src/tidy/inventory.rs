@@ -3,7 +3,7 @@
 use super::config::TidyCfg;
 use crate::config::Host;
 use crate::pycompat::J;
-use super::ops::{guard, lane_of, norm, safe_branch, Ops, Wt, R};
+use super::ops::{guard, lane_of, norm, safe_branch, Fatal, Ops, Wt, R};
 use crate::pycompat::{fnmatchcase, fmt_g, split_ws, splitlines, strip};
 use std::collections::HashSet;
 use crate::runner::Runner;
@@ -243,9 +243,16 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             let br = wbranch.clone().unwrap();
             info.merged = if br != cfg.main_branch { ops.merged(&br)? } else { None };
             info.dirty = ops.dirty(wpath)?;
-            info.links = ops.list_links(wpath)?.len();
+            match ops.list_links(wpath) {
+                Ok(l) => info.links = l.len(),
+                // a listing that timed out, or a name it cannot be trusted with: this one item is kept
+                Err(Fatal::Item(e)) => info.keep = Some(format!("cannot list its links ({e})")),
+                Err(e) => return Err(e),
+            }
             info.bytes = ops.size(wpath)?;
-            if br == cfg.main_branch {
+            if info.keep.is_some() {
+                // kept above
+            } else if br == cfg.main_branch {
                 info.keep = Some("main branch".into());
             } else if cfg.keep_branches.contains(&br) || keep_lanes_l.contains(&lane_of(wpath, cfg).to_lowercase()) {
                 info.keep = Some("keep list".into());

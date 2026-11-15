@@ -1,0 +1,4 @@
+[[hosts]]
+name = "h"
+memroy_gb = 8
+step_default = 2

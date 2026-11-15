@@ -64,7 +64,7 @@ fn a_hold_is_refused_when_the_disk_would_drop_under_its_minimum_and_nothing_star
     let target = d.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
     // a minimum no disk can meet: the configured disk is already under it
-    let hosts = format!("[[hosts]]\nname = \"pc\"\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 100000000\n", fwd(d.path()));
+    let hosts = format!("[[hosts]]\nname = \"pc\"\nmemory_check = false\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 100000000\n", fwd(d.path()));
     std::fs::write(d.path().join("hosts.toml"), hosts).unwrap();
     let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(&target), "--", python(), "-c", "print('RAN')"]);
     assert_eq!(o.status.code(), Some(77), "{}", out(&o));
@@ -74,7 +74,7 @@ fn a_hold_is_refused_when_the_disk_would_drop_under_its_minimum_and_nothing_star
     assert!(decisions(&d.path().join("gatetrain.db")).iter().any(|(k, r)| k == "host.refuse-disk" && r.contains("min_free_gb")));
     // a folder no configured disk holds is not this rule's business
     let other = tempfile::tempdir().unwrap();
-    let hosts = "[[hosts]]\nname = \"pc\"\n[[hosts.disks]]\npath = \"/nowhere/at/all\"\nmin_free_gb = 100000000\n";
+    let hosts = "[[hosts]]\nname = \"pc\"\nmemory_check = false\n[[hosts.disks]]\npath = \"/nowhere/at/all\"\nmin_free_gb = 100000000\n";
     std::fs::write(other.path().join("hosts.toml"), hosts).unwrap();
     let o = gt(other.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(other.path()), "--", python(), "-c", "print('RAN')"]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
@@ -84,7 +84,7 @@ fn a_hold_is_refused_when_the_disk_would_drop_under_its_minimum_and_nothing_star
 fn the_size_a_target_folder_reached_is_recorded_per_run_and_becomes_the_prediction() {
     let d = tempfile::tempdir().unwrap();
     let target = d.path().join("target");
-    let hosts = format!("[[hosts]]\nname = \"pc\"\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 0\n", fwd(d.path()));
+    let hosts = format!("[[hosts]]\nname = \"pc\"\nmemory_check = false\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 0\n", fwd(d.path()));
     std::fs::write(d.path().join("hosts.toml"), hosts).unwrap();
     // the chain writes 3 MB into its build folder
     let script = format!("import os; os.makedirs(r'{0}', exist_ok=True); open(r'{0}/big.bin', 'wb').write(b'x' * 3 * 1048576)", fwd(&target));

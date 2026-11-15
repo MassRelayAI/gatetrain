@@ -83,7 +83,7 @@ fn a_batch_that_would_drop_the_disk_under_its_minimum_is_refused_with_77() {
     std::fs::create_dir_all(&target).unwrap();
     let fx = Fx::new(&format!("target_dirs = [\"{}\"]\n", fwd(&target)));
     let hosts = fx.root.join("hosts.toml");
-    std::fs::write(&hosts, format!("[[hosts]]\nname = \"h\"\nreach = \"local\"\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 100000000\n", fwd(t.path()))).unwrap();
+    std::fs::write(&hosts, format!("[[hosts]]\nname = \"h\"\nreach = \"local\"\nmemory_check = false\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 100000000\n", fwd(t.path()))).unwrap();
     let o = fx.advance(&["--hosts", &fwd(&hosts), "--host", "h"]);
     assert_eq!(o.status.code(), Some(77), "{}", out(&o));
     assert!(out(&o).contains("host.refuse-disk") && out(&o).contains("< min_free_gb"), "{}", out(&o));
@@ -104,7 +104,7 @@ fn a_host_that_fails_doctor_refuses_the_batch_with_79_and_a_host_that_passes_doe
     let fx = Fx::new("");
     let hosts = fx.root.join("hosts.toml");
     // the disk is below its minimum: doctor FAILs on it
-    std::fs::write(&hosts, format!("[[hosts]]\nname = \"h\"\nreach = \"local\"\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 100000000\n", fwd(&fx.root))).unwrap();
+    std::fs::write(&hosts, format!("[[hosts]]\nname = \"h\"\nreach = \"local\"\nmemory_check = false\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 100000000\n", fwd(&fx.root))).unwrap();
     let o = fx.advance(&["--hosts", &fwd(&hosts), "--host", "h"]);
     assert_eq!(o.status.code(), Some(79), "{}", out(&o));
     assert!(out(&o).contains("host.refuse-doctor") && out(&o).contains("disk"), "{}", out(&o));

@@ -897,9 +897,9 @@ fn a_worktree_is_removed_by_a_plain_removal_then_pruned() {
     apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
     let calls = sim.calls();
     let i_rm = calls.iter().position(|c| c.starts_with("rm -r") && c.contains("/repo/wt/lane-a")).unwrap();
-    let i_prune = calls.iter().position(|c| c.ends_with("worktree prune")).unwrap();
-    assert!(i_rm < i_prune);
-    assert!(!calls.iter().any(|c| c.contains("worktree remove")));
+    let i_unreg = calls.iter().position(|c| c.contains("worktree remove --force /repo/wt/lane-a")).unwrap();
+    assert!(i_rm < i_unreg);
+    assert!(!calls.iter().any(|c| c.ends_with("worktree prune")), "never the repo-wide prune");
 }
 
 #[test]
@@ -1087,7 +1087,7 @@ fn a_link_that_points_inside_the_removed_folder_goes_with_it() {
 }
 
 #[test]
-fn prune_runs_only_when_this_is_the_one_prunable_worktree() {
+fn only_this_worktrees_registration_goes_and_never_a_repo_wide_prune() {
     let sim = linux_sim();
     {
         let s = &mut *sim.s();
@@ -1097,12 +1097,66 @@ fn prune_runs_only_when_this_is_the_one_prunable_worktree() {
     let d = tempfile::tempdir().unwrap();
     apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
     let r = records(&log_in(&d)).into_iter().find(|r| r["item"] == "/repo/wt/lane-a").unwrap();
-    assert_eq!(r["status"], "failed");
-    let note = r["note"].as_str().unwrap();
-    assert!(note.contains("STALE REGISTRATION") && note.contains("lane-away"), "{note}");
+    assert_eq!(r["status"], "ok", "{r}");
     assert!(!sim.calls().iter().any(|c| c.ends_with("worktree prune")), "the repo-wide prune never ran");
-    assert!(!sim.s().deleted_branches.iter().any(|b| b == "line/lane-a"));
     assert!(sim.s().worktrees.iter().any(|w| w.0 == "/repo/wt/lane-away"), "the other registration is untouched");
+    assert!(!sim.s().worktrees.iter().any(|w| w.0 == "/repo/wt/lane-a"), "this one is unregistered");
+    assert!(sim.s().deleted_branches.iter().any(|b| b == "line/lane-a"));
+}
+
+#[test]
+fn a_failed_unregistration_is_reported_with_the_branch_kept() {
+    let sim = linux_sim();
+    sim.pre(Box::new(|_s, c| if c.contains(" worktree remove ") { Some(RunOut::done(128, "")) } else { None }));
+    let d = tempfile::tempdir().unwrap();
+    apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
+    let rs = records(&log_in(&d));
+    assert!(!rs.is_empty() && rs.iter().all(|r| r["status"] == "failed" && r["note"].as_str().unwrap().contains("STALE REGISTRATION")), "{rs:?}");
+    assert!(sim.s().deleted_branches.is_empty());
+}
+
+#[test]
+fn a_link_listing_that_times_out_is_a_timeout_and_an_item_failure_not_a_run_stop() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let (h, t, inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
+    assert!(!by_key(&inv.items, "/repo/wt/lane-a").is_empty());
+    sim.pre(Box::new(|_s, c| if c.starts_with("find") && c.contains("-type l") { Some(RunOut::TimedOut) } else { None }));
+    let (done, _failed) = apply_plan(&h, &sim, &t, &inv, &["worktrees".to_string()], Some(NOW as f64), None, false).unwrap();
+    assert_eq!(done, 0);
+    let rs = records(&log_in(&d));
+    assert!(!rs.is_empty() && rs.iter().all(|r| r["status"] == "refused" && r["note"].as_str().unwrap().contains("timed out")), "{rs:?}");
+    let seen: Vec<Option<f64>> = sim.s().call_timeouts.iter().filter(|(c, _)| c.starts_with("find") && c.contains("-type l")).map(|(_, t)| *t).collect();
+    assert!(seen.iter().all(|t| *t == Some(300.0)), "its own, longer timeout: {seen:?}");
+    let (_h, _t, inv) = gather_sim(&sim, json!({}), false, 50.0); // and `check` keeps the worktree instead of dying
+    assert!(inv.worktrees.iter().find(|x| x.path == "/repo/wt/lane-a").unwrap().keep.as_deref().unwrap().contains("cannot list its links"));
+}
+
+#[test]
+fn a_link_target_that_cannot_be_used_refuses_the_item_before_anything_is_removed() {
+    let sim = winsim();
+    sim.s().add("C:/repo/wt/lane-a/odd", "link", 0, 10 * DAY, Some("C:/repo/main/a&b"));
+    let d = tempfile::tempdir().unwrap();
+    assert_eq!(apply(&sim, &["worktrees"], json!({}), true, &log_in(&d)).unwrap(), (0, 1));
+    assert_eq!(records(&log_in(&d))[0]["status"], "refused");
+    assert!(sim.s().has("C:/repo/wt/lane-a/src.rs"), "the folder is untouched");
+    assert!(!sim.calls().iter().any(|c| c.contains("rmdir /S") || c.ends_with("gatetrain-unlink.cmd\"")));
+}
+
+#[test]
+fn an_old_format_first_seen_record_is_first_seen_now_and_upgraded() {
+    let sim = linux_sim();
+    {
+        let s = &mut *sim.s();
+        s.fs.push(("/trash/zz".into(), Entry { typ: "dir", size: 0, mtime: NOW - 30 * DAY, target: None, ltype: None }));
+        s.fs.push(("/trash/zz/f".into(), Entry { typ: "file", size: 5, mtime: NOW - 30 * DAY, target: None, ltype: None }));
+        s.scripts.insert("/trash/.gatetrain-seen.json".into(), json!({"zz": NOW - 20 * DAY, "old": NOW - 10 * DAY, "new": NOW - DAY}).to_string()); // bare numbers
+    }
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, NOW as f64);
+    assert!(by_key(&inv.items, "/trash/zz").is_empty(), "a bare 20-day-old number is not trusted");
+    let rec: Value = serde_json::from_str(&sim.s().scripts["/trash/.gatetrain-seen.json"]).unwrap();
+    assert_eq!(rec["zz"]["t"].as_f64().unwrap(), NOW as f64);
+    assert_eq!(rec["zz"]["m"].as_i64().unwrap(), NOW - 30 * DAY);
 }
 
 #[test]

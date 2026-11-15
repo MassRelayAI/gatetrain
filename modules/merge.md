@@ -41,3 +41,5 @@ doctor = true                         # default: with --hosts, the host must pas
 is required for a step with no history; unknown memory is not unlimited), 77 the disk would drop under `min_free_gb`, 78 the working directory is
 not the repository top level, 79 `doctor` fails. After the chain, only generated files may differ from the settled tip; they are committed by name at
 the merge after the generators run again to a fixpoint (`chain.tree-differs` otherwise).
+
+Memory is checked for every host unless it says `memory_check = false` in `hosts.toml`; a host with no memory keys (or a misspelt one, which the loader now rejects as an unknown host key) is refused, not skipped.

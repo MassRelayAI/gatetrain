@@ -781,3 +781,22 @@ fn a_crash_after_the_merge_with_generated_files_resumes_as_done_with_the_merged_
     assert_eq!(status_fact(&mut fx, "b1", &["merge_new"]).as_str().unwrap(), main);
     assert_eq!(g(&fx.repo, &["show", "main:gen/chain-made.txt"]), "made by the chain");
 }
+
+
+#[test]
+fn a_staged_rename_into_the_generated_dir_is_a_deletion_outside_it_and_is_refused() {
+    // the reviewer's sequence: `git mv one.txt gen/one.txt` shows ONE staged rename whose destination is generated; the deletion of the
+    // source is a change outside the generated dirs and must count
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    std::fs::create_dir_all(fx.repo.join("gen")).unwrap();
+    g(&fx.repo, &["mv", "one.txt", "gen/one.txt"]);
+    assert!(g(&fx.repo, &["status", "--porcelain"]).contains("R "), "git shows a staged rename");
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "chain.tree-differs");
+    assert!(because.contains("one.txt"), "{because}");
+    assert_eq!(fx.state("b1"), "proving");
+    // and the deletion was never committed
+    assert_eq!(g(&fx.repo, &["rev-parse", "HEAD"]), g(&fx.repo, &["rev-parse", "batch/b1/s1"]));
+}

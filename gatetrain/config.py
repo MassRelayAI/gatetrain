@@ -140,10 +140,16 @@ def _disk(d, where):
                 use, _bool(d, "removable", where, False), measure)
 
 
+HOST_KEYS = ('awake_hours', 'cache_server_check', 'chain_pattern', 'container_prefix', 'cores', 'cost_per_hour_usd', 'disks', 'enabled', 'gate_scripts', 'kind', 'lock_file', 'lock_max_age_hours', 'max_parallel_steps', 'max_pollers', 'memory_check', 'memory_gb', 'memory_per_cargo_job_gb', 'memory_per_step_gb', 'memory_reserve_gb', 'name', 'os', 'ports', 'reach', 'reserve_cores', 'reserved_port_ranges', 'roles', 'step_default_gb', 'tidy', 'tools', 'watcher_max_age_min', 'worktrees', 'wsl', 'wsl_memory_gb')
+
+
 def _host(d, i):
     w = f"hosts[{i}]"
     if not isinstance(d, dict):
         raise ConfigError(f"{w}: must be a table")
+    unknown = sorted(set(d) - set(HOST_KEYS))
+    if unknown:               # a misspelt key (memory_gb, step_default_gb ...) must be an error, never a setting that silently does nothing
+        raise ConfigError(f"{w}: unknown key(s) {unknown}; allowed {list(HOST_KEYS)}")
     kind = _str(d, "kind", w, "server")
     if kind not in KINDS:
         raise ConfigError(f"{w}.kind: must be one of {list(KINDS)}, got {kind!r}")

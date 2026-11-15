@@ -502,8 +502,8 @@ impl<'a> Ops<'a> {
         if c.ok() && !strip(&c.out).is_empty() {
             if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(&c.out) {
                 for (k, v) in m {
-                    if let Some(f) = v.as_f64() {
-                        out.insert(k, SeenRec { t: f, m: None }); // the older format: a bare time
+                    if v.as_f64().is_some() {
+                        continue; // the older format (a bare time, no folder time to compare): first seen now, and upgraded
                     } else if let Some(t) = v.get("t").and_then(|t| t.as_f64()) {
                         out.insert(k, SeenRec { t, m: v.get("m").and_then(|m| m.as_i64()) });
                     }
@@ -615,7 +615,10 @@ impl<'a> Ops<'a> {
     // -- links (L12, L44)
     pub fn list_links(&self, path: &str) -> R<Vec<String>> {
         let cmd = if self.win { format!("dir /AL /S /B {} & echo {END}", self.q(path)?) } else { format!("find {} -type l; echo {END}", self.q(path)?) };
-        let c = self.run0(&cmd)?;
+        let c = self.run(&cmd, Some(self.cfg.link_list_timeout_s))?;
+        if c.rc.is_none() {
+            return refuse(format!("the link listing for {path} timed out after {}s (link_list_timeout_s); this item is left alone", crate::pycompat::fmt_g(self.cfg.link_list_timeout_s)));
+        }
         let lines: Vec<String> = splitlines(&c.out).iter().map(|l| strip(l).to_string()).filter(|l| !l.is_empty()).collect();
         if !lines.iter().any(|l| l == END) {
             return guard(format!("the link listing for {path} did not run (no end marker); refusing to continue"));
@@ -645,7 +648,11 @@ impl<'a> Ops<'a> {
             return Ok(());
         }
         self.canary_ok.set(true); // set first: the canary listing re-enters list_links
-        let o = self.run0(&format!("dir /AL /S /B {} & echo {END}", self.q(canary)?))?;
+        let o = self.run(&format!("dir /AL /S /B {} & echo {END}", self.q(canary)?), Some(self.cfg.link_list_timeout_s))?;
+        if o.rc.is_none() {
+            self.canary_ok.set(false);
+            return guard(format!("the link canary listing of {canary} timed out after {}s; the listing command is not trusted", crate::pycompat::fmt_g(self.cfg.link_list_timeout_s)));
+        }
         let n = splitlines(&o.out).iter().filter(|l| !strip(l).is_empty() && strip(l) != END).count() as i64;
         if n != want {
             self.canary_ok.set(false);
@@ -767,6 +774,15 @@ impl<'a> Ops<'a> {
         for l in self.list_links(p)? {
             let t = self.rp(&l)?;
             targets.push((l, t));
+        }
+        if self.win {
+            for (l, t) in &targets {
+                // a name or a target that can never be put on a Windows command line refuses the item NOW, untouched
+                self.win_ok(l)?;
+                if let Some(t) = t {
+                    self.win_ok(t)?;
+                }
+            }
         }
         self.unlink_all(p)?;
         let c = self.run(&if self.win { format!("rmdir /S /Q {}", self.q(p)?) } else { format!("rm -r -- {}", self.q(p)?) }, Some(self.cfg.remove_timeout_s))?;
