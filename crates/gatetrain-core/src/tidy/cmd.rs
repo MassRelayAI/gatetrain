@@ -1,6 +1,6 @@
 //! `cmd_check` and `cmd_tidy` of tidy.py. Output is collected, not printed, so the CLI and the tests read the same text.
 //! Exit codes as Python: 0 clean, 1 threshold crossed or action failed, 3 guard violation; 1 for a config or usage error (SystemExit).
-use super::apply::apply_plan;
+use super::apply::apply_plan_report;
 use super::config::{build_cfg, CLASSES};
 use crate::config::{self, Config, Host};
 use super::inventory::{gather, Inventory};
@@ -153,7 +153,7 @@ pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<
             continue;
         }
         inv.items = plan.clone();
-        let (done, failed) = match apply_plan(h, r.as_ref(), &t, &inv, &classes, now, None, !auto) {
+        let (done, failed, reclaimed) = match apply_plan_report(h, r.as_ref(), &t, &inv, &classes, now, None, !auto) {
             Ok(x) => x,
             Err(e) => return fatal(o, h, e, stop),
         };
@@ -163,7 +163,7 @@ pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<
         };
         let freed = total_str(&plan);
         o.say(format!("{}: {} planned in {}; {} done, {} failed", h.name, plan.len(), classes.join(","), done, failed));
-        o.say(format!("{}: about {} reclaimed (planned bytes); log {}", h.name, freed, t.log));
+        o.say(format!("{}: {} reclaimed (measured: size before minus size after, per item that went ok; {} planned); log {}", h.name, super::inventory::human(Some(reclaimed)), freed, t.log));
         for d in &after.disks {
             o.say(format!(
                 "{}: disk {} {} (min {})",

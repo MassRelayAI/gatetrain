@@ -25,6 +25,7 @@ pub struct MemoryModel {
 
 impl MemoryModel {
     pub fn from_hosts_toml(text: &str, host: &str) -> Result<MemoryModel> {
+        crate::config::validate_text(text).map_err(Error::Canon)?;
         let v: toml::Value = text.parse().map_err(|e: toml::de::Error| Error::Canon(format!("hosts.toml: {e}")))?;
         let h = v
             .get("hosts")

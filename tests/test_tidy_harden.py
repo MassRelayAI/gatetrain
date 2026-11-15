@@ -1068,5 +1068,96 @@ class ReviewFix3Tests(Base):
             ops.listdir("C:/not-there")                                       # rc 1 and the folder cannot be shown: a failed listing
 
 
+# ---------------------------------------------------------------- fourth review (a9470f6 / adafb2d)
+
+class ReviewFix4Tests(Base):
+    def _plan(self, sim, extra=None):
+        cfg, h = hostcfg(dict(extra or {}, log=self.log))
+        t = T.build_cfg(cfg, h)
+        return h, t, T.gather(h, sim, t, now=NOW)
+
+    def test_a_dangling_junction_inside_a_removed_folder_is_not_a_missing_target(self):
+        sim = linux_sim()
+        sim.add("/repo/wt/lane-a/dead", "link", target="/gone/away")        # its target was already gone before tidy came
+        done, failed = self.apply(sim, ["worktrees"])
+        self.assertEqual(failed, 0)
+        self.assertNotIn("/repo/wt/lane-a", sim.fs)
+
+    def test_a_target_that_existed_and_went_with_the_removal_still_stops_the_run(self):
+        sim = linux_sim()
+        orig = sim.run
+
+        def evil(cmd, timeout=None):
+            rc, out = orig(cmd, timeout)
+            if cmd.startswith("rm -r") and "/repo/wt/lane-a" in cmd:
+                for k in [k for k in sim.fs if k.startswith("/repo/main/node_modules")]:
+                    sim.fs.pop(k)
+            return rc, out
+        sim.run = evil
+        with self.assertRaises(T.GuardViolation):
+            self.apply(sim, ["worktrees"])
+
+    def test_a_worktree_locked_after_the_plan_is_refused(self):
+        sim = linux_sim()
+        h, t, inv = self._plan(sim)
+        self.assertTrue(by(inv, "/repo/wt/lane-a"))
+        sim.locked.add("/repo/wt/lane-a")                                        # someone locked it between the plan and the action
+        done, failed = T.apply_plan(h, sim, t, inv, ["worktrees"], now=NOW)
+        r = [r for r in self.recs() if r["item"] == "/repo/wt/lane-a"][0]
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("locked now", r["note"])
+        self.assertIn("/repo/wt/lane-a/src.rs", sim.fs)
+        self.assertNotIn("archive/line/lane-a", sim.tags)
+
+    def test_the_archive_tag_is_made_only_after_the_link_check_passed(self):
+        import subprocess as sp
+        sim = linux_sim()
+        h, t, inv = self._plan(sim)
+        orig = sim.run
+
+        def slow(cmd, timeout=None):
+            if cmd.startswith("find") and "-type l" in cmd:
+                raise sp.TimeoutExpired(cmd, timeout or 60)
+            return orig(cmd, timeout)
+        sim.run = slow
+        T.apply_plan(h, sim, t, inv, ["worktrees"], now=NOW)
+        self.assertEqual(sim.tags, [], "a refused item leaves no tag behind")
+
+    def test_obsidian_style_rewrites_inside_main_do_not_stop_the_run_but_other_changes_do(self):
+        def run(extra):
+            sim = linux_sim()
+            sim.add("/repo/main/.obsidian/app.json", "file", 10, 0)
+            orig = sim.run
+
+            def evil(cmd, timeout=None):
+                rc, out = orig(cmd, timeout)
+                if cmd.startswith("rm -r") and "/repo/wt/lane-a" in cmd:
+                    sim.fs.pop("/repo/main/.obsidian/app.json", None)         # the editor rewrote its settings while tidy ran
+                return rc, out
+            sim.run = evil
+            return self.apply(sim, ["worktrees"], extra)
+        self.assertEqual(run({})[1], 0, "the default volatile path is .obsidian/")
+        with self.assertRaises(T.GuardViolation):
+            run({"main_volatile_paths": []})
+        Path(self.log).unlink()
+
+    def test_a_bad_trash_dir_is_a_clean_config_error_not_a_traceback(self):
+        cfg, h = hostcfg({"trash_dir": "/"})
+        with self.assertRaises(SystemExit) as cm:
+            T._prep(cfg, h)
+        self.assertTrue(str(cm.exception).startswith("config error: tidy.trash_dir"), str(cm.exception))
+
+    def test_the_summary_counts_bytes_actually_reclaimed(self):
+        sim = linux_sim()
+        h, t, inv = self._plan(sim)
+        done, failed, reclaimed = T.apply_plan_report(h, sim, t, inv, ["trash"], now=NOW)
+        self.assertEqual((done, failed), (1, 0))
+        self.assertEqual(reclaimed, 50 * MB)
+        sim = linux_sim()
+        sim.rm_noop = True
+        h, t, inv = self._plan(sim)
+        self.assertEqual(T.apply_plan_report(h, sim, t, inv, ["trash"], now=NOW)[2], 0, "a removal that left everything behind reclaimed nothing")
+
+
 if __name__ == "__main__":
     unittest.main()

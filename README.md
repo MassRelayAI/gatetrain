@@ -244,6 +244,7 @@ target_roots  = ["/srv/build/targets"]  # each child folder is one lane's target
 targets       = [{ path = "/srv/build/chain", budget_gb = 300 }]   # a shared target: reported, cleaned only by hand
 min_idle_min  = 60                      # a folder used more recently is kept (the newest file inside counts, not only the folder's own time)
 worktree_min_idle_days = 2              # a worktree with a file changed in the last N days is kept, even when merged and clean (0 = off)
+main_volatile_paths = [".obsidian/"]    # tools rewrite these inside main while tidy runs; they do not count as a change of main (tracked content and untracked-but-not-ignored files elsewhere do)
 link_list_timeout_s = 300               # the link listing walks a whole worktree and gets this long; a timeout refuses that ONE item, it does not stop the run
 idle_walk_depth = 12                    # how deep "the newest file inside" is looked for (bounded by size_timeout_s; a timeout means not idle)
 # NOTE: `check` writes one small file: .gatetrain-seen.json inside trash_dir (when tidy first saw each entry); nothing else is written
@@ -259,6 +260,10 @@ remove_timeout_s = 1800                 # a removal, move or cargo clean slower 
 log           = "tidy-log.jsonl"
 # Windows: scratch_dir for generated scripts; link_canary / link_canary_count for a known folder with a known link count
 ```
+
+**Ignored files are not uncommitted work.** A worktree whose only changes are files git ignores (build output, `node_modules`) counts as clean, by design: they can be rebuilt, and the folder is removed with them. A file git does not ignore, changed or new, keeps the worktree.
+
+**Memory in `hosts.toml`.** Each host sets `memory_gb` and `memory_reserve_gb`, and `step_default_gb` (GB, in the same `[[hosts]]` table) for a step with no recorded peak; `hold` and `batch` refuse a step with no history without it. `memory_check = false` in that table is the only way to switch the memory check off. An unknown key in a host table is an error everywhere (`hold`, `memory admit`, `doctor`).
 
 Safety rules (lessons L43-L51, L60-L65):
 

@@ -119,7 +119,7 @@ fn a_step_with_no_history_needs_step_default_gb_in_the_config() {
 #[test]
 fn a_host_with_no_memory_keys_is_refused_not_silently_skipped() {
     // a misspelt or missing memory key must be loud: memory is checked unless the host says `memory_check = false`
-    let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\ncores = 8\nmemroy_gb = 16\n", "x").unwrap();
+    let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\ncores = 8\n", "x").unwrap();
     assert!(m.configured);
     let a = admit(&m, &["anything".to_string()], &HashMap::new());
     assert!(!a.admitted, "{}", a.rule);
@@ -133,4 +133,16 @@ fn memory_check_false_is_the_only_way_to_opt_out() {
     assert!(a.admitted && a.rule.contains("memory_check = false"), "{}", a.rule);
     let m = MemoryModel::from_hosts_toml("[[hosts]]\nname = \"x\"\nmemory_check = true\n", "x").unwrap();
     assert!(m.configured);
+}
+
+#[test]
+fn a_misspelt_memory_key_is_an_error_in_every_reader_of_hosts_toml() {
+    // `memory_reserve_gbb` used to give a reserve of 0 and admit a 60 GB step on a 31 GB host
+    let bad = "[[hosts]]\nname = \"pc\"\nmemory_gb = 31\nmemory_reserve_gbb = 12\nstep_default_gb = 1\n";
+    let e = MemoryModel::from_hosts_toml(bad, "pc").unwrap_err().to_string();
+    assert!(e.contains("unknown key") && e.contains("memory_reserve_gbb"), "{e}");
+    let e = gatetrain_core::hold::host_capacity(bad, "pc").unwrap_err().to_string();
+    assert!(e.contains("memory_reserve_gbb"), "{e}");
+    let e = gatetrain_core::disk::disks_from_hosts_toml(bad, "pc").unwrap_err().to_string();
+    assert!(e.contains("memory_reserve_gbb"), "{e}");
 }

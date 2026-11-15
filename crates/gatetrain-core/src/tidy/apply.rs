@@ -29,12 +29,19 @@ pub fn log_action(path: &str, rec: &J) -> R<()> {
     Ok(())
 }
 
-/// Run the plan class by class. Returns (done, failed); a guard violation is logged, then returned, stopping everything.
+/// (done, failed) of [`apply_plan_report`].
 #[allow(clippy::too_many_arguments)]
 pub fn apply_plan(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, inv: &Inventory, classes: &[String], now: Option<f64>, log: Option<&str>, attended: bool) -> R<(usize, usize)> {
+    apply_plan_report(host, runner, cfg, inv, classes, now, log, attended).map(|r| (r.0, r.1))
+}
+
+/// Run the plan class by class. Returns (done, failed, reclaimed bytes); a guard violation is logged, then returned, stopping everything.
+/// `reclaimed` is measured: before minus after of every item that went ok and whose two sizes are known.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_plan_report(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, inv: &Inventory, classes: &[String], now: Option<f64>, log: Option<&str>, attended: bool) -> R<(usize, usize, i64)> {
     let ops = Ops::new(host, runner, cfg);
     let log = log.unwrap_or(&cfg.log);
-    let (mut done, mut failed) = (0, 0);
+    let (mut done, mut failed, mut reclaimed) = (0, 0, 0i64);
     for cls in CLASSES {
         if !classes.iter().any(|c| c == cls) {
             continue;
@@ -83,12 +90,15 @@ pub fn apply_plan(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, inv: &Invento
             log_action(log, &J::Obj(rec))?;
             if status == "ok" {
                 done += 1;
+                if let (Some(b), Some(a)) = (it.bytes, after) {
+                    reclaimed += (b - a).max(0);
+                }
             } else {
                 failed += 1;
             }
         }
     }
-    Ok((done, failed))
+    Ok((done, failed, reclaimed))
 }
 
 fn set(rec: &mut Vec<(String, J)>, k: &str, v: J) {
@@ -311,27 +321,41 @@ pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
         return guard(format!("branch {br} ({sha}) is not on {}", cfg.main_branch));
     }
     let before = ops.snapshot_main()?;
-    let mut tag = format!("archive/{br}");
-    let mut ex = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
-    if ex.ok() && crate::pycompat::strip(&ex.out) != sha {
-        tag = format!("{tag}-{}", &sha[..sha.len().min(8)]); // that name belongs to another commit: never overwrite or reuse it
-        ex = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
-    }
-    if !(ex.ok() && crate::pycompat::strip(&ex.out) == sha) {
-        let t = ops.git(m, &["tag", &tag, &sha])?;
-        if !t.ok() {
-            return guard(format!("could not create the archive tag {tag} for {br}; branch and worktree kept"));
+    let cell: std::cell::RefCell<(String, bool)> = std::cell::RefCell::new((format!("archive/{br}"), false));
+    // runs after the link check, before the first change: a refused item leaves no tag behind
+    let make_tag = || -> R<()> {
+        let mut tag = cell.borrow().0.clone();
+        let mut ex = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
+        if ex.ok() && crate::pycompat::strip(&ex.out) != sha {
+            tag = format!("{tag}-{}", &sha[..sha.len().min(8)]); // that name belongs to another commit: never overwrite or reuse it
+            ex = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
         }
-    }
-    let got = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
-    if !got.ok() || crate::pycompat::strip(&got.out) != sha {
-        return guard(format!("archive tag {tag} does not point at {sha}; branch and worktree kept"));
+        if !(ex.ok() && crate::pycompat::strip(&ex.out) == sha) {
+            let t = ops.git(m, &["tag", &tag, &sha])?;
+            if !t.ok() {
+                return guard(format!("could not create the archive tag {tag} for {br}; branch and worktree kept"));
+            }
+        }
+        let got = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
+        if !got.ok() || crate::pycompat::strip(&got.out) != sha {
+            return guard(format!("archive tag {tag} does not point at {sha}; branch and worktree kept"));
+        }
+        *cell.borrow_mut() = (tag, true);
+        Ok(())
+    };
+    // re-read just before acting: it may have been locked since the plan
+    let reg: Vec<_> = ops.worktrees()?.into_iter().filter(|w| super::ops::norm(&w.path) == super::ops::norm(p)).collect();
+    match reg.first() {
+        None => return Err(Fatal::Item(format!("{p} is no longer a registered worktree; not removing"))),
+        Some(w) if w.locked => return Err(Fatal::Item(format!("{p} is locked now; not removing"))),
+        _ => {}
     }
     // the folder goes by a removal that never follows a link (`git worktree remove` may), links first and their targets checked after;
     // git is then told the folder is gone
-    let (status, note) = ops.remove_dir(p)?;
+    let (status, note) = ops.remove_dir_with(p, Some(&make_tag))?;
+    let (tag, made) = cell.borrow().clone();
     if status != "ok" {
-        return Ok((None, status, format!("{note}; branch {br} kept, archived as {tag}")));
+        return Ok((None, status, format!("{note}; branch {br} kept{}", if made { format!(", archived as {tag}") } else { String::new() })));
     }
     // `git worktree remove <path>` on the folder that is already gone unregisters exactly that worktree (never the repo-wide `prune`, which
     // also unregisters, and deletes the admin directory of, another worktree whose folder is only away)

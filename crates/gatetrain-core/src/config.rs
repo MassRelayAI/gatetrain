@@ -408,6 +408,12 @@ fn host(v: &T, i: usize) -> R<Host> {
     })
 }
 
+/// The hosts.toml text, read by the same strict loader `doctor` uses: an unknown host key (a misspelt `memory_reserve_gbb`) is an error here too.
+pub fn validate_text(text: &str) -> std::result::Result<(), String> {
+    let t: Tbl = text.parse().map_err(|e: toml::de::Error| format!("hosts.toml: {e}"))?;
+    parse(&t).map(|_| ()).map_err(|e| format!("hosts.toml: {e}"))
+}
+
 /// config.py `parse`.
 pub fn parse(data: &Tbl) -> R<Config> {
     let profile = match data.get("profile") {

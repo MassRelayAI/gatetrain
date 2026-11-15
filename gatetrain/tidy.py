@@ -50,6 +50,7 @@ class TidyCfg:
     main_checkout: Optional[str] = None
     root_checkout: Optional[str] = None
     main_branch: str = "main"
+    main_volatile_paths: list = field(default_factory=lambda: [".obsidian/"])   # tools rewrite these in main while tidy runs; they do not count as a change of main
     keep_paths: List[str] = field(default_factory=list)
     keep_lanes: List[str] = field(default_factory=list)
     keep_branches: List[str] = field(default_factory=list)
@@ -76,7 +77,7 @@ class TidyCfg:
     link_list_timeout_s: float = 300                        # the link listing (`dir /AL /S /B`, `find -type l`) walks a whole worktree: it gets this long
 
 
-_LISTS = ("keep_paths", "keep_lanes", "keep_branches", "target_roots", "image_patterns", "evidence_dirs", "unattended")
+_LISTS = ("main_volatile_paths", "keep_paths", "keep_lanes", "keep_branches", "target_roots", "image_patterns", "evidence_dirs", "unattended")
 _STRS = ("main_checkout", "root_checkout", "main_branch", "worktree_prefix", "orphan_targets", "trash_dir",
          "container_prefix", "log", "scratch_dir", "link_canary")
 _NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s", "worktree_min_idle_days", "idle_walk_depth", "link_list_timeout_s")
@@ -424,7 +425,14 @@ class Ops:
         rc2, st = self.git(m, "status", "--porcelain")
         if rc != 0 or rc2 != 0:
             raise GuardViolation(f"cannot read the main checkout {m}")
-        return len([l for l in files.splitlines() if l.strip()]), st.strip()
+        vol = [v.replace("\\", "/").rstrip("/") for v in self.cfg.main_volatile_paths if v.strip("/\\")]
+
+        def volatile(path):
+            n = path.strip().replace("\\", "/")
+            return any(n == v or n.startswith(v + "/") for v in vol)
+        tracked = [l for l in files.splitlines() if l.strip() and not volatile(l)]
+        status = [l for l in st.splitlines() if l.strip() and not all(volatile(x) for x in l[3:].split(" -> "))]      # tracked content and untracked-but-not-ignored files, outside the volatile paths
+        return len(tracked), "\n".join(status).strip()
 
     def worktrees(self):
         rc, out = self.git(self.cfg.main_checkout, "worktree", "list", "--porcelain")
@@ -574,8 +582,9 @@ class Ops:
         if par != rt:
             raise GuardViolation(f"{p} does not sit directly in the recycle bin {td} (resolves to {par})")
 
-    def remove_dir(self, p):
-        """(status, note). A link is removed as a link and never walked; a timeout is 'stopped', never done."""
+    def remove_dir(self, p, before_rm=None):
+        """(status, note). A link is removed as a link and never walked; a timeout is 'stopped', never done. `before_rm` runs after every
+        check of the folder's links has passed and before the first change."""
         self.check_path(p)
         before = self.snapshot_main()
         lk = self.is_link(p)
@@ -594,6 +603,9 @@ class Ops:
                 self._win_ok(l)
                 if t is not None:
                     self._win_ok(t)
+        existed = {l: (t is not None and self.exists(t) is True) for l, t in targets}   # a link whose target was already gone (a dangling junction) has nothing to lose
+        if before_rm:
+            before_rm()
         self.unlink_all(p)
         rc, _ = self.run(f"rmdir /S /Q {self.q(p)}" if self.win else f"rm -r -- {self.q(p)}", timeout=self.cfg.remove_timeout_s)
         if rc == TIMEOUT:
@@ -607,7 +619,7 @@ class Ops:
         for l, t in targets:
             if t is None or t == norm(l) or any(t == x or t.startswith(x + "/") for x in inside):
                 continue                         # a link inside the folder (an npm workspace junction, a relative symlink) goes with it
-            if self.exists(t) is not True:
+            if existed.get(l) and self.exists(t) is not True:
                 raise GuardViolation(f"the target {t} of the link {l} is gone after removing {p}; stopping")
         self.assert_main(before)
         return "ok", "removed"
@@ -961,11 +973,17 @@ def log_action(path, rec):
 
 
 def apply_plan(host, runner, cfg: TidyCfg, inv: Inventory, classes, now=None, log=None, attended=False):
-    """Run the plan class by class. Returns (done, failed); raises GuardViolation after logging, stopping everything.
+    """(done, failed) of `apply_plan_report`."""
+    return apply_plan_report(host, runner, cfg, inv, classes, now, log, attended)[:2]
+
+
+def apply_plan_report(host, runner, cfg: TidyCfg, inv: Inventory, classes, now=None, log=None, attended=False):
+    """Run the plan class by class. Returns (done, failed, reclaimed bytes); raises GuardViolation after logging, stopping everything.
+    `reclaimed` is measured: before minus after of every item that went ok and whose two sizes are known.
     Every action writes an `intent` record BEFORE it runs, so a crash mid-action leaves a trace of what was being done."""
     ops = Ops(host, runner, cfg)
     log = log or cfg.log
-    done = failed = 0
+    done = failed = reclaimed = 0
     for cls in CLASSES:
         if cls not in classes:
             continue
@@ -991,9 +1009,11 @@ def apply_plan(host, runner, cfg: TidyCfg, inv: Inventory, classes, now=None, lo
             log_action(log, rec)
             if status == "ok":
                 done += 1
+                if it.bytes is not None and after is not None:
+                    reclaimed += max(0, it.bytes - after)
             else:
                 failed += 1
-    return done, failed
+    return done, failed, reclaimed
 
 
 def cache_hours(cfg):
@@ -1152,23 +1172,34 @@ def remove_worktree(ops, cfg, it):
     if ops.merged(sha, sha=True) is not True:                         # proved on the very commit that is archived and deleted
         raise GuardViolation(f"branch {br} ({sha}) is not on {cfg.main_branch}")
     before = ops.snapshot_main()
-    tag = f"archive/{br}"
-    rc, ex = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
-    if rc == 0 and ex.strip() != sha:
-        tag = f"{tag}-{sha[:8]}"                     # that name belongs to another commit: never overwrite or reuse it
+    cell = {"tag": f"archive/{br}"}
+
+    def make_tag():                                  # runs after the link check, before the first change: a refused item leaves no tag behind
+        tag = cell["tag"]
         rc, ex = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
-    if not (rc == 0 and ex.strip() == sha):
-        rc, _ = ops.git(m, "tag", tag, sha)
-        if rc != 0:
-            raise GuardViolation(f"could not create the archive tag {tag} for {br}; branch and worktree kept")
-    rc, got = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
-    if rc != 0 or got.strip() != sha:
-        raise GuardViolation(f"archive tag {tag} does not point at {sha}; branch and worktree kept")
+        if rc == 0 and ex.strip() != sha:
+            tag = f"{tag}-{sha[:8]}"                 # that name belongs to another commit: never overwrite or reuse it
+            rc, ex = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
+        if not (rc == 0 and ex.strip() == sha):
+            rc, _ = ops.git(m, "tag", tag, sha)
+            if rc != 0:
+                raise GuardViolation(f"could not create the archive tag {tag} for {br}; branch and worktree kept")
+        rc, got = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
+        if rc != 0 or got.strip() != sha:
+            raise GuardViolation(f"archive tag {tag} does not point at {sha}; branch and worktree kept")
+        cell["tag"] = tag
+        cell["made"] = True
+    now_reg = [w for w in ops.worktrees() if norm(w["path"]) == norm(p)]            # re-read just before acting: it may have been locked since the plan
+    if not now_reg:
+        raise ItemRefused(f"{p} is no longer a registered worktree; not removing")
+    if now_reg[0].get("locked"):
+        raise ItemRefused(f"{p} is locked now; not removing")
     # the folder goes by a removal that never follows a link (`git worktree remove` may), links first and their targets checked after;
     # git is then told the folder is gone
-    status, note = ops.remove_dir(p)
+    status, note = ops.remove_dir(p, before_rm=make_tag)
+    tag = cell["tag"]
     if status != "ok":
-        return None, status, f"{note}; branch {br} kept, archived as {tag}"
+        return None, status, f"{note}; branch {br} kept" + (f", archived as {tag}" if cell.get("made") else "")
     # `git worktree remove <path>` on the folder that is already gone unregisters exactly that worktree (never the repo-wide `prune`, which
     # also unregisters, and deletes the admin directory of, another worktree whose folder is only away)
     rc, _ = ops.git(m, "worktree", "remove", "--force", p, timeout=cfg.remove_timeout_s)
@@ -1199,7 +1230,10 @@ def _prep(cfg, h):
     r = dr.make_runner(h)
     if r is None:
         return None, None
-    return r, build_cfg(cfg, h)
+    try:
+        return r, build_cfg(cfg, h)
+    except ConfigError as e:
+        raise SystemExit(f"config error: {e}")
 
 
 def cmd_check(a):
@@ -1245,14 +1279,14 @@ def cmd_tidy(a):
                 rc = 1 if inv.breaches else rc
                 continue
             inv.items = plan
-            done, failed = apply_plan(h, r, t, inv, classes, attended=not a.auto)
+            done, failed, reclaimed = apply_plan_report(h, r, t, inv, classes, attended=not a.auto)
             after = gather(h, r, t)
         except GuardViolation as e:
             print(f"guard violation on {h.name}: {e}; stopped, nothing further touched", file=sys.stderr)
             return 3
         freed = total_str(plan)
         print(f"{h.name}: {len(plan)} planned in {','.join(classes)}; {done} done, {failed} failed")
-        print(f"{h.name}: about {freed} reclaimed (planned bytes); log {t.log}")
+        print(f"{h.name}: {human(reclaimed)} reclaimed (measured: size before minus size after, per item that went ok; {freed} planned); log {t.log}")
         for d in after.disks:
             print(f"{h.name}: disk {d[0]} {'unreadable' if d[1] is None else format(d[1], '.0f') + ' GB free'} (min {d[2]:g})")
         print(f"{h.name}: {len(after.items)} item(s) still plannable, {len(after.breaches)} threshold(s) crossed")

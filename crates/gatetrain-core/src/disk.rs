@@ -15,6 +15,7 @@ pub struct DiskRule {
 
 /// The disks of a host in `hosts.toml` that have a `min_free_gb`.
 pub fn disks_from_hosts_toml(text: &str, host: &str) -> Result<Vec<DiskRule>> {
+    crate::config::validate_text(text).map_err(Error::Canon)?;
     let v: toml::Value = text.parse().map_err(|e: toml::de::Error| Error::Canon(format!("hosts.toml: {e}")))?;
     let h = v
         .get("hosts")

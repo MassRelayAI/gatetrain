@@ -467,7 +467,8 @@ impl Sim {
         let (repo, a) = (n(&m[1]), m[2].to_string());
         let ok = |s: String| RunOut::done(0, s);
         if a == "ls-files" {
-            return ok(st.tracked().join("\n") + "\n");
+            let prefix = format!("{}/", n(&st.main));
+            return ok(st.tracked().iter().map(|k| k.strip_prefix(&prefix).unwrap_or(k).to_string()).collect::<Vec<_>>().join("\n") + "\n"); // git lists paths relative to the checkout
         }
         if a == "status --porcelain" {
             return ok(if st.dirty.contains(&repo) { "M x\n".into() } else { String::new() });

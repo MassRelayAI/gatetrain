@@ -1251,6 +1251,89 @@ fn a_windows_listing_failure_is_not_an_empty_folder() {
     });
 }
 
+
+// ---------------------------------------------------------------- fourth review
+
+#[test]
+fn a_dangling_junction_inside_a_removed_folder_is_not_a_missing_target() {
+    let sim = linux_sim();
+    sim.s().add("/repo/wt/lane-a/dead", "link", 0, 10 * DAY, Some("/gone/away")); // its target was already gone before tidy came
+    let d = tempfile::tempdir().unwrap();
+    let (_done, failed) = apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
+    assert_eq!(failed, 0);
+    assert!(!sim.s().has("/repo/wt/lane-a"));
+}
+
+#[test]
+fn a_target_that_existed_and_went_with_the_removal_still_stops_the_run() {
+    let sim = linux_sim();
+    sim.post(Box::new(|s, c| {
+        if c.starts_with("rm -r") && c.contains("/repo/wt/lane-a") {
+            for k in s.under("/repo/main/node_modules") {
+                s.pop(&k);
+            }
+        }
+    }));
+    let d = tempfile::tempdir().unwrap();
+    is_guard(apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)));
+}
+
+#[test]
+fn a_worktree_locked_after_the_plan_is_refused() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let (h, t, inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
+    assert!(!by_key(&inv.items, "/repo/wt/lane-a").is_empty());
+    sim.s().locked.insert("/repo/wt/lane-a".into()); // someone locked it between the plan and the action
+    apply_plan(&h, &sim, &t, &inv, &["worktrees".to_string()], Some(NOW as f64), None, false).unwrap();
+    let r = records(&log_in(&d)).into_iter().find(|r| r["item"] == "/repo/wt/lane-a").unwrap();
+    assert_eq!(r["status"], "refused");
+    assert!(r["note"].as_str().unwrap().contains("locked now"));
+    assert!(sim.s().has("/repo/wt/lane-a/src.rs"));
+    assert!(!sim.s().tags.iter().any(|t| t == "archive/line/lane-a"));
+}
+
+#[test]
+fn the_archive_tag_is_made_only_after_the_link_check_passed() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let (h, t, inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
+    sim.pre(Box::new(|_s, c| if c.starts_with("find") && c.contains("-type l") { Some(RunOut::TimedOut) } else { None }));
+    apply_plan(&h, &sim, &t, &inv, &["worktrees".to_string()], Some(NOW as f64), None, false).unwrap();
+    assert!(sim.s().tags.is_empty(), "a refused item leaves no tag behind");
+}
+
+#[test]
+fn obsidian_style_rewrites_inside_main_do_not_stop_the_run_but_other_changes_do() {
+    let run = |extra: Value| {
+        let sim = linux_sim();
+        sim.s().add("/repo/main/.obsidian/app.json", "file", 10, 0, None);
+        sim.post(Box::new(|s, c| {
+            if c.starts_with("rm -r") && c.contains("/repo/wt/lane-a") {
+                s.pop("/repo/main/.obsidian/app.json"); // the editor rewrote its settings while tidy ran
+            }
+        }));
+        let d = tempfile::tempdir().unwrap();
+        apply(&sim, &["worktrees"], extra, false, &log_in(&d))
+    };
+    assert_eq!(run(json!({})).unwrap().1, 0, "the default volatile path is .obsidian/");
+    is_guard(run(json!({"main_volatile_paths": []})));
+}
+
+#[test]
+fn the_summary_counts_bytes_actually_reclaimed() {
+    use gatetrain_core::tidy::apply::apply_plan_report;
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let (h, t, inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
+    let r = apply_plan_report(&h, &sim, &t, &inv, &["trash".to_string()], Some(NOW as f64), None, false).unwrap();
+    assert_eq!((r.0, r.1, r.2), (1, 0, 50 * MB));
+    let sim = linux_sim();
+    sim.s().rm_noop = true;
+    let (h, t, inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
+    assert_eq!(apply_plan_report(&h, &sim, &t, &inv, &["trash".to_string()], Some(NOW as f64), None, false).unwrap().2, 0, "nothing was reclaimed");
+}
+
 // ---------------------------------------------------------------- macOS: realpath has no -m
 
 #[cfg(unix)]

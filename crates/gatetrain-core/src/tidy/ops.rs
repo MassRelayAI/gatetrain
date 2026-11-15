@@ -536,7 +536,15 @@ impl<'a> Ops<'a> {
         if !files.ok() || !st.ok() {
             return guard(format!("cannot read the main checkout {m}"));
         }
-        Ok(Some((splitlines(&files.out).iter().filter(|l| !strip(l).is_empty()).count(), strip(&st.out).to_string())))
+        let vol: Vec<String> = self.cfg.main_volatile_paths.iter().map(|v| v.replace('\\', "/").trim_end_matches('/').to_string()).filter(|v| !v.is_empty()).collect();
+        let volatile = |path: &str| {
+            let n = path.trim().replace('\\', "/");
+            vol.iter().any(|v| n == *v || n.starts_with(&format!("{v}/")))
+        };
+        let tracked = splitlines(&files.out).iter().filter(|l| !strip(l).is_empty() && !volatile(l)).count();
+        // tracked content and untracked-but-not-ignored files, outside the volatile paths
+        let status: Vec<String> = splitlines(&st.out).into_iter().filter(|l| !strip(l).is_empty() && !l.get(3..).unwrap_or("").split(" -> ").all(&volatile)).collect();
+        Ok(Some((tracked, strip(&status.join("\n")).to_string())))
     }
 
     /// The worktrees of the main checkout.
@@ -758,6 +766,11 @@ impl<'a> Ops<'a> {
 
     /// (status, note). A link is removed as a link and never walked; a timeout is "stopped", never done.
     pub fn remove_dir(&self, p: &str) -> R<(&'static str, String)> {
+        self.remove_dir_with(p, None)
+    }
+
+    /// `before_rm` runs after every check of the folder's links has passed and before the first change.
+    pub fn remove_dir_with(&self, p: &str, before_rm: Option<&dyn Fn() -> R<()>>) -> R<(&'static str, String)> {
         self.check_path(p)?;
         let before = self.snapshot_main()?;
         let Some(lk) = self.is_link(p)? else { return guard(format!("cannot tell whether {p} is a link; not removing")) };
@@ -784,6 +797,17 @@ impl<'a> Ops<'a> {
                 }
             }
         }
+        // a link whose target was already gone (a dangling junction) has nothing to lose
+        let mut existed: Vec<bool> = vec![];
+        for (_, t) in &targets {
+            existed.push(match t {
+                Some(t) => self.exists(t)? == Some(true),
+                None => false,
+            });
+        }
+        if let Some(f) = before_rm {
+            f()?;
+        }
         self.unlink_all(p)?;
         let c = self.run(&if self.win { format!("rmdir /S /Q {}", self.q(p)?) } else { format!("rm -r -- {}", self.q(p)?) }, Some(self.cfg.remove_timeout_s))?;
         if c.rc.is_none() {
@@ -795,9 +819,9 @@ impl<'a> Ops<'a> {
             return Ok(("failed", format!("PARTLY REMOVED: {p} still exists after the removal (a long path, a locked file or a permission); some of it may be gone. Left as it is for a person.")));
         }
         let inside: Vec<String> = std::iter::once(norm(p)).chain(rpp).collect();
-        for (l, t) in &targets {
+        for (i, (l, t)) in targets.iter().enumerate() {
             if let Some(t) = t {
-                if *t == norm(l) || inside.iter().any(|x| t == x || t.starts_with(&format!("{x}/"))) {
+                if !existed[i] || *t == norm(l) || inside.iter().any(|x| t == x || t.starts_with(&format!("{x}/"))) {
                     continue; // a link inside the folder (an npm workspace junction, a relative symlink) goes with it
                 }
                 if self.exists(t)? != Some(true) {

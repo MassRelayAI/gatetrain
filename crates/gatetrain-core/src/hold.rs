@@ -264,6 +264,7 @@ pub struct HostCapacity {
 /// `GATETRAIN_PARALLEL` = `max_parallel_steps`, lowered to the cores left after `reserve_cores` when `cores` is given
 /// (never below 1). `GATETRAIN_CORES` = `cores - reserve_cores`. Absent keys export nothing.
 pub fn host_capacity(hosts_toml: &str, host: &str) -> Result<HostCapacity> {
+    crate::config::validate_text(hosts_toml).map_err(Error::Canon)?;
     let v: toml::Value = hosts_toml.parse().map_err(|e: toml::de::Error| Error::Canon(format!("hosts.toml: {e}")))?;
     let h = v
         .get("hosts")

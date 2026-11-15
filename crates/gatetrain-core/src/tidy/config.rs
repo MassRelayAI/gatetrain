@@ -37,6 +37,8 @@ pub struct TidyCfg {
     pub main_checkout: Option<String>,
     pub root_checkout: Option<String>,
     pub main_branch: String,
+    /// tools rewrite these in main while tidy runs; they do not count as a change of main
+    pub main_volatile_paths: Vec<String>,
     pub keep_paths: Vec<String>,
     pub keep_lanes: Vec<String>,
     pub keep_branches: Vec<String>,
@@ -76,6 +78,7 @@ impl Default for TidyCfg {
             main_checkout: None,
             root_checkout: None,
             main_branch: "main".into(),
+            main_volatile_paths: vec![".obsidian/".into()],
             keep_paths: vec![],
             keep_lanes: vec![],
             keep_branches: vec![],
@@ -104,9 +107,9 @@ impl Default for TidyCfg {
     }
 }
 
-const KNOWN: [&str; 27] = [
+const KNOWN: [&str; 28] = [
     "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_patterns", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
-    "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "min_idle_min", "orphan_targets", "remove_timeout_s", "root_checkout", "scratch_dir",
+    "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "remove_timeout_s", "root_checkout", "scratch_dir",
     "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_min_idle_days", "worktree_prefix",
 ];
 
@@ -155,6 +158,7 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
     for (k, v) in &d {
         match k.as_str() {
             "keep_paths" => t.keep_paths = str_list(k, v)?,
+            "main_volatile_paths" => t.main_volatile_paths = str_list(k, v)?,
             "keep_lanes" => t.keep_lanes = str_list(k, v)?,
             "keep_branches" => t.keep_branches = str_list(k, v)?,
             "target_roots" => t.target_roots = str_list(k, v)?,

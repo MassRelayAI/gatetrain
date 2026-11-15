@@ -210,7 +210,7 @@ class SimHost:
         m = re.match(r"git -C (\S+) (.+)$", c)
         repo, a = n(m.group(1)), m.group(2)
         if a == "ls-files":
-            return 0, "\n".join(self.tracked()) + "\n"
+            return 0, "\n".join(k[len(n(self.main)) + 1:] for k in self.tracked()) + "\n"     # git lists paths relative to the checkout
         if a == "status --porcelain":
             return 0, ("M x\n" if repo in self.dirty else "")
         if a.startswith("worktree list"):
