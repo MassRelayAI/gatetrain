@@ -109,10 +109,10 @@ class SimHost:
             raise subprocess.TimeoutExpired(cmd, timeout or 60)
         if any(x and x in c for x in self.unknown_exists) and re.match(r"(test -e|if exist)", c):
             return 1, ""
-        m = re.match(r"find (.+?) -maxdepth 6 -type f -mmin -(\d+) -print -quit$", c) or re.search(r"Get-ChildItem -LiteralPath (.+?) -Recurse -Depth 6 .*AddMinutes\(-(\d+)\)", c)
+        m = re.match(r"find (.+?) -maxdepth (\d+) -type f -mmin -(\d+) -print -quit$", c) or re.search(r"Get-ChildItem -LiteralPath (.+?) -Recurse -Depth (\d+) .*AddMinutes\(-(\d+)\)", c)
         if m:
             for k in self.under(m.group(1)):
-                if self.fs[k]["type"] == "file" and self.fs[k]["mtime"] > NOW - int(m.group(2)) * 60:
+                if self.fs[k]["type"] == "file" and self.fs[k]["mtime"] > NOW - int(m.group(3)) * 60:
                     return 0, k + "\n"
             return 0, ""
         m = re.match(r"(?:cat|type) (.+)$", c)
@@ -134,7 +134,7 @@ class SimHost:
         m = re.match(r"test -L (.+?) &&", c) or re.search(r"Get-Item -LiteralPath (.+?) -Force\)\.Attributes", c)
         if m:
             e = self.fs.get(n(m.group(1)))
-            return 0, "yes\n" if e and e["type"] == "link" else "no\n"
+            return 0, "yes\n" if e and e["type"] == "link" else "no\n" if e else "missing\n"
         m = re.search(r"Get-Item -LiteralPath (.+?) -Force\)\.PSIsContainer", c)
         if m:
             e = self.fs.get(n(m.group(1)))
@@ -214,7 +214,7 @@ class SimHost:
         if a == "status --porcelain":
             return 0, ("M x\n" if repo in self.dirty else "")
         if a.startswith("worktree list"):
-            return 0, "\n".join(f"worktree {w[0]}\nHEAD abc\nbranch refs/heads/{w[1]}\n" + ("locked\n" if n(w[0]) in self.locked else "") for w in self.worktrees)
+            return 0, "\n".join(f"worktree {w[0]}\nHEAD abc\nbranch refs/heads/{w[1]}\n" + ("locked\n" if n(w[0]) in self.locked else "") + ("prunable gitdir file points to non-existent location\n" if n(w[0]) not in self.fs and n(w[0]) != n(self.main) else "") for w in self.worktrees)
         if a == "branch --list":
             return 0, "\n".join("  " + b for b in self.branches) + "\n"
         m = re.match(r"merge-base --is-ancestor (\S+) (\S+)", a)
@@ -248,6 +248,8 @@ class SimHost:
         m = re.match(r"show (\S+?):(\S+)$", a)
         if m:
             return (0, self.shown[m.group(2)]) if m.group(2) in self.shown else (128, "")
+        if a == "rev-parse --show-toplevel":
+            return (0, repo + "\n") if repo in self.fs else (128, "")
         if a == "worktree prune":
             self.worktrees = [w for w in self.worktrees if n(w[0]) in self.fs or n(w[0]) == n(self.main)]
             return 0, ""

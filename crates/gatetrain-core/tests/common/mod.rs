@@ -314,9 +314,9 @@ impl Sim {
         if st.unknown_exists.iter().any(|x| !x.is_empty() && c.contains(x.as_str())) && re(r"^(test -e|if exist)").is_match(&c) {
             return RunOut::done(1, "");
         }
-        let m = re(r"^find (.+?) -maxdepth 6 -type f -mmin -(\d+) -print -quit$").captures(&c).or_else(|| re(r"Get-ChildItem -LiteralPath (.+?) -Recurse -Depth 6 .*AddMinutes\(-(\d+)\)").captures(&c));
+        let m = re(r"^find (.+?) -maxdepth (\d+) -type f -mmin -(\d+) -print -quit$").captures(&c).or_else(|| re(r"Get-ChildItem -LiteralPath (.+?) -Recurse -Depth (\d+) .*AddMinutes\(-(\d+)\)").captures(&c));
         if let Some(m) = m {
-            let limit = NOW - m[2].parse::<i64>().unwrap() * 60;
+            let limit = NOW - m[3].parse::<i64>().unwrap() * 60;
             for k in st.under(&m[1]) {
                 let e = st.get(&k).unwrap();
                 if e.typ == "file" && e.mtime > limit {
@@ -351,8 +351,11 @@ impl Sim {
         }
         let m = re(r"^test -L (.+?) &&").captures(&c).or_else(|| re(r"Get-Item -LiteralPath (.+?) -Force\)\.Attributes").captures(&c));
         if let Some(m) = m {
-            let link = st.get(&m[1]).map(|e| e.typ == "link").unwrap_or(false);
-            return ok(if link { "yes\n".into() } else { "no\n".into() });
+            return ok(match st.get(&m[1]) {
+                Some(e) if e.typ == "link" => "yes\n".into(),
+                Some(_) => "no\n".into(),
+                None => "missing\n".into(),
+            });
         }
         if let Some(m) = re(r"Get-Item -LiteralPath (.+?) -Force\)\.PSIsContainer").captures(&c) {
             return match st.get(&m[1]) {
@@ -470,7 +473,7 @@ impl Sim {
             return ok(if st.dirty.contains(&repo) { "M x\n".into() } else { String::new() });
         }
         if a.starts_with("worktree list") {
-            return ok(st.worktrees.iter().map(|w| format!("worktree {}\nHEAD abc\nbranch refs/heads/{}\n{}", w.0, w.1, if st.locked.contains(&n(&w.0)) { "locked\n" } else { "" })).collect::<Vec<_>>().join("\n"));
+            return ok(st.worktrees.iter().map(|w| format!("worktree {}\nHEAD abc\nbranch refs/heads/{}\n{}{}", w.0, w.1, if st.locked.contains(&n(&w.0)) { "locked\n" } else { "" }, if !st.has(&w.0) && n(&w.0) != n(&st.main) { "prunable gitdir file points to non-existent location\n" } else { "" })).collect::<Vec<_>>().join("\n"));
         }
         if a == "branch --list" {
             return ok(st.branches.iter().map(|b| format!("  {b}")).collect::<Vec<_>>().join("\n") + "\n");
@@ -513,6 +516,9 @@ impl Sim {
                 Some(t) => ok(t.clone()),
                 None => RunOut::done(128, ""),
             };
+        }
+        if a == "rev-parse --show-toplevel" {
+            return if st.has(&repo) { ok(format!("{repo}\n")) } else { RunOut::done(128, "") };
         }
         if a == "worktree prune" {
             let main = n(&st.main);

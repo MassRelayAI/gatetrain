@@ -3,8 +3,9 @@ use super::config::{TidyCfg, CLASSES};
 use crate::config::Host;
 use super::inventory::{is_cargo, Extra, Inventory, Item};
 use crate::pycompat::{dumps, round2, J};
-use super::ops::{guard, safe_branch, safe_container, safe_image, safe_path, Fatal, Ops, R};
+use super::ops::{guard, norm, safe_branch, safe_container, safe_image, safe_path, Fatal, Ops, R};
 use crate::pycompat::{fmt_f, fmt_g, fnmatchcase, repr_str, split_ws};
+use std::collections::HashSet;
 use crate::runner::Runner;
 use chrono::TimeZone;
 use std::io::Write;
@@ -295,6 +296,9 @@ pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     if ops.is_link(p)? != Some(false) {
         return guard(format!("{p} is a link (or cannot be probed); not removing a worktree through it"));
     }
+    if !ops.toplevel_ok(p)? {
+        return guard(format!("{p} is not the top level of its own git worktree (its .git is missing?); not removing"));
+    }
     if ops.dirty(p)? != Some(false) {
         return guard(format!("{p} has uncommitted work"));
     }
@@ -329,6 +333,20 @@ pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     let (status, note) = ops.remove_dir(p)?;
     if status != "ok" {
         return Ok((None, status, format!("{note}; branch {br} kept, archived as {tag}")));
+    }
+    // `git worktree prune` is repo-wide: it also unregisters another worktree whose folder is only temporarily missing. It runs only when the
+    // ONE worktree git calls prunable is this one.
+    let prunable: HashSet<String> = ops.worktrees()?.iter().filter(|w| w.prunable).map(|w| norm(&w.path)).collect();
+    let mine = norm(p);
+    if prunable != HashSet::from([mine.clone()]) {
+        let why = if !prunable.contains(&mine) {
+            "git does not call it prunable (git older than 2.31?)".to_string()
+        } else {
+            let mut others: Vec<&String> = prunable.iter().filter(|x| **x != mine).collect();
+            others.sort();
+            format!("it would also unregister {others:?}")
+        };
+        return Ok((None, "failed", format!("STALE REGISTRATION: {p} is removed but `git worktree prune` was not run ({why}); branch {br} kept, archived as {tag}")));
     }
     let pr = ops.git_to(m, &["worktree", "prune"], Some(cfg.remove_timeout_s))?;
     if !pr.ok() {

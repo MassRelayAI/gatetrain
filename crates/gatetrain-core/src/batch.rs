@@ -12,9 +12,12 @@ use crate::{Error, Result};
 use regex::Regex;
 use rusqlite::params;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(any(test, feature = "test-fakes"))]
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(any(test, feature = "test-fakes"))]
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------- seams for the holder lane (rs2)

@@ -244,6 +244,8 @@ target_roots  = ["/srv/build/targets"]  # each child folder is one lane's target
 targets       = [{ path = "/srv/build/chain", budget_gb = 300 }]   # a shared target: reported, cleaned only by hand
 min_idle_min  = 60                      # a folder used more recently is kept (the newest file inside counts, not only the folder's own time)
 worktree_min_idle_days = 2              # a worktree with a file changed in the last N days is kept, even when merged and clean (0 = off)
+idle_walk_depth = 12                    # how deep "the newest file inside" is looked for (bounded by size_timeout_s; a timeout means not idle)
+# NOTE: `check` writes one small file: .gatetrain-seen.json inside trash_dir (when tidy first saw each entry); nothing else is written
 trash_dir     = "/srv/trash"
 trash_days    = 7
 container_prefix = "gate-"

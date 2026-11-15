@@ -468,8 +468,8 @@ fn trash_age_comes_from_the_timestamp_in_the_name() {
         let s = &mut *sim.s();
         s.dir(&format!("/trash/{fresh}"), 10 * DAY); // moved just now, but the folder keeps its old mtime
         s.file(&format!("/trash/{fresh}/x"), 5, 10 * DAY);
-        s.dir(&format!("/trash/{stale}"), 0);
-        s.file(&format!("/trash/{stale}/x"), 5, 0);
+        s.dir(&format!("/trash/{stale}"), 10 * DAY);
+        s.file(&format!("/trash/{stale}/x"), 5, 10 * DAY);
     }
     let (_h, _t, inv) = gather_sim(&sim, json!({}), false, 50.0);
     assert!(by_key(&inv.items, &format!("/trash/{fresh}")).is_empty());
@@ -1064,6 +1064,135 @@ fn an_unstamped_trash_entry_ages_from_when_tidy_first_saw_it() {
     let (_h, _t, inv) = gather_at(&sim, json!({}), None, (NOW + 8 * DAY) as f64);
     assert_eq!(by_key(&inv.items, "/trash/zz").len(), 1, "seen 8 days ago");
     assert!(!inv.items.iter().any(|i| i.key.ends_with(".gatetrain-seen.json")));
+}
+
+
+// ---------------------------------------------------------------- second review (ce417a5)
+
+#[test]
+fn a_link_that_points_inside_the_removed_folder_goes_with_it() {
+    let sim = linux_sim();
+    {
+        let s = &mut *sim.s();
+        s.dir("/repo/wt/lane-a/inner", DAY);
+        s.file("/repo/wt/lane-a/inner/f", 3, DAY);
+        s.add("/repo/wt/lane-a/ws-link", "link", 0, DAY, Some("/repo/wt/lane-a/inner")); // an npm workspace junction, a relative symlink
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (_done, failed) = apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
+    assert_eq!(failed, 0);
+    assert!(!sim.s().has("/repo/wt/lane-a"));
+}
+
+#[test]
+fn prune_runs_only_when_this_is_the_one_prunable_worktree() {
+    let sim = linux_sim();
+    {
+        let s = &mut *sim.s();
+        s.worktrees.push(("/repo/wt/lane-away".into(), "line/lane-away".into())); // registered, its folder only temporarily missing
+        s.branches.push("line/lane-away".into());
+    }
+    let d = tempfile::tempdir().unwrap();
+    apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
+    let r = records(&log_in(&d)).into_iter().find(|r| r["item"] == "/repo/wt/lane-a").unwrap();
+    assert_eq!(r["status"], "failed");
+    let note = r["note"].as_str().unwrap();
+    assert!(note.contains("STALE REGISTRATION") && note.contains("lane-away"), "{note}");
+    assert!(!sim.calls().iter().any(|c| c.ends_with("worktree prune")), "the repo-wide prune never ran");
+    assert!(!sim.s().deleted_branches.iter().any(|b| b == "line/lane-a"));
+    assert!(sim.s().worktrees.iter().any(|w| w.0 == "/repo/wt/lane-away"), "the other registration is untouched");
+}
+
+#[test]
+fn a_worktree_with_no_git_root_of_its_own_is_unverifiable() {
+    let sim = linux_sim();
+    sim.pre(Box::new(|_s, c| if c.starts_with("git -C /repo/wt/lane-a rev-parse --show-toplevel") { Some(RunOut::done(0, "/repo/main\n")) } else { None }));
+    let (_h, _t, inv) = gather_sim(&sim, json!({}), false, 50.0);
+    let w = inv.worktrees.iter().find(|x| x.path == "/repo/wt/lane-a").unwrap();
+    assert!(w.keep.as_deref().unwrap().contains("unverifiable"));
+    assert!(by_key(&inv.items, "/repo/wt/lane-a").is_empty());
+}
+
+#[test]
+fn a_reused_trash_name_is_a_new_entry_and_records_of_gone_entries_are_dropped() {
+    let sim = linux_sim();
+    {
+        let s = &mut *sim.s();
+        s.scripts.insert(
+            "/trash/.gatetrain-seen.json".into(),
+            json!({"zz": {"t": NOW - 10 * DAY, "m": NOW - 30 * DAY}, "gone": {"t": NOW - 9 * DAY, "m": null}, "old": {"t": NOW - 10 * DAY, "m": null}, "new": {"t": NOW - DAY, "m": null}}).to_string(),
+        );
+        s.fs.push(("/trash/zz".into(), Entry { typ: "dir", size: 0, mtime: NOW - DAY, target: None, ltype: None })); // a different folder now carries the name
+        s.fs.push(("/trash/zz/f".into(), Entry { typ: "file", size: 5, mtime: NOW - DAY, target: None, ltype: None }));
+    }
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, NOW as f64);
+    assert!(by_key(&inv.items, "/trash/zz").is_empty(), "the old record does not delete the new entry on its first day");
+    let rec: Value = serde_json::from_str(&sim.s().scripts["/trash/.gatetrain-seen.json"]).unwrap();
+    assert!(rec.get("gone").is_none());
+    assert_eq!(rec["zz"]["t"].as_f64().unwrap(), NOW as f64);
+    assert_eq!(by_key(&inv.items, "/trash/old").len(), 1);
+}
+
+#[test]
+fn a_stamped_name_ages_from_the_later_of_its_stamp_and_the_first_sighting() {
+    use chrono::TimeZone;
+    let stamp = chrono::Local.timestamp_opt(NOW - 20 * DAY, 0).single().unwrap().format("%Y%m%d%H%M%S").to_string();
+    let sim = linux_sim();
+    {
+        let s = &mut *sim.s();
+        s.fs.push((format!("/trash/lane-s-{stamp}"), Entry { typ: "dir", size: 0, mtime: NOW - 20 * DAY, target: None, ltype: None }));
+        s.fs.push((format!("/trash/lane-s-{stamp}/f"), Entry { typ: "file", size: 5, mtime: NOW - 20 * DAY, target: None, ltype: None }));
+    }
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, NOW as f64);
+    assert!(by_key(&inv.items, &format!("/trash/lane-s-{stamp}")).is_empty(), "first seen now: a name stamp alone does not delete it");
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, (NOW + 8 * DAY) as f64);
+    assert_eq!(by_key(&inv.items, &format!("/trash/lane-s-{stamp}")).len(), 1);
+}
+
+#[test]
+fn a_glob_character_in_one_name_refuses_that_item_not_the_run() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let (h, t, mut inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
+    inv.items = vec![Item::new("trash", "remove", "/trash/a*b", Some(0), "x"), Item::new("containers", "rm-container", "gate-1", Some(0), "x")];
+    let classes = vec!["trash".to_string(), "containers".to_string()];
+    assert_eq!(apply_plan(&h, &sim, &t, &inv, &classes, Some(NOW as f64), None, false).unwrap(), (1, 1));
+    let st: Vec<String> = records(&log_in(&d)).iter().map(|r| r["status"].as_str().unwrap().to_string()).collect();
+    assert_eq!(st, ["ok", "refused"], "containers run before the trash class");
+}
+
+#[test]
+fn the_idle_walk_depth_is_configurable_with_a_default_of_twelve() {
+    let sim = linux_sim();
+    gather_at(&sim, json!({}), None, NOW as f64);
+    assert!(sim.calls().iter().any(|c| c.starts_with("find") && c.contains("-mmin") && c.contains("-maxdepth 12 ")));
+    let sim = linux_sim();
+    gather_at(&sim, json!({"idle_walk_depth": 3}), None, NOW as f64);
+    assert!(sim.calls().iter().any(|c| c.starts_with("find") && c.contains("-mmin") && c.contains("-maxdepth 3 ")));
+}
+
+#[test]
+fn link_state_tells_missing_from_unknown() {
+    use gatetrain_core::tidy::ops::LinkState;
+    let sim = linux_sim();
+    ops_run(&sim, json!({}), false, |ops| {
+        assert_eq!(ops.link_state("/nope/at/all").unwrap(), LinkState::Missing);
+        assert_eq!(ops.link_state("/repo/main").unwrap(), LinkState::Real);
+        assert_eq!(ops.link_state("/repo/wt/lane-a/node_modules").unwrap(), LinkState::Link);
+    });
+    sim.pre(Box::new(|_s, c| if c.starts_with("test -L") { Some(RunOut::done(1, "")) } else { None }));
+    ops_run(&sim, json!({}), false, |ops| assert_eq!(ops.link_state("/repo/main").unwrap(), LinkState::Unknown));
+}
+
+#[test]
+fn a_windows_listing_failure_is_not_an_empty_folder() {
+    let sim = winsim();
+    sim.s().dir("C:/empty", DAY);
+    sim.pre(Box::new(|_s, c| if c.starts_with("dir /B") { Some(RunOut::done(1, "")) } else { None }));
+    ops_run(&sim, win_extra(), true, |ops| {
+        assert_eq!(ops.listdir("C:/empty").unwrap(), Vec::<String>::new()); // rc 1 and the folder is there: an empty folder
+        is_guard(ops.listdir("C:/not-there")); // rc 1 and the folder cannot be shown: a failed listing
+    });
 }
 
 // ---------------------------------------------------------------- macOS: realpath has no -m

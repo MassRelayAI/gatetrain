@@ -1,4 +1,5 @@
-//! `gather`: the read-only inventory of leftovers (`tidy.gather`), with its plan items. Nothing here writes.
+//! `gather`: the inventory of leftovers (`tidy.gather`), with its plan items. It changes nothing on the host EXCEPT one small file: it
+//! records when each unstamped recycle-bin entry was first seen (`.gatetrain-seen.json` inside the bin), so a `check` writes that file.
 use super::config::TidyCfg;
 use crate::config::Host;
 use crate::pycompat::J;
@@ -227,8 +228,17 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             info.keep = Some("detached head".into());
         } else if !safe_branch(wbranch.as_deref().unwrap()) || (ops.win && ops.win_unsafe(wpath)) {
             info.keep = Some("unsafe name".into());
-        } else if ops.is_link(wpath)? != Some(false) {
-            info.keep = Some(if ops.is_link(wpath)? == Some(true) { "is a link" } else { "link state unknown" }.into());
+        } else if ops.link_state(wpath)? != super::ops::LinkState::Real {
+            info.keep = Some(
+                match ops.link_state(wpath)? {
+                    super::ops::LinkState::Link => "is a link",
+                    super::ops::LinkState::Missing => "folder is missing",
+                    _ => "link state unknown",
+                }
+                .into(),
+            );
+        } else if !ops.toplevel_ok(wpath)? {
+            info.keep = Some("unverifiable (its own git root cannot be confirmed)".into());
         } else {
             let br = wbranch.clone().unwrap();
             info.merged = if br != cfg.main_branch { ops.merged(&br)? } else { None };
@@ -440,7 +450,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         }
         if te == Some(true) {
             let seen = ops.read_seen(td)?;
-            let mut fresh: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+            let mut new_seen: std::collections::BTreeMap<String, super::ops::SeenRec> = std::collections::BTreeMap::new();
             for nm in ops.listdir(td)? {
                 if nm == super::ops::SEEN {
                     continue;
@@ -450,21 +460,19 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                     inv.trash.push(TrashInfo { path: p, bytes: None, age_days: None, keep: Some("unsafe name".into()) });
                     continue;
                 }
-                let age: Option<f64>;
+                let mt = ops.mtime(&p)?;
+                let rec = match seen.get(&nm) {
+                    Some(r) if !(r.m.is_some() && mt.is_some() && r.m != mt) => r.clone(),
+                    _ => super::ops::SeenRec { t: now, m: mt }, // new, or a NEW entry under a reused name (its own folder time differs): first seen now
+                };
+                new_seen.insert(nm.clone(), rec.clone());
+                // it counts from when tidy FIRST SAW it, never from a folder time that may be old or reset; a name stamp counts only when
+                // it is the later of the two
+                let mut a = ((now - rec.t) / 86400.0).max(0.0);
                 if let Some(secs) = stamp_secs(&nm) {
-                    // the name says when it was moved here; the folder's own mtime is when it was last used
-                    age = Some((now - secs).max(0.0) / 86400.0);
-                } else {
-                    // no stamp: it counts from when tidy FIRST SAW it, never from a folder time that may be old or reset
-                    let first = match seen.get(&nm) {
-                        Some(f) => *f,
-                        None => {
-                            fresh.insert(nm.clone(), now);
-                            now
-                        }
-                    };
-                    age = Some(((now - first) / 86400.0).max(0.0));
+                    a = a.min(((now - secs) / 86400.0).max(0.0));
                 }
+                let age = Some(a);
                 let sz = ops.size(&p)?;
                 inv.trash.push(TrashInfo { path: p.clone(), bytes: sz, age_days: age, keep: None });
                 if let Some(a) = age {
@@ -473,10 +481,9 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                     }
                 }
             }
-            if !fresh.is_empty() {
-                let present: HashSet<String> = ops.listdir(td)?.into_iter().collect();
-                let mut all: std::collections::BTreeMap<String, f64> = seen.iter().filter(|(k, _)| present.contains(*k)).map(|(k, v)| (k.clone(), *v)).collect();
-                all.extend(fresh);
+            if new_seen != seen {
+                // also drops the records of entries that are gone
+                let all: std::collections::BTreeMap<String, serde_json::Value> = new_seen.iter().map(|(k, v)| (k.clone(), serde_json::json!({"t": v.t, "m": v.m}))).collect();
                 let body = serde_json::to_string(&all).unwrap_or_default();
                 if let Err(e) = runner.put_file(&ops.join(td, super::ops::SEEN), &body) {
                     inv.breaches.push(format!("cannot record when the recycle bin entries were first seen ({e}); their age stays 0"));

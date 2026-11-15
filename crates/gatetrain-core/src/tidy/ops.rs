@@ -151,6 +151,25 @@ pub struct Wt {
     pub path: String,
     pub branch: Option<String>,
     pub locked: bool,
+    /// git says its registration is stale (its folder is missing): `git worktree prune` would remove it
+    pub prunable: bool,
+}
+
+/// What tidy remembers about one recycle-bin entry: when it was first seen, and the entry's own folder time then (a different
+/// folder time under the same name means a NEW entry under a reused name).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeenRec {
+    pub t: f64,
+    pub m: Option<i64>,
+}
+
+/// The state of one path: a link, a real item, nothing there, or the probe failed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LinkState {
+    Link,
+    Real,
+    Missing,
+    Unknown,
 }
 
 pub struct Ops<'a> {
@@ -238,8 +257,11 @@ impl<'a> Ops<'a> {
     /// (rc, out). A command that times out returns rc None instead of failing; callers treat it as a failure.
     pub fn run(&self, cmd: &str, timeout: Option<f64>) -> R<Cmd> {
         let low = cmd.to_lowercase();
-        if low.contains("system prune") || bulk_rm().is_match(&low) {
+        if low.contains("system prune") {
             return guard(format!("refusing a bulk command: {cmd}"));
+        }
+        if bulk_rm().is_match(&low) {
+            return refuse(format!("refusing a command with a glob in it: {cmd}"));
         }
         Ok(self.cmd_of(self.runner.run_for(cmd, timeout)?))
     }
@@ -280,12 +302,45 @@ impl<'a> Ops<'a> {
 
     /// True for a symlink or Windows reparse point (junction), False for a real item, None when the probe failed.
     pub fn is_link(&self, p: &str) -> R<Option<bool>> {
+        Ok(match self.link_state(p)? {
+            LinkState::Link => Some(true),
+            LinkState::Real => Some(false),
+            _ => None,
+        })
+    }
+
+    /// `Link`, `Real`, `Missing` (the item is not there) or `Unknown` (the probe failed).
+    pub fn link_state(&self, p: &str) -> R<LinkState> {
         let c = if self.win {
-            self.run0(&format!("powershell -NoProfile -Command \"if ((Get-Item -LiteralPath {} -Force).Attributes -band 1024) {{'yes'}} else {{'no'}}\"", self.psq(p)?))?
+            let q = self.psq(p)?;
+            self.run0(&format!("powershell -NoProfile -Command \"if (-not (Test-Path -LiteralPath {q})) {{'missing'}} elseif ((Get-Item -LiteralPath {q} -Force).Attributes -band 1024) {{'yes'}} else {{'no'}}\""))?
         } else {
-            self.run0(&format!("test -L {} && echo yes || echo no", self.q(p)?))?
+            let q = self.q(p)?;
+            self.run0(&format!("test -L {q} && echo yes || {{ test -e {q} && echo no || echo missing; }}"))?
         };
-        Ok(yes_no(&c))
+        let o = strip(&c.out);
+        Ok(if !c.ok() {
+            LinkState::Unknown
+        } else if o.starts_with("yes") {
+            LinkState::Link
+        } else if o.starts_with("no") {
+            LinkState::Real
+        } else if o.starts_with("missing") {
+            LinkState::Missing
+        } else {
+            LinkState::Unknown
+        })
+    }
+
+    /// True when git, run in p, says p itself is the top of its worktree (a folder with no .git of its own would answer with the repository it
+    /// sits in, and its status would be that repository's).
+    pub fn toplevel_ok(&self, p: &str) -> R<bool> {
+        let c = self.git(p, &["rev-parse", "--show-toplevel"])?;
+        if !c.ok() || strip(&c.out).is_empty() {
+            return Ok(false);
+        }
+        let (a, b) = (self.rp(strip(&c.out))?, self.rp(p)?);
+        Ok(a.is_some() && a == b)
     }
 
     /// "dir" or "file" for a Windows link; anything unclear is a violation (the script must pick rmdir or del).
@@ -368,6 +423,9 @@ impl<'a> Ops<'a> {
     pub fn listdir(&self, p: &str) -> R<Vec<String>> {
         let names: Vec<String> = if self.win {
             let c = self.run0(&format!("dir /B {}", self.q(p)?))?;
+            if !c.ok() && self.exists(p)? != Some(true) {
+                return guard(format!("listing {p} failed and the folder cannot be shown to exist; a failed listing is never read as an empty folder"));
+            }
             if c.ok() {
                 splitlines(&c.out).iter().map(|l| strip(l).to_string()).filter(|l| !l.is_empty()).collect()
             } else {
@@ -410,13 +468,14 @@ impl<'a> Ops<'a> {
         let c = if self.win {
             self.run(
                 &format!(
-                    "powershell -NoProfile -Command \"Get-ChildItem -LiteralPath {} -Recurse -Depth 6 -Force -File -ErrorAction SilentlyContinue | Where-Object {{ $_.LastWriteTime -gt (Get-Date).AddMinutes(-{n}) }} | Select-Object -First 1 -ExpandProperty FullName\"",
-                    self.psq(p)?
+                    "powershell -NoProfile -Command \"Get-ChildItem -LiteralPath {} -Recurse -Depth {} -Force -File -ErrorAction SilentlyContinue | Where-Object {{ $_.LastWriteTime -gt (Get-Date).AddMinutes(-{n}) }} | Select-Object -First 1 -ExpandProperty FullName\"",
+                    self.psq(p)?,
+                    self.cfg.idle_walk_depth as i64
                 ),
                 to,
             )?
         } else {
-            self.run(&format!("find {} -maxdepth 6 -type f -mmin -{n} -print -quit", self.q(p)?), to)?
+            self.run(&format!("find {} -maxdepth {} -type f -mmin -{n} -print -quit", self.q(p)?, self.cfg.idle_walk_depth as i64), to)?
         };
         Ok(if !c.ok() { None } else { Some(!strip(&c.out).is_empty()) })
     }
@@ -437,14 +496,16 @@ impl<'a> Ops<'a> {
     }
 
     /// When tidy first saw each entry of the recycle bin (epoch seconds), from the file inside it.
-    pub fn read_seen(&self, trash: &str) -> R<std::collections::BTreeMap<String, f64>> {
+    pub fn read_seen(&self, trash: &str) -> R<std::collections::BTreeMap<String, SeenRec>> {
         let c = self.run0(&format!("{}{}", if self.win { "type " } else { "cat " }, self.q(&self.join(trash, SEEN))?))?;
         let mut out = std::collections::BTreeMap::new();
         if c.ok() && !strip(&c.out).is_empty() {
             if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(&c.out) {
                 for (k, v) in m {
                     if let Some(f) = v.as_f64() {
-                        out.insert(k, f);
+                        out.insert(k, SeenRec { t: f, m: None }); // the older format: a bare time
+                    } else if let Some(t) = v.get("t").and_then(|t| t.as_f64()) {
+                        out.insert(k, SeenRec { t, m: v.get("m").and_then(|m| m.as_i64()) });
                     }
                 }
             }
@@ -491,9 +552,11 @@ impl<'a> Ops<'a> {
         lines.push(String::new());
         for line in lines {
             if let Some(r) = line.strip_prefix("worktree ") {
-                cur = Some(Wt { path: strip(r).to_string(), branch: None, locked: false });
+                cur = Some(Wt { path: strip(r).to_string(), branch: None, locked: false, prunable: false });
             } else if let (true, Some(c)) = (line == "locked" || line.starts_with("locked "), cur.as_mut()) {
                 c.locked = true;
+            } else if let (true, Some(c)) = (line == "prunable" || line.starts_with("prunable "), cur.as_mut()) {
+                c.prunable = true;
             } else if let (Some(r), Some(c)) = (line.strip_prefix("branch "), cur.as_mut()) {
                 c.branch = Some(strip(r).replacen("refs/heads/", "", 1));
             } else if strip(&line).is_empty() {
@@ -645,7 +708,7 @@ impl<'a> Ops<'a> {
     pub fn check_path(&self, p: &str) -> R<()> {
         safe_path(p, None)?;
         if p.contains(['*', '?', '[']) {
-            return guard(format!("refusing to remove {}", repr_str(p)));
+            return refuse(format!("refusing to remove {}: a glob character in the name", repr_str(p)));
         }
         let n = norm(p);
         for k in self.kept() {
@@ -699,6 +762,7 @@ impl<'a> Ops<'a> {
             self.assert_main(before)?;
             return Ok(("ok", "link removed; its target was not touched".into()));
         }
+        let rpp = self.rp(p)?;
         let mut targets: Vec<(String, Option<String>)> = vec![]; // where every link inside points, before anything is removed
         for l in self.list_links(p)? {
             let t = self.rp(&l)?;
@@ -714,8 +778,12 @@ impl<'a> Ops<'a> {
         if !self.gone(p)? {
             return Ok(("failed", format!("PARTLY REMOVED: {p} still exists after the removal (a long path, a locked file or a permission); some of it may be gone. Left as it is for a person.")));
         }
+        let inside: Vec<String> = std::iter::once(norm(p)).chain(rpp).collect();
         for (l, t) in &targets {
             if let Some(t) = t {
+                if *t == norm(l) || inside.iter().any(|x| t == x || t.starts_with(&format!("{x}/"))) {
+                    continue; // a link inside the folder (an npm workspace junction, a relative symlink) goes with it
+                }
                 if self.exists(t)? != Some(true) {
                     return guard(format!("the target {t} of the link {l} is gone after removing {p}; stopping"));
                 }

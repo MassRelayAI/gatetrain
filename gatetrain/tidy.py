@@ -72,12 +72,13 @@ class TidyCfg:
     size_timeout_s: float = 30                              # a size probe slower than this is unknown, never a crash
     remove_timeout_s: float = 1800                          # a removal, move or cargo clean gets this long before it is "stopped"
     worktree_min_idle_days: float = 2                       # a worktree with a file changed more recently than this is kept (0 = off)
+    idle_walk_depth: float = 12                             # how deep the "newest file inside" walk goes
 
 
 _LISTS = ("keep_paths", "keep_lanes", "keep_branches", "target_roots", "image_patterns", "evidence_dirs", "unattended")
 _STRS = ("main_checkout", "root_checkout", "main_branch", "worktree_prefix", "orphan_targets", "trash_dir",
          "container_prefix", "log", "scratch_dir", "link_canary")
-_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s", "worktree_min_idle_days")
+_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s", "worktree_min_idle_days", "idle_walk_depth")
 
 
 def build_cfg(cfg, host) -> TidyCfg:
@@ -228,8 +229,10 @@ class Ops:
     def run(self, cmd, timeout=None):
         """(rc, out). A command that times out returns (TIMEOUT, "") instead of raising; callers treat it as a failure."""
         low = cmd.lower()
-        if "system prune" in low or re.search(r"rm\s+-\w*r\w*f?\s.*[*?]", low):
+        if "system prune" in low:
             raise GuardViolation(f"refusing a bulk command: {cmd}")
+        if re.search(r"rm\s+-\w*r\w*f?\s.*[*?]", low):
+            raise ItemRefused(f"refusing a command with a glob in it: {cmd}")
         try:
             return self.runner.run(cmd) if timeout is None else self.runner.run(cmd, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -265,12 +268,26 @@ class Ops:
 
     def is_link(self, p):
         """True for a symlink or Windows reparse point (junction), False for a real item, None when the probe failed."""
+        s = self.link_state(p)
+        return True if s == "link" else False if s == "real" else None
+
+    def link_state(self, p):
+        """'link', 'real', 'missing' (the item is not there) or 'unknown' (the probe failed)."""
         if self.win:
-            rc, out = self.run(f"powershell -NoProfile -Command \"if ((Get-Item -LiteralPath {self.psq(p)} -Force).Attributes -band 1024) {{'yes'}} else {{'no'}}\"")
+            rc, out = self.run(f"powershell -NoProfile -Command \"if (-not (Test-Path -LiteralPath {self.psq(p)})) {{'missing'}} elseif ((Get-Item -LiteralPath {self.psq(p)} -Force).Attributes -band 1024) {{'yes'}} else {{'no'}}\"")
         else:
-            rc, out = self.run(f"test -L {self.q(p)} && echo yes || echo no")
+            rc, out = self.run(f"test -L {self.q(p)} && echo yes || {{ test -e {self.q(p)} && echo no || echo missing; }}")
         o = out.strip()
-        return None if rc != 0 else True if o.startswith("yes") else False if o.startswith("no") else None
+        return "unknown" if rc != 0 else "link" if o.startswith("yes") else "real" if o.startswith("no") else "missing" if o.startswith("missing") else "unknown"
+
+    def toplevel_ok(self, p):
+        """True when git, run in p, says p itself is the top of its worktree (a folder with no .git of its own would answer with the repository
+        it sits in, and its status would be that repository's)."""
+        rc, out = self.git(p, "rev-parse", "--show-toplevel")
+        if rc != 0 or not out.strip():
+            return False
+        a, b = self.rp(out.strip()), self.rp(p)
+        return a is not None and a == b
 
     def link_type(self, p):
         """'dir' or 'file' for a Windows link; anything unclear is a violation (the script must pick rmdir or del)."""
@@ -328,7 +345,9 @@ class Ops:
         """Names directly in p. A name with a control character (a newline) is refused, never split into two names."""
         if self.win:
             rc, out = self.run(f"dir /B {self.q(p)}")
-            names = [l.strip() for l in out.splitlines() if l.strip()] if rc == 0 else []
+            if rc != 0 and self.exists(p) is not True:
+                raise GuardViolation(f"listing {p} failed (rc {rc}) and the folder cannot be shown to exist; a failed listing is never read as an empty folder")
+            names = [l.strip() for l in out.splitlines() if l.strip()] if rc == 0 else []      # rc 1 with the folder there = an empty folder
         else:
             rc, out = self.run(f"find {self.q(p)} -mindepth 1 -maxdepth 1 -print0")
             if rc != 0:
@@ -348,15 +367,15 @@ class Ops:
         return dr.free_gb(self.host, self.runner, p)
 
     def recent(self, p, minutes):
-        """True when a file inside p changed in the last `minutes` (a bounded walk, depth 6, `size_timeout_s`), False when none did,
+        """True when a file inside p changed in the last `minutes` (a bounded walk, `idle_walk_depth`, `size_timeout_s`), False when none did,
         None when that cannot be told (a timeout or an error): unknown is never read as idle."""
         n = max(1, math.ceil(minutes))
         if self.win:
-            rc, out = self.run("powershell -NoProfile -Command \"Get-ChildItem -LiteralPath " + self.psq(p) + " -Recurse -Depth 6 -Force -File -ErrorAction SilentlyContinue"
+            rc, out = self.run("powershell -NoProfile -Command \"Get-ChildItem -LiteralPath " + self.psq(p) + " -Recurse -Depth " + str(int(self.cfg.idle_walk_depth)) + " -Force -File -ErrorAction SilentlyContinue"
                                " | Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-" + str(n) + ") } | Select-Object -First 1 -ExpandProperty FullName\"",
                                timeout=self.cfg.size_timeout_s)
         else:
-            rc, out = self.run(f"find {self.q(p)} -maxdepth 6 -type f -mmin -{n} -print -quit", timeout=self.cfg.size_timeout_s)
+            rc, out = self.run(f"find {self.q(p)} -maxdepth {int(self.cfg.idle_walk_depth)} -type f -mmin -{n} -print -quit", timeout=self.cfg.size_timeout_s)
         if rc != 0:
             return None
         return bool(out.strip())
@@ -383,7 +402,13 @@ class Ops:
             j = json.loads(out) if rc == 0 and out.strip() else {}
         except ValueError:
             j = {}
-        return {k: v for k, v in j.items() if isinstance(k, str) and isinstance(v, (int, float))} if isinstance(j, dict) else {}
+        out = {}
+        for k, v in (j.items() if isinstance(j, dict) else []):
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[k] = {"t": v, "m": None}                        # the older format: a bare time
+            elif isinstance(v, dict) and isinstance(v.get("t"), (int, float)):
+                out[k] = {"t": v["t"], "m": v.get("m")}
+        return out
 
     # -- git
     def git(self, repo, *args, timeout=None):
@@ -407,7 +432,9 @@ class Ops:
         res, cur = [], None
         for line in out.splitlines() + [""]:
             if line.startswith("worktree "):
-                cur = {"path": line[9:].strip(), "branch": None, "locked": False}
+                cur = {"path": line[9:].strip(), "branch": None, "locked": False, "prunable": False}
+            elif (line == "prunable" or line.startswith("prunable ")) and cur:
+                cur["prunable"] = True
             elif (line == "locked" or line.startswith("locked ")) and cur:
                 cur["locked"] = True
             elif line.startswith("branch ") and cur:
@@ -511,7 +538,7 @@ class Ops:
     def check_path(self, p):
         safe_path(p)
         if re.search(r"[*?\[]", p):
-            raise GuardViolation(f"refusing to remove {p!r}")
+            raise ItemRefused(f"refusing to remove {p!r}: a glob character in the name")
         n = norm(p)
         for k in self.kept():
             if n == norm(k) or norm(k).startswith(n + "/"):
@@ -554,6 +581,7 @@ class Ops:
                 raise GuardViolation(f"{p} (a link) still exists after removal")
             self.assert_main(before)
             return "ok", "link removed; its target was not touched"
+        rpp = self.rp(p)
         targets = [(l, self.rp(l)) for l in self.list_links(p)]        # where every link inside points, before anything is removed
         self.unlink_all(p)
         rc, _ = self.run(f"rmdir /S /Q {self.q(p)}" if self.win else f"rm -r -- {self.q(p)}", timeout=self.cfg.remove_timeout_s)
@@ -564,8 +592,11 @@ class Ops:
                                + ("still there" if e else "gone" if e is False else "unknown") + "; not counted as done")
         if not self.gone(p):
             return "failed", f"PARTLY REMOVED: {p} still exists after the removal (a long path, a locked file or a permission); some of it may be gone. Left as it is for a person."
+        inside = [norm(p)] + ([rpp] if rpp else [])
         for l, t in targets:
-            if t is not None and self.exists(t) is not True:
+            if t is None or t == norm(l) or any(t == x or t.startswith(x + "/") for x in inside):
+                continue                         # a link inside the folder (an npm workspace junction, a relative symlink) goes with it
+            if self.exists(t) is not True:
                 raise GuardViolation(f"the target {t} of the link {l} is gone after removing {p}; stopping")
         self.assert_main(before)
         return "ok", "removed"
@@ -657,8 +688,10 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
             info["keep"] = "detached head"
         elif not SAFE_BRANCH.match(w["branch"]) or (ops.win and ops.win_unsafe(w["path"])):
             info["keep"] = "unsafe name"
-        elif ops.is_link(w["path"]) is not False:
-            info["keep"] = "is a link" if ops.is_link(w["path"]) else "link state unknown"
+        elif ops.link_state(w["path"]) != "real":
+            info["keep"] = {"link": "is a link", "missing": "folder is missing"}.get(ops.link_state(w["path"]), "link state unknown")
+        elif not ops.toplevel_ok(w["path"]):
+            info["keep"] = "unverifiable (its own git root cannot be confirmed)"
         else:
             info["merged"] = ops.merged(w["branch"]) if w["branch"] != cfg.main_branch else None
             info["dirty"] = ops.dirty(w["path"])
@@ -789,7 +822,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
         inv.breaches.append(f"cannot tell whether the recycle bin {cfg.trash_dir} exists; left alone")
     if te:
         seen = ops.read_seen(cfg.trash_dir)
-        fresh = {}
+        new_seen = {}
         for nm in ops.listdir(cfg.trash_dir):
             if nm == SEEN:
                 continue
@@ -798,26 +831,24 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                 inv.trash.append({"path": p, "bytes": None, "age_days": None, "keep": "unsafe name"})
                 continue
             mt = ops.mtime(p)
-            age = None if mt is None else (now - mt) / 86400
+            rec = seen.get(nm)
+            if rec is None or (rec.get("m") is not None and mt is not None and rec["m"] != mt):
+                rec = {"t": now, "m": mt}            # new, or a NEW entry under a reused name (its own folder time differs): first seen now
+            new_seen[nm] = rec
+            age = max(0.0, (now - rec["t"]) / 86400)  # it counts from when tidy FIRST SAW it, never from a folder time that may be old or reset
             st = STAMP.search(nm)
-            if st:                                   # the name says when it was moved here; the folder's own mtime is when it was last used
+            if st:                                   # the name says when it was moved here: the LATER of that and the first sighting counts
                 try:
-                    age = max(0.0, (now - time.mktime(time.strptime(st.group(1), "%Y%m%d%H%M%S"))) / 86400)
+                    age = min(age, max(0.0, (now - time.mktime(time.strptime(st.group(1), "%Y%m%d%H%M%S"))) / 86400))
                 except (ValueError, OverflowError):
                     pass
-            else:                                    # no stamp: it counts from when tidy FIRST SAW it, never from a folder time that may be old or reset
-                first = seen.get(nm)
-                if first is None:
-                    first = fresh[nm] = now
-                age = max(0.0, (now - first) / 86400)
             sz = ops.size(p)
             inv.trash.append({"path": p, "bytes": sz, "age_days": age})
             if age is not None and age > cfg.trash_days:
                 inv.items.append(Item("trash", "remove", p, sz, f"in the recycle bin {age:.0f} days (> {cfg.trash_days:g})"))
-        if fresh:
-            keep_seen = {k: v for k, v in seen.items() if k in set(ops.listdir(cfg.trash_dir))}
+        if new_seen != seen:                         # also drops the records of entries that are gone
             try:
-                ops.runner.put_file(ops.join(cfg.trash_dir, SEEN), json.dumps(dict(keep_seen, **fresh), sort_keys=True))
+                ops.runner.put_file(ops.join(cfg.trash_dir, SEEN), json.dumps(new_seen, sort_keys=True))
             except Exception as e:
                 inv.breaches.append(f"cannot record when the recycle bin entries were first seen ({e}); their age stays 0")
     # profiles in the wrong place (report only)
@@ -1094,6 +1125,8 @@ def remove_worktree(ops, cfg, it):
     ops.check_path(p)
     if ops.is_link(p) is not False:
         raise GuardViolation(f"{p} is a link (or cannot be probed); not removing a worktree through it")
+    if not ops.toplevel_ok(p):
+        raise GuardViolation(f"{p} is not the top level of its own git worktree (its .git is missing?); not removing")
     if ops.dirty(p) is not False:
         raise GuardViolation(f"{p} has uncommitted work")
     rc, out = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}^{{commit}}")
@@ -1120,6 +1153,12 @@ def remove_worktree(ops, cfg, it):
     status, note = ops.remove_dir(p)
     if status != "ok":
         return None, status, f"{note}; branch {br} kept, archived as {tag}"
+    # `git worktree prune` is repo-wide: it also unregisters another worktree whose folder is only temporarily missing. It runs only when the
+    # ONE worktree git calls prunable is this one.
+    prunable = {norm(w["path"]) for w in ops.worktrees() if w.get("prunable")}
+    if prunable != {norm(p)}:
+        why = "git does not call it prunable (git older than 2.31?)" if norm(p) not in prunable else f"it would also unregister {sorted(prunable - {norm(p)})}"
+        return None, "failed", f"STALE REGISTRATION: {p} is removed but `git worktree prune` was not run ({why}); branch {br} kept, archived as {tag}"
     rc, _ = ops.git(m, "worktree", "prune", timeout=cfg.remove_timeout_s)
     if rc != 0:
         raise GuardViolation(f"git worktree prune failed after removing {p}; branch {br} kept, archived as {tag}")

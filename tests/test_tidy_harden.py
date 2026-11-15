@@ -438,8 +438,8 @@ class MoveTests(Base):
         stale = "lane-r-" + time.strftime("%Y%m%d%H%M%S", time.localtime(NOW - 10 * DAY))
         sim.add("/trash/" + fresh, age_s=10 * DAY)          # moved just now, but the folder keeps its old mtime
         sim.add("/trash/" + fresh + "/x", "file", 5, 10 * DAY)
-        sim.add("/trash/" + stale, age_s=0)
-        sim.add("/trash/" + stale + "/x", "file", 5, 0)
+        sim.add("/trash/" + stale, age_s=10 * DAY)
+        sim.add("/trash/" + stale + "/x", "file", 5, 10 * DAY)
         h, t, inv = gather(sim)
         self.assertEqual(by(inv, "/trash/" + fresh), [])
         self.assertEqual(len(by(inv, "/trash/" + stale)), 1)
@@ -918,6 +918,105 @@ class ReviewFix2Tests(Base):
         h, t, inv = self._gather(sim, now=NOW + 8 * DAY)
         self.assertEqual(len(by(inv, "/trash/zz")), 1)                            # seen 8 days ago
         self.assertNotIn(T.SEEN, [i.key.rsplit("/", 1)[-1] for i in inv.items])
+
+
+# ---------------------------------------------------------------- second review (ce417a5)
+
+class ReviewFix3Tests(Base):
+    def _gather(self, sim, extra=None, now=NOW):
+        cfg, h = hostcfg(dict(extra or {}, log=self.log))
+        t = T.build_cfg(cfg, h)
+        return h, t, T.gather(h, sim, t, now=now)
+
+    def test_a_link_that_points_inside_the_removed_folder_goes_with_it(self):
+        sim = linux_sim()
+        sim.add("/repo/wt/lane-a/inner", age_s=DAY)
+        sim.add("/repo/wt/lane-a/inner/f", "file", 3, DAY)
+        sim.add("/repo/wt/lane-a/ws-link", "link", target="/repo/wt/lane-a/inner")        # an npm workspace junction, a relative symlink
+        done, failed = self.apply(sim, ["worktrees"])
+        self.assertEqual(failed, 0)
+        self.assertNotIn("/repo/wt/lane-a", sim.fs)
+
+    def test_prune_runs_only_when_this_is_the_one_prunable_worktree(self):
+        sim = linux_sim()
+        sim.worktrees.append(("/repo/wt/lane-away", "line/lane-away"))              # registered, its folder only temporarily missing
+        sim.branches.append("line/lane-away")
+        done, failed = self.apply(sim, ["worktrees"])
+        r = [r for r in self.recs() if r["item"] == "/repo/wt/lane-a"][0]
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("STALE REGISTRATION", r["note"])
+        self.assertIn("lane-away", r["note"])
+        self.assertFalse([c for c in sim.calls if c.endswith("worktree prune")], "the repo-wide prune never ran")
+        self.assertNotIn("line/lane-a", sim.deleted_branches)
+        self.assertTrue(any(w[0] == "/repo/wt/lane-away" for w in sim.worktrees), "the other registration is untouched")
+
+    def test_a_worktree_with_no_git_root_of_its_own_is_unverifiable(self):
+        sim = linux_sim()
+        orig = sim.run_argv
+        sim.run_argv = lambda argv, timeout=None: (0, "/repo/main\n") if argv[:3] == ["git", "-C", "/repo/wt/lane-a"] and "--show-toplevel" in argv else orig(argv, timeout)
+        h, t, inv = self._gather(sim)
+        w = next(x for x in inv.worktrees if x["path"] == "/repo/wt/lane-a")
+        self.assertIn("unverifiable", w["keep"])
+        self.assertEqual(by(inv, "/repo/wt/lane-a"), [])
+
+    def test_a_reused_trash_name_is_a_new_entry_and_records_of_gone_entries_are_dropped(self):
+        sim = linux_sim()
+        sim.scripts["/trash/.gatetrain-seen.json"] = json.dumps({"zz": {"t": NOW - 10 * DAY, "m": NOW - 30 * DAY}, "gone": {"t": NOW - 9 * DAY, "m": None},
+                                                                   "old": {"t": NOW - 10 * DAY, "m": None}, "new": {"t": NOW - DAY, "m": None}})
+        sim.fs["/trash/zz"] = dict(type="dir", size=0, mtime=NOW - DAY, target=None)         # a different folder now carries the name "zz"
+        sim.fs["/trash/zz/f"] = dict(type="file", size=5, mtime=NOW - DAY, target=None)
+        h, t, inv = self._gather(sim)
+        self.assertEqual(by(inv, "/trash/zz"), [], "the old record does not delete the new entry on its first day")
+        rec = json.loads(sim.scripts["/trash/.gatetrain-seen.json"])
+        self.assertNotIn("gone", rec)
+        self.assertEqual(rec["zz"]["t"], NOW)
+        self.assertEqual(len(by(inv, "/trash/old")), 1)
+
+    def test_a_stamped_name_ages_from_the_later_of_its_stamp_and_the_first_sighting(self):
+        stamp = time.strftime("%Y%m%d%H%M%S", time.localtime(NOW - 20 * DAY))
+        sim = linux_sim()
+        sim.fs["/trash/lane-s-" + stamp] = dict(type="dir", size=0, mtime=NOW - 20 * DAY, target=None)
+        sim.fs["/trash/lane-s-" + stamp + "/f"] = dict(type="file", size=5, mtime=NOW - 20 * DAY, target=None)
+        h, t, inv = self._gather(sim)
+        self.assertEqual(by(inv, "/trash/lane-s-" + stamp), [], "first seen now: a name stamp alone does not delete it")
+        h, t, inv = self._gather(sim, now=NOW + 8 * DAY)
+        self.assertEqual(len(by(inv, "/trash/lane-s-" + stamp)), 1)
+
+    def test_a_glob_character_in_one_name_refuses_that_item_not_the_run(self):
+        sim = linux_sim()
+        h, t, inv = self._gather(sim)
+        inv.items = [T.Item("trash", "remove", "/trash/a*b", 0, "x"), T.Item("containers", "rm-container", "gate-1", 0, "x")]
+        self.assertEqual(T.apply_plan(h, sim, t, inv, ["trash", "containers"], now=NOW), (1, 1))
+        self.assertEqual([r["status"] for r in self.recs()], ["ok", "refused"])       # containers run before the trash class
+
+    def test_the_idle_walk_depth_is_configurable_with_a_default_of_twelve(self):
+        sim = linux_sim()
+        self._gather(sim)
+        self.assertTrue([c for c in sim.calls if c.startswith("find") and "-mmin" in c and "-maxdepth 12 " in c])
+        sim = linux_sim()
+        self._gather(sim, {"idle_walk_depth": 3})
+        self.assertTrue([c for c in sim.calls if c.startswith("find") and "-mmin" in c and "-maxdepth 3 " in c])
+
+    def test_link_state_tells_missing_from_unknown(self):
+        sim = linux_sim()
+        ops, _ = ops_for(sim)
+        self.assertEqual(ops.link_state("/nope/at/all"), "missing")
+        self.assertEqual(ops.link_state("/repo/main"), "real")
+        self.assertEqual(ops.link_state("/repo/wt/lane-a/node_modules"), "link")
+        orig = sim.run
+        sim.run = lambda cmd, timeout=None: (1, "") if cmd.startswith("test -L") else orig(cmd, timeout)
+        self.assertEqual(ops.link_state("/repo/main"), "unknown")
+        self.assertIsNone(ops.is_link("/nope/at/all") if False else None)
+
+    def test_a_windows_listing_failure_is_not_an_empty_folder(self):
+        sim = winsim()
+        sim.add("C:/empty", age_s=DAY)
+        ops, _ = ops_for(sim, WIN_EXTRA, win=True)
+        orig = sim.run
+        sim.run = lambda cmd, timeout=None: (1, "") if cmd.startswith("dir /B") else orig(cmd, timeout)
+        self.assertEqual(ops.listdir("C:/empty"), [])                         # rc 1 and the folder is there: an empty folder
+        with self.assertRaises(T.GuardViolation):
+            ops.listdir("C:/not-there")                                       # rc 1 and the folder cannot be shown: a failed listing
 
 
 if __name__ == "__main__":
