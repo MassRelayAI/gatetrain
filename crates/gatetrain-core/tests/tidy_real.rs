@@ -58,6 +58,7 @@ thread_local! {
 
 fn real_host(mut tidy: Value) -> (Config, Host) {
     canary(&mut tidy);
+    tidy.as_object_mut().unwrap().entry("worktree_min_idle_days").or_insert(json!(0)); // a worktree made a second ago is not "recent" for these tests
     let h = Host { name: "real".into(), tidy: to_table(&tidy), ..Default::default() };
     (Config { hosts: vec![h.clone()], ..Default::default() }, h)
 }

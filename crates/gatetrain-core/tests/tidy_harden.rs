@@ -14,7 +14,7 @@ use std::path::Path;
 
 fn is_guard<T: std::fmt::Debug>(r: Result<T, Fatal>) -> String {
     match r {
-        Err(Fatal::Guard(m)) => m,
+        Err(Fatal::Guard(m)) | Err(Fatal::Item(m)) => m,
         other => panic!("expected a guard violation, got {other:?}"),
     }
 }
@@ -108,7 +108,8 @@ fn apply_refuses_an_unsafe_branch_even_if_planned() {
     let sim = linux_sim();
     let d = tempfile::tempdir().unwrap();
     let r = plan(&sim, &log_in(&d), vec![wt_item("/repo/wt/lane-a", "x;touch pwned")], &["worktrees"]);
-    is_guard(r);
+    assert_eq!(r.unwrap(), (0, 1), "refused and reported, never run");
+    assert_eq!(records(&log_in(&d))[0]["status"], "refused");
     assert!(!sim.calls().iter().any(|c| c.contains("pwned") && (c.contains("tag") || c.contains("update-ref"))));
 }
 
@@ -266,7 +267,8 @@ fn remove_dir_refuses_dot_dot() {
 fn trash_remove_of_a_nested_path_is_refused() {
     let sim = linux_sim();
     let d = tempfile::tempdir().unwrap();
-    is_guard(plan(&sim, &log_in(&d), vec![Item::new("trash", "remove", "/trash/old/x", Some(0), "x")], &["trash"]));
+    assert_eq!(plan(&sim, &log_in(&d), vec![Item::new("trash", "remove", "/trash/old/x", Some(0), "x")], &["trash"]).unwrap(), (0, 1));
+    assert_eq!(records(&log_in(&d))[0]["status"], "refused");
     assert!(sim.s().has("/trash/old/x"));
 }
 
@@ -607,7 +609,7 @@ fn cargo_clean_rechecks_the_folder_is_a_cargo_target() {
     }
     let d = tempfile::tempdir().unwrap();
     let mut it = Item::new("targets", "clean", "/build/targets/plain", Some(10), "x");
-    it.extra = Extra::Target { cargo: true, tag: Some(true) };
+    it.extra = Extra::Target { cargo: true, tag: Some(true), branch: None };
     let (done, failed) = plan(&sim, &log_in(&d), vec![it], &["targets"]).unwrap();
     assert!(!sim.calls().iter().any(|c| c.starts_with("cargo clean")));
     assert_eq!((done, failed), (0, 1));
@@ -621,7 +623,7 @@ fn listdir_strips_the_find_prefix() {
     let sim = linux_sim();
     ops_run(&sim, json!({}), false, |ops| {
         for p in ["/trash", "/trash/"] {
-            let mut v = ops.listdir(p).unwrap();
+            let mut v: Vec<String> = ops.listdir(p).unwrap().into_iter().filter(|x| x != gatetrain_core::tidy::ops::SEEN).collect();
             v.sort();
             assert_eq!(v, ["new", "old"], "{p}");
         }
@@ -906,6 +908,162 @@ fn cargo_clean_with_a_non_zero_exit_is_a_failure_not_freed_unknown() {
     apply(&sim, &["targets"], json!({}), false, &log_in(&d)).unwrap();
     let rs: Vec<Value> = records(&log_in(&d)).into_iter().filter(|r| r["action"] == "clean").collect();
     assert!(!rs.is_empty() && rs.iter().all(|r| r["status"] == "failed" && r["note"].as_str().unwrap().contains("exited 101")), "{rs:?}");
+}
+
+
+// ---------------------------------------------------------------- review of e2c543b, round 2
+
+fn gather_at(sim: &Shared, extra: Value, lock: Option<Value>, now: f64) -> (gatetrain_core::config::Host, TidyCfg, Inventory) {
+    let (cfg, mut h) = hostcfg(with_log(extra, Path::new("log.jsonl")), false, 50.0);
+    if let Some(l) = lock {
+        h.lock_file = Some("/run/h.lock".into());
+        sim.s().scripts.insert("/run/h.lock.info".into(), l.to_string());
+    }
+    let t = build_cfg(&cfg, &h).unwrap();
+    let inv = gather(&h, sim, &t, Some(now)).unwrap();
+    (h, t, inv)
+}
+
+fn target<'a>(inv: &'a Inventory, path: &str) -> &'a gatetrain_core::tidy::inventory::TargetInfo {
+    inv.targets.iter().find(|x| x.path == path).unwrap()
+}
+
+#[test]
+fn a_target_with_a_file_changed_inside_is_kept_though_its_folder_is_old() {
+    let sim = linux_sim();
+    sim.s().add("/build/targets/lane-a/debug/fresh.o", "file", 5, 120, None); // the folder's own time is 10 days old; a file inside is 2 minutes old
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, NOW as f64);
+    assert!(target(&inv, "/build/targets/lane-a").keep.as_deref().unwrap().contains("a file inside changed"));
+    assert!(by_key(&inv.items, "/build/targets/lane-a").is_empty());
+}
+
+#[test]
+fn an_activity_probe_that_cannot_answer_means_not_idle() {
+    let sim = linux_sim();
+    sim.pre(Box::new(|_s, c| if c.contains("-mmin") { Some(RunOut::done(1, "")) } else { None }));
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, NOW as f64);
+    assert!(by_key(&inv.items, "/build/targets/lane-a").is_empty());
+    assert!(target(&inv, "/build/targets/lane-a").keep.as_deref().unwrap().contains("cannot be read"));
+}
+
+#[test]
+fn a_target_named_by_a_running_hold_is_kept_and_a_released_one_is_not() {
+    let held = json!({"run_id": "r7", "state": "held", "targets": ["/build/targets/lane-a/"]});
+    let (_h, _t, inv) = gather_at(&linux_sim(), json!({}), Some(held.clone()), NOW as f64);
+    assert!(by_key(&inv.items, "/build/targets/lane-a").is_empty());
+    assert!(target(&inv, "/build/targets/lane-a").keep.as_deref().unwrap().contains("named by the running hold r7"));
+    let mut released = held;
+    released["state"] = json!("released");
+    let (_h, _t, inv) = gather_at(&linux_sim(), json!({}), Some(released), NOW as f64);
+    assert_eq!(by_key(&inv.items, "/build/targets/lane-a").len(), 1);
+    let (_h, _t, inv) = gather_at(&linux_sim(), json!({}), Some(json!({"run_id": "r8", "state": "held", "targets": ["/elsewhere/Lane-B"]})), NOW as f64);
+    assert!(target(&inv, "/build/targets/lane-b").keep.as_deref().unwrap().contains("named by the running hold r8"));
+}
+
+#[test]
+fn a_worktree_with_recent_files_is_kept_until_it_is_old_enough() {
+    let sim = linux_sim(); // lane-a: merged, clean, its files are a day old
+    let (_h, _t, inv) = gather_at(&sim, json!({"worktree_min_idle_days": 2}), None, NOW as f64);
+    let w = inv.worktrees.iter().find(|x| x.path == "/repo/wt/lane-a").unwrap();
+    assert!(w.keep.as_deref().unwrap().contains("used in the last 2 days"), "{:?}", w.keep);
+    assert!(by_key(&inv.items, "/repo/wt/lane-a").is_empty());
+    sim.s().add("/repo/wt/lane-a/src.rs", "file", 5, 3 * DAY, None);
+    sim.s().add("/repo/wt/lane-a", "dir", 0, 3 * DAY, None);
+    let (_h, _t, inv) = gather_at(&sim, json!({"worktree_min_idle_days": 2}), None, NOW as f64);
+    assert_eq!(by_key(&inv.items, "/repo/wt/lane-a").len(), 1);
+    assert_eq!(TidyCfg::default().worktree_min_idle_days, 2.0);
+}
+
+#[test]
+fn a_lane_that_is_no_longer_proven_is_not_cleaned_even_from_an_old_plan() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let (h, t, inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
+    let it = inv.items.iter().find(|i| i.key == "/build/targets/lane-a").unwrap();
+    assert!(matches!(&it.extra, Extra::Target { branch: Some(b), .. } if b == "line/lane-a"));
+    sim.s().mtree.clear(); // main moved on: merging lane-a would now change something
+    let r = apply_plan(&h, &sim, &t, &inv, &["targets".to_string()], Some(NOW as f64), None, false).unwrap();
+    assert_eq!(r, (0, 1));
+    let rec = records(&log_in(&d)).into_iter().find(|r| r["item"] == "/build/targets/lane-a").unwrap();
+    assert_eq!(rec["status"], "failed");
+    assert!(rec["note"].as_str().unwrap().contains("not proven"));
+    assert!(!sim.calls().iter().any(|c| c.starts_with("cargo clean") && c.contains("lane-a")));
+    assert!(sim.s().has("/build/targets/lane-a/debug/big.o"));
+}
+
+#[test]
+fn a_bad_item_is_reported_and_skipped_and_the_rest_carries_on() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let (h, t, mut inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
+    inv.items = vec![wt_item("/repo/wt/lane-a", "x;touch pwned"), Item::new("containers", "rm-container", "gate-1", Some(0), "x")];
+    let classes = vec!["worktrees".to_string(), "containers".to_string()];
+    assert_eq!(apply_plan(&h, &sim, &t, &inv, &classes, Some(NOW as f64), None, false).unwrap(), (1, 1));
+    let st: Vec<String> = records(&log_in(&d)).iter().map(|r| r["status"].as_str().unwrap().to_string()).collect();
+    assert_eq!(st, ["refused", "ok"]);
+}
+
+#[test]
+fn a_plain_file_in_the_trash_is_removed_and_a_half_removed_folder_is_reported_loudly() {
+    let sim = linux_sim();
+    sim.s().add("/trash/stray.log", "file", 40, 10 * DAY, None);
+    let d = tempfile::tempdir().unwrap();
+    let (_done, failed) = apply(&sim, &["trash"], json!({}), false, &log_in(&d)).unwrap();
+    assert_eq!(failed, 0);
+    assert!(!sim.s().has("/trash/stray.log"));
+    let sim = linux_sim();
+    sim.s().rm_noop = true; // a long path or a locked file: the removal "succeeds" and nothing goes
+    let d2 = tempfile::tempdir().unwrap();
+    apply(&sim, &["trash", "containers"], json!({}), false, &log_in(&d2)).unwrap();
+    let rs = records(&log_in(&d2));
+    let r = rs.iter().find(|r| r["class"] == "trash").unwrap();
+    assert_eq!(r["status"], "failed");
+    assert!(r["note"].as_str().unwrap().contains("PARTLY REMOVED"));
+    assert!(rs.iter().any(|r| r["class"] == "containers" && r["status"] == "ok"), "the run carried on");
+}
+
+#[test]
+fn a_half_removed_worktree_keeps_its_branch() {
+    let sim = linux_sim();
+    sim.s().rm_noop = true;
+    let d = tempfile::tempdir().unwrap();
+    apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
+    assert!(sim.s().deleted_branches.is_empty());
+    let rs = records(&log_in(&d));
+    assert!(rs.iter().filter(|r| r["status"] == "failed").all(|r| r["note"].as_str().unwrap().contains("PARTLY REMOVED")));
+}
+
+#[test]
+fn a_windows_worktree_path_with_a_metacharacter_is_kept_not_fatal() {
+    let sim = winsim();
+    {
+        let s = &mut *sim.s();
+        s.dir("C:/repo/wt/a&b", DAY);
+        s.worktrees.push(("C:/repo/wt/a&b".into(), "line/lane-x".into()));
+        s.branches.push("line/lane-x".into());
+        s.ancestors.insert("line/lane-x".into());
+    }
+    let (_h, _t, inv) = gather_sim(&sim, win_extra(), true, 50.0);
+    assert_eq!(inv.worktrees.iter().find(|x| x.path.ends_with("a&b")).unwrap().keep.as_deref(), Some("unsafe name"));
+}
+
+#[test]
+fn an_unstamped_trash_entry_ages_from_when_tidy_first_saw_it() {
+    let sim = linux_sim();
+    {
+        let s = &mut *sim.s();
+        // an old folder time is no age: the entries are put straight into the file system, not through the fixture helper
+        s.fs.push(("/trash/zz".into(), Entry { typ: "dir", size: 0, mtime: NOW - 30 * DAY, target: None, ltype: None }));
+        s.fs.push(("/trash/zz/f".into(), Entry { typ: "file", size: 5, mtime: NOW - 30 * DAY, target: None, ltype: None }));
+    }
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, NOW as f64);
+    assert!(by_key(&inv.items, "/trash/zz").is_empty(), "first seen now: age 0");
+    assert!(sim.s().scripts["/trash/.gatetrain-seen.json"].contains("\"zz\""));
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, (NOW + 3 * DAY) as f64);
+    assert!(by_key(&inv.items, "/trash/zz").is_empty(), "3 days: under trash_days");
+    let (_h, _t, inv) = gather_at(&sim, json!({}), None, (NOW + 8 * DAY) as f64);
+    assert_eq!(by_key(&inv.items, "/trash/zz").len(), 1, "seen 8 days ago");
+    assert!(!inv.items.iter().any(|i| i.key.ends_with(".gatetrain-seen.json")));
 }
 
 // ---------------------------------------------------------------- macOS: realpath has no -m

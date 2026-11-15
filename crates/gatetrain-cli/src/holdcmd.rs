@@ -204,7 +204,7 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
     }
     let started = Instant::now();
     let lock = loop {
-        match hold::try_acquire(&lock_path, &run_id)? {
+        match hold::try_acquire_for(&lock_path, &run_id, &a.target_dir.iter().map(|t| disk::canon(&t.to_string_lossy())).collect::<Vec<_>>())? {
             Acquire::Got(l) => break l,
             Acquire::Busy(i) => {
                 if started.elapsed() >= Duration::from_secs(a.wait_secs) {

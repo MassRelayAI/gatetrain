@@ -133,3 +133,22 @@ fn a_hold_whose_root_is_not_a_repository_top_level_is_refused_before_anything_ru
     assert_eq!(ds.iter().filter(|(k, _)| k == "host.refuse-cwd").count(), 3, "{ds:?}");
     assert!(!d.path().join("h.lock").exists(), "no lock was taken");
 }
+
+
+// ---- the lock sidecar names the build folders, so tidy leaves them alone while the hold runs
+
+#[test]
+fn the_lock_sidecar_names_the_target_folders_of_the_run() {
+    let d = tempfile::tempdir().unwrap();
+    let target = d.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    // the chain reads its own sidecar while it holds the lock
+    let script = "import json,sys; j=json.load(open(sys.argv[1] + '.info')); print('SIDECAR=' + json.dumps(j))";
+    let lock = fwd(&d.path().join("h.lock"));
+    let o = gt(d.path(), &["hold", "r1", "--lock", &lock, "--target-dir", &fwd(&target), "--", python(), "-c", script, &lock]);
+    assert_eq!(o.status.code(), Some(0), "{}", out(&o));
+    let line = out(&o).lines().find_map(|l| l.strip_prefix("SIDECAR=").map(String::from)).unwrap();
+    let j: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(j["state"], "held");
+    assert_eq!(j["targets"][0].as_str().unwrap().to_lowercase(), gatetrain_core::disk::canon(&fwd(&target)).to_lowercase());
+}

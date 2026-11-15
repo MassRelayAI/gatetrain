@@ -62,6 +62,8 @@ pub struct TidyCfg {
     pub size_timeout_s: f64,
     /// a removal, move or cargo clean gets this long before it is "stopped"
     pub remove_timeout_s: f64,
+    /// a worktree with a file changed more recently than this many days is kept (0 = off)
+    pub worktree_min_idle_days: f64,
 }
 
 impl Default for TidyCfg {
@@ -91,14 +93,15 @@ impl Default for TidyCfg {
             link_canary_count: None,
             size_timeout_s: 30.0,
             remove_timeout_s: 1800.0,
+            worktree_min_idle_days: 2.0,
         }
     }
 }
 
-const KNOWN: [&str; 24] = [
+const KNOWN: [&str; 25] = [
     "cache_days", "container_prefix", "evidence_dirs", "image_patterns", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
     "link_canary_count", "log", "main_branch", "main_checkout", "min_idle_min", "orphan_targets", "remove_timeout_s", "root_checkout", "scratch_dir",
-    "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_prefix",
+    "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_min_idle_days", "worktree_prefix",
 ];
 
 fn str_list(k: &str, v: &Value) -> Result<Vec<String>, ConfigError> {
@@ -167,6 +170,7 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             "cache_days" => t.cache_days = number(k, v)?,
             "size_timeout_s" => t.size_timeout_s = number(k, v)?,
             "remove_timeout_s" => t.remove_timeout_s = number(k, v)?,
+            "worktree_min_idle_days" => t.worktree_min_idle_days = number(k, v)?,
             "link_canary_count" => match v {
                 Value::Integer(i) => t.link_canary_count = Some(*i),
                 other => return err(format!("tidy.link_canary_count: must be an integer, got {}", repr(other))),

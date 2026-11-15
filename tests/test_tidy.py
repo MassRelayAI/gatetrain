@@ -41,6 +41,7 @@ class SimHost:
         self.unknown_exists = ()         # path prefixes whose existence probe fails
         self.locked = set()
         self.tree_main = "TREE_MAIN"
+        self.rm_noop = False             # a recursive remove that says ok and removes nothing (a long path, a locked file)
 
     shell_free = True                # models LocalRunner: run_argv never involves a shell
 
@@ -60,6 +61,14 @@ class SimHost:
 
     def add(self, path, type="dir", size=0, age_s=10 * DAY, target=None):
         self.fs[n(path)] = dict(type=type, size=size, mtime=NOW - age_s, target=n(target) if target else None)
+        parent, _, name = n(path).rpartition("/")
+        if parent.lower() in ("/trash", "c:/trash") and name != ".gatetrain-seen.json":
+            # the recycle bin remembers when tidy first saw each entry; a fixture entry that is `age_s` old was first seen `age_s` ago
+            sp = parent + "/.gatetrain-seen.json"
+            seen = json.loads(self.scripts[sp]) if sp in self.scripts else {}
+            seen[name] = NOW - age_s
+            self.fs[sp] = dict(type="file", size=10, mtime=NOW, target=None)
+            self.scripts[sp] = json.dumps(seen, sort_keys=True)
 
     def under(self, p):
         p = n(p)
@@ -100,6 +109,16 @@ class SimHost:
             raise subprocess.TimeoutExpired(cmd, timeout or 60)
         if any(x and x in c for x in self.unknown_exists) and re.match(r"(test -e|if exist)", c):
             return 1, ""
+        m = re.match(r"find (.+?) -maxdepth 6 -type f -mmin -(\d+) -print -quit$", c) or re.search(r"Get-ChildItem -LiteralPath (.+?) -Recurse -Depth 6 .*AddMinutes\(-(\d+)\)", c)
+        if m:
+            for k in self.under(m.group(1)):
+                if self.fs[k]["type"] == "file" and self.fs[k]["mtime"] > NOW - int(m.group(2)) * 60:
+                    return 0, k + "\n"
+            return 0, ""
+        m = re.match(r"(?:cat|type) (.+)$", c)
+        if m:
+            t = self.scripts.get(n(m.group(1)))
+            return (0, t) if t is not None else (1, "")
         m = re.match(r"du -sk (.+)$", c)
         if m:
             return 0, f"{self.total(m.group(1)) // 1024}\t{m.group(1)}\n"
@@ -160,6 +179,8 @@ class SimHost:
                         self.fs.pop(n(m.group(1)), None)       # rmdir on a link removes only the link
             return 0, ""
         m = re.match(r"(?:rmdir /S /Q|rm -r --) (.+)$", c)
+        if m and self.rm_noop:
+            return 0, ""
         if m:
             self.rm_tree(m.group(1), follow_links=True)     # the dangerous kind: follows what is still linked
             return 0, ""
@@ -328,11 +349,11 @@ def linux_sim():
 
 BASE = {"main_checkout": "/repo/main", "root_checkout": "/repo/root", "trash_dir": "/trash",
         "container_prefix": "gate-", "image_patterns": ["gate-img:*"], "cache_days": 3, "keep_lanes": ["lane-c"],
-        "target_roots": ["/build/targets"], "targets": [{"path": "/build/chain", "budget_gb": 1}]}
+        "target_roots": ["/build/targets"], "targets": [{"path": "/build/chain", "budget_gb": 1}], "worktree_min_idle_days": 0}
 
 WIN_EXTRA = {"main_checkout": "C:/repo/main", "root_checkout": "C:/repo/root", "scratch_dir": "C:/tmp", "target_roots": [], "targets": [],
              "trash_dir": "C:/trash", "container_prefix": "x-", "image_patterns": [], "cache_days": 0, "keep_lanes": [],
-             "link_canary": "C:/canary", "link_canary_count": 1}
+             "link_canary": "C:/canary", "link_canary_count": 1, "worktree_min_idle_days": 0}
 
 
 def hostcfg(extra=None, win=False, mins=50):

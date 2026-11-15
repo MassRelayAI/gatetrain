@@ -31,8 +31,16 @@ RESOLVE_SH = 'p="$1"; rest=""; while [ -n "$p" ] && [ "$p" != "/" ] && [ ! -d "$
 STAMP = re.compile(r"-(\d{14})$")                                      # the timestamp `move` puts in a recycle-bin name
 
 
+SEEN = ".gatetrain-seen.json"     # in the recycle bin: when tidy first saw each entry (L71)
+
+
 class GuardViolation(Exception):
     pass
+
+
+class ItemRefused(GuardViolation):
+    """One item has a bad path or name (a control character, a Windows metacharacter, a `..`, an unsafe branch): refused before anything
+    was changed. `apply_plan` reports it and carries on with the next item; every other GuardViolation still stops the run."""
 
 
 # ---------------------------------------------------------------- config
@@ -63,12 +71,13 @@ class TidyCfg:
     link_canary_count: Optional[int] = None
     size_timeout_s: float = 30                              # a size probe slower than this is unknown, never a crash
     remove_timeout_s: float = 1800                          # a removal, move or cargo clean gets this long before it is "stopped"
+    worktree_min_idle_days: float = 2                       # a worktree with a file changed more recently than this is kept (0 = off)
 
 
 _LISTS = ("keep_paths", "keep_lanes", "keep_branches", "target_roots", "image_patterns", "evidence_dirs", "unattended")
 _STRS = ("main_checkout", "root_checkout", "main_branch", "worktree_prefix", "orphan_targets", "trash_dir",
          "container_prefix", "log", "scratch_dir", "link_canary")
-_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s")
+_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s", "worktree_min_idle_days")
 
 
 def build_cfg(cfg, host) -> TidyCfg:
@@ -135,25 +144,25 @@ def safe_path(p, under=None):
     """One check for every path that may be removed: absolute, no `.` or `..` component, no control character, not a root, not a share.
     With `under`, the path must be exactly one component below that folder (a recycle-bin entry)."""
     if not isinstance(p, str) or not p:
-        raise GuardViolation(f"refusing to remove {p!r}: empty")
+        raise ItemRefused(f"refusing to remove {p!r}: empty")
     if any(ord(c) < 32 or ord(c) == 127 for c in p):
-        raise GuardViolation(f"refusing {p!r}: control character in the path")
+        raise ItemRefused(f"refusing {p!r}: control character in the path")
     s = p.replace("\\", "/")
     if s.startswith("//"):
-        raise GuardViolation(f"refusing {p!r}: a network path")
+        raise ItemRefused(f"refusing {p!r}: a network path")
     if not (s.startswith("/") or re.match(r"[A-Za-z]:/", s)):
-        raise GuardViolation(f"refusing {p!r}: not an absolute path")
+        raise ItemRefused(f"refusing {p!r}: not an absolute path")
     comps = [c for c in s.split("/")[1:] if c != ""]
     if not comps:
-        raise GuardViolation(f"refusing {p!r}: a root")
+        raise ItemRefused(f"refusing {p!r}: a root")
     if any(c in (".", "..") for c in comps):
-        raise GuardViolation(f"refusing {p!r}: a . or .. component")
+        raise ItemRefused(f"refusing {p!r}: a . or .. component")
     if under is not None:
         u = norm(under)
         nn = norm(p)
         rest = nn[len(u) + 1:] if nn.startswith(u + "/") else None
         if not rest or "/" in rest:
-            raise GuardViolation(f"{p} is not exactly one component below {under}")
+            raise ItemRefused(f"{p} is not exactly one component below {under}")
 
 
 # ---------------------------------------------------------------- host operations
@@ -189,7 +198,7 @@ class Ops:
     def _win_ok(self, v):
         bad = [c for c in v if c in WIN_BAD or ord(c) < 32]
         if bad:
-            raise GuardViolation(f"refusing to put {v!r} on a Windows command line (contains {''.join(sorted(set(bad)))!r})")
+            raise ItemRefused(f"refusing to put {v!r} on a Windows command line (contains {''.join(sorted(set(bad)))!r})")
 
     def q(self, p):
         """Quote a PATH for the host's shell. Windows has no safe escape for its metacharacters, so a path holding one is refused."""
@@ -337,6 +346,44 @@ class Ops:
 
     def free_gb(self, p):
         return dr.free_gb(self.host, self.runner, p)
+
+    def recent(self, p, minutes):
+        """True when a file inside p changed in the last `minutes` (a bounded walk, depth 6, `size_timeout_s`), False when none did,
+        None when that cannot be told (a timeout or an error): unknown is never read as idle."""
+        n = max(1, math.ceil(minutes))
+        if self.win:
+            rc, out = self.run("powershell -NoProfile -Command \"Get-ChildItem -LiteralPath " + self.psq(p) + " -Recurse -Depth 6 -Force -File -ErrorAction SilentlyContinue"
+                               " | Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-" + str(n) + ") } | Select-Object -First 1 -ExpandProperty FullName\"",
+                               timeout=self.cfg.size_timeout_s)
+        else:
+            rc, out = self.run(f"find {self.q(p)} -maxdepth 6 -type f -mmin -{n} -print -quit", timeout=self.cfg.size_timeout_s)
+        if rc != 0:
+            return None
+        return bool(out.strip())
+
+    def hold_named(self):
+        """[(normalised folder, run id)] named by a running hold: the `targets` its lock sidecar (`<lock_file>.info`) lists while it is `held`."""
+        lf = getattr(self.host, "lock_file", None)
+        if not lf:
+            return []
+        rc, out = self.run(("type " if self.win else "cat ") + self.q(lf + ".info"))
+        if rc != 0 or not out.strip():
+            return []
+        try:
+            j = json.loads(out)
+        except ValueError:
+            return []
+        if not isinstance(j, dict) or j.get("state") != "held":
+            return []
+        return [(norm(t), str(j.get("run_id", "?"))) for t in j.get("targets", []) if isinstance(t, str)]
+
+    def read_seen(self, trash):
+        rc, out = self.run(("type " if self.win else "cat ") + self.q(self.join(trash, SEEN)))
+        try:
+            j = json.loads(out) if rc == 0 and out.strip() else {}
+        except ValueError:
+            j = {}
+        return {k: v for k, v in j.items() if isinstance(k, str) and isinstance(v, (int, float))} if isinstance(j, dict) else {}
 
     # -- git
     def git(self, repo, *args, timeout=None):
@@ -516,7 +563,7 @@ class Ops:
             return "stopped", (f"removal did not finish in {self.cfg.remove_timeout_s:g}s; re-probe: "
                                + ("still there" if e else "gone" if e is False else "unknown") + "; not counted as done")
         if not self.gone(p):
-            raise GuardViolation(f"{p} still exists after removal")
+            return "failed", f"PARTLY REMOVED: {p} still exists after the removal (a long path, a locked file or a permission); some of it may be gone. Left as it is for a person."
         for l, t in targets:
             if t is not None and self.exists(t) is not True:
                 raise GuardViolation(f"the target {t} of the link {l} is gone after removing {p}; stopping")
@@ -608,7 +655,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
             info["keep"] = "locked"
         elif not w["branch"]:
             info["keep"] = "detached head"
-        elif not SAFE_BRANCH.match(w["branch"]):
+        elif not SAFE_BRANCH.match(w["branch"]) or (ops.win and ops.win_unsafe(w["path"])):
             info["keep"] = "unsafe name"
         elif ops.is_link(w["path"]) is not False:
             info["keep"] = "is a link" if ops.is_link(w["path"]) else "link state unknown"
@@ -625,11 +672,20 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                 info["keep"] = "uncommitted work" if info["dirty"] else "status unreadable"
             elif info["merged"] is not True:
                 info["keep"] = "not merged" if info["merged"] is False else "merge state unknown"
+            elif cfg.worktree_min_idle_days > 0 and ops.recent(w["path"], cfg.worktree_min_idle_days * 1440) is not False:
+                info["keep"] = "used in the last %g days" % cfg.worktree_min_idle_days
         inv.worktrees.append(info)
         if not info["keep"]:
             inv.items.append(Item("worktrees", "remove-worktree", w["path"], info["bytes"], f"branch {w['branch']} is on {cfg.main_branch}",
                                   extra={"branch": w["branch"], "links": info["links"]}))
     # targets
+    held = ops.hold_named()
+    def held_by(path, lane):
+        np_ = norm(path)
+        for h, run in held:
+            if np_ == h or np_.startswith(h + "/") or h.startswith(np_ + "/") or (lane and lane.lower() == h.rsplit("/", 1)[-1].lower()):
+                return run
+        return None
     entries = [(x["path"], x.get("lane"), x.get("budget_gb")) for x in cfg.targets]
     for root in cfg.target_roots:
         for nm in ops.listdir(root):
@@ -671,6 +727,8 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
             reason = None
             if norm(path) in kept_n or lane.lower() in {x.lower() for x in cfg.keep_lanes} or (br in cfg.keep_branches):
                 reason = "keep list"
+            elif held_by(path, lane):
+                reason = "named by the running hold " + held_by(path, lane)
             elif wt and wt["dirty"] is not False:
                 reason = "its worktree has uncommitted work"
             elif t["idle_min"] is None or t["idle_min"] < cfg.min_idle_min:
@@ -679,14 +737,16 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                 reason = "no lane branch found (orphan_targets = keep)"
             elif br is not None and t["merged"] is not True:
                 reason = "lane not merged" if t["merged"] is False else "merge state unknown"
+            elif ops.recent(path, cfg.min_idle_min) is not False:
+                reason = "a file inside changed in the last %g min (or its activity cannot be read)" % cfg.min_idle_min
             t["keep"] = reason
             if not reason and (size or size is None):
                 inv.items.append(Item("targets", "clean" if cargo else "move", path, size,
-                                      f"lane {lane}: " + ("branch content is on main" if br else "orphan"), extra={"cargo": cargo, "tag": t["tag"]}))
-        elif t["over"] and norm(path) not in kept_n:
+                                      f"lane {lane}: " + ("branch content is on main" if br else "orphan"), extra={"cargo": cargo, "tag": t["tag"], "branch": br}))
+        elif t["over"] and norm(path) not in kept_n and not held_by(path, None):
             if cargo or names:
                 inv.items.append(Item("targets", "clean" if cargo else "move", path, size, f"over its {budget:g} GB budget",
-                                      attended_only=True, extra={"cargo": cargo, "tag": t["tag"]}))
+                                      attended_only=True, extra={"cargo": cargo, "tag": t["tag"], "branch": None}))
     # containers
     if cfg.container_prefix:
         rc, out = ops.run('docker ps -a --filter status=exited --format "{{.Names}}"')
@@ -728,7 +788,11 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
     if te is None:
         inv.breaches.append(f"cannot tell whether the recycle bin {cfg.trash_dir} exists; left alone")
     if te:
+        seen = ops.read_seen(cfg.trash_dir)
+        fresh = {}
         for nm in ops.listdir(cfg.trash_dir):
+            if nm == SEEN:
+                continue
             p = ops.join(cfg.trash_dir, nm)
             if ops.win and ops.win_unsafe(nm):
                 inv.trash.append({"path": p, "bytes": None, "age_days": None, "keep": "unsafe name"})
@@ -741,10 +805,21 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                     age = max(0.0, (now - time.mktime(time.strptime(st.group(1), "%Y%m%d%H%M%S"))) / 86400)
                 except (ValueError, OverflowError):
                     pass
+            else:                                    # no stamp: it counts from when tidy FIRST SAW it, never from a folder time that may be old or reset
+                first = seen.get(nm)
+                if first is None:
+                    first = fresh[nm] = now
+                age = max(0.0, (now - first) / 86400)
             sz = ops.size(p)
             inv.trash.append({"path": p, "bytes": sz, "age_days": age})
             if age is not None and age > cfg.trash_days:
                 inv.items.append(Item("trash", "remove", p, sz, f"in the recycle bin {age:.0f} days (> {cfg.trash_days:g})"))
+        if fresh:
+            keep_seen = {k: v for k, v in seen.items() if k in set(ops.listdir(cfg.trash_dir))}
+            try:
+                ops.runner.put_file(ops.join(cfg.trash_dir, SEEN), json.dumps(dict(keep_seen, **fresh), sort_keys=True))
+            except Exception as e:
+                inv.breaches.append(f"cannot record when the recycle bin entries were first seen ({e}); their age stays 0")
     # profiles in the wrong place (report only)
     for root in cfg.evidence_dirs:
         cmd = (f"dir /S /B {ops.q(root)}" if ops.win else
@@ -854,6 +929,11 @@ def apply_plan(host, runner, cfg: TidyCfg, inv: Inventory, classes, now=None, lo
             fb = ops.free_gb(it.key) if it.kind in ("clean", "move", "remove", "remove-worktree") else None
             try:
                 after, status, note = do_item(ops, cfg, it, now)
+            except ItemRefused as e:                 # this one item has a bad path or name and nothing was changed: report it, carry on
+                rec.update(status="refused", note=str(e))
+                log_action(log, rec)
+                failed += 1
+                continue
             except GuardViolation as e:
                 rec.update(status="guard-violation", note=str(e))
                 log_action(log, rec)
@@ -881,6 +961,9 @@ def do_item(ops, cfg, it, now=None):
         if not cfg.trash_dir:
             return it.bytes, "skipped", "not a cargo target and no trash_dir configured; left alone"
         ops.check_path(it.key)
+        why = reprove(ops, cfg, it)
+        if why:
+            return it.bytes, "failed", why
         name = it.key.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
         dest = ops.join(cfg.trash_dir, name + "-" + time.strftime("%Y%m%d%H%M%S", time.localtime(now or time.time())))
         safe_path(dest, under=cfg.trash_dir)
@@ -923,12 +1006,29 @@ def do_item(ops, cfg, it, now=None):
     raise GuardViolation(f"unknown action {k}")
 
 
+def reprove(ops, cfg, it):
+    """The lane of a target is proved on main again, on the resolved sha, at the moment of action (the plan may be minutes old)."""
+    br = (it.extra or {}).get("branch")
+    if not br or not cfg.main_checkout:
+        return None
+    rc, out = ops.git(cfg.main_checkout, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}^{{commit}}")
+    sha = out.strip()
+    if rc != 0 or not re.fullmatch(r"\S+", sha):
+        return f"lane branch {br} cannot be resolved to one commit any more; not touching its target"
+    if ops.merged(sha, sha=True) is not True:
+        return f"lane branch {br} ({sha}) is not proven on {cfg.main_branch} any more; not touching its target"
+    return None
+
+
 def clean_target(ops, cfg, it):
     p = it.key
     ops.check_path(p)
     lk = ops.is_link(p)
     if lk is not False:
         return it.bytes, "failed", "is a link (or link state unknown); cargo clean not run"
+    why = reprove(ops, cfg, it)
+    if why:
+        return it.bytes, "failed", why
     if not is_cargo(ops.listdir(p)):         # re-check at the moment of action: the plan may be minutes old and sizing may have failed
         return it.bytes, "failed", "no longer looks like a cargo target (no debug/release with tmp); cargo clean not run"
     before = ops.size(p)
@@ -989,7 +1089,7 @@ def remove_worktree(ops, cfg, it):
     if not cfg.main_checkout:
         raise GuardViolation("worktree removal needs main_checkout in the config")
     if not SAFE_BRANCH.match(br):
-        raise GuardViolation(f"branch {br!r} has an unsafe name; not removing")
+        raise ItemRefused(f"branch {br!r} has an unsafe name; not removing")
     m = cfg.main_checkout
     ops.check_path(p)
     if ops.is_link(p) is not False:
@@ -1019,7 +1119,7 @@ def remove_worktree(ops, cfg, it):
     # git is then told the folder is gone
     status, note = ops.remove_dir(p)
     if status != "ok":
-        return None, "stopped", f"{note}; branch {br} kept, archived as {tag}"
+        return None, status, f"{note}; branch {br} kept, archived as {tag}"
     rc, _ = ops.git(m, "worktree", "prune", timeout=cfg.remove_timeout_s)
     if rc != 0:
         raise GuardViolation(f"git worktree prune failed after removing {p}; branch {br} kept, archived as {tag}")

@@ -104,6 +104,7 @@ generated_dirs = ["generated", "docs/_generated"]
 main_checkout = "/srv/repo/main"
 root_checkout = "/srv/repo/root"
 worktree_prefix = "wt-"                   # folder-name prefix: /srv/wt/wt-lane-x is lane "lane-x" (a path here is refused)
+worktree_min_idle_days = 2                # a worktree with a file changed in the last 2 days is kept (0 = off)
 keep_lanes = ["lane-x"]                   # a lane to keep; an entry that matches no worktree or target is reported by `check`
 target_roots = ["/srv/build/targets"]     # one child folder per lane, named after the lane
 targets = [{ path = "/srv/build/chain", budget_gb = 300 }]

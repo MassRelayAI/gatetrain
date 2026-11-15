@@ -14,7 +14,7 @@ use std::path::Path;
 
 fn is_guard<T: std::fmt::Debug>(r: Result<T, Fatal>) -> String {
     match r {
-        Err(Fatal::Guard(m)) => m,
+        Err(Fatal::Guard(m)) | Err(Fatal::Item(m)) => m,
         other => panic!("expected a guard violation, got {other:?}"),
     }
 }

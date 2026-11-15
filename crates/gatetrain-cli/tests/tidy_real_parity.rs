@@ -142,6 +142,7 @@ target_roots = ["{r}/targets"]
 evidence_dirs = ["{r}/evidence"]
 log = "{r}/tidy-log.jsonl"
 targets = [{{ path = "{r}/chain", budget_gb = 0.000001 }}]
+worktree_min_idle_days = 0
 {canary}"#
     );
     let p = root.join("hosts.toml");

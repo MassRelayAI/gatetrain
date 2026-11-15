@@ -57,6 +57,14 @@ pub fn apply_plan(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, inv: &Invento
             let fb = if ["clean", "move", "remove", "remove-worktree"].contains(&it.kind.as_str()) { ops.free_gb(&it.key)? } else { None };
             let (after, status, note) = match do_item(&ops, cfg, it, now) {
                 Ok(x) => x,
+                Err(Fatal::Item(msg)) => {
+                    // this one item has a bad path or name and nothing was changed: report it, carry on
+                    set(&mut rec, "status", J::s("refused"));
+                    set(&mut rec, "note", J::s(&msg));
+                    log_action(log, &J::Obj(rec))?;
+                    failed += 1;
+                    continue;
+                }
                 Err(Fatal::Guard(msg)) => {
                     set(&mut rec, "status", J::s("guard-violation"));
                     set(&mut rec, "note", J::s(&msg));
@@ -105,6 +113,9 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done>
                 return Ok((it.bytes, "skipped", "not a cargo target and no trash_dir configured; left alone".into()));
             };
             ops.check_path(&it.key)?;
+            if let Some(why) = reprove(ops, cfg, it)? {
+                return Ok((it.bytes, "failed", why));
+            }
             let name = it.key.replace('\\', "/").trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
             let dest = ops.join(trash, &format!("{}-{}", name, local_fmt(now.unwrap_or_else(super::inventory::now_secs), "%Y%m%d%H%M%S")));
             safe_path(&dest, Some(trash))?;
@@ -172,11 +183,29 @@ fn py_opt_bool(b: Option<bool>) -> &'static str {
     }
 }
 
+/// The lane of a target is proved on main again, on the resolved sha, at the moment of action (the plan may be minutes old).
+fn reprove(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Option<String>> {
+    let Extra::Target { branch: Some(br), .. } = &it.extra else { return Ok(None) };
+    let Some(m) = cfg.main_checkout.as_deref() else { return Ok(None) };
+    let r = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{br}^{{commit}}")])?;
+    let sha = crate::pycompat::strip(&r.out).to_string();
+    if !r.ok() || sha.is_empty() || sha.contains(char::is_whitespace) {
+        return Ok(Some(format!("lane branch {br} cannot be resolved to one commit any more; not touching its target")));
+    }
+    if ops.merged_sha(&sha)? != Some(true) {
+        return Ok(Some(format!("lane branch {br} ({sha}) is not proven on {} any more; not touching its target", cfg.main_branch)));
+    }
+    Ok(None)
+}
+
 pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     let p = it.key.as_str();
     ops.check_path(p)?;
     if ops.is_link(p)? != Some(false) {
         return Ok((it.bytes, "failed", "is a link (or link state unknown); cargo clean not run".into()));
+    }
+    if let Some(why) = reprove(ops, cfg, it)? {
+        return Ok((it.bytes, "failed", why));
     }
     if !is_cargo(&ops.listdir(p)?) {
         // re-check at the moment of action: the plan may be minutes old and sizing may have failed
@@ -260,7 +289,7 @@ pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     let Extra::Worktree { branch: br, .. } = &it.extra else { return guard(format!("{p} is not a worktree item")) };
     let Some(m) = cfg.main_checkout.as_deref() else { return guard("worktree removal needs main_checkout in the config".into()) };
     if !safe_branch(br) {
-        return guard(format!("branch {} has an unsafe name; not removing", repr_str(br)));
+        return Err(Fatal::Item(format!("branch {} has an unsafe name; not removing", repr_str(br))));
     }
     ops.check_path(p)?;
     if ops.is_link(p)? != Some(false) {
@@ -299,7 +328,7 @@ pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     // git is then told the folder is gone
     let (status, note) = ops.remove_dir(p)?;
     if status != "ok" {
-        return Ok((None, "stopped", format!("{note}; branch {br} kept, archived as {tag}")));
+        return Ok((None, status, format!("{note}; branch {br} kept, archived as {tag}")));
     }
     let pr = ops.git_to(m, &["worktree", "prune"], Some(cfg.remove_timeout_s))?;
     if !pr.ok() {

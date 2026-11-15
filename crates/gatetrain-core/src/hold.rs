@@ -29,11 +29,13 @@ pub struct Info {
     pub started_at: String,
     /// `held` while running, `released` after a clean release. `held` with a free lock is a stale lock.
     pub state: String,
+    /// The build folders the run writes to (`hold --target-dir`): tidy never cleans a target this names while the lock is `held`.
+    pub targets: Vec<String>,
 }
 
 impl Info {
     pub fn to_json(&self) -> Value {
-        json!({"run_id": self.run_id, "pid": self.pid, "boot_id": self.boot_id, "started_at": self.started_at, "state": self.state})
+        json!({"run_id": self.run_id, "pid": self.pid, "boot_id": self.boot_id, "started_at": self.started_at, "state": self.state, "targets": self.targets})
     }
     fn from_json(v: &Value) -> Option<Info> {
         Some(Info {
@@ -42,10 +44,11 @@ impl Info {
             boot_id: v.get("boot_id")?.as_str()?.to_string(),
             started_at: v.get("started_at")?.as_str()?.to_string(),
             state: v.get("state")?.as_str()?.to_string(),
+            targets: v.get("targets").and_then(|t| t.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
         })
     }
     fn unknown() -> Info {
-        Info { run_id: "?".into(), pid: 0, boot_id: "?".into(), started_at: "?".into(), state: "held".into() }
+        Info { run_id: "?".into(), pid: 0, boot_id: "?".into(), started_at: "?".into(), state: "held".into(), targets: vec![] }
     }
 }
 
@@ -207,6 +210,11 @@ pub enum Acquire {
 
 /// Try once. A lock whose holder died is taken over, and `took_over` says why.
 pub fn try_acquire(lock: &Path, run_id: &str) -> Result<Acquire> {
+    try_acquire_for(lock, run_id, &[])
+}
+
+/// [`try_acquire`], recording the build folders the run writes to in the sidecar.
+pub fn try_acquire_for(lock: &Path, run_id: &str, targets: &[String]) -> Result<Acquire> {
     let f = open_lock_file(lock)?;
     match f.try_lock() {
         Ok(()) => {
@@ -214,7 +222,7 @@ pub fn try_acquire(lock: &Path, run_id: &str) -> Result<Acquire> {
                 State::Stale(s) => Some(s),
                 _ => None,
             };
-            let info = Info { run_id: run_id.to_string(), pid: std::process::id(), boot_id: boot_id(), started_at: now_iso(), state: "held".into() };
+            let info = Info { run_id: run_id.to_string(), pid: std::process::id(), boot_id: boot_id(), started_at: now_iso(), state: "held".into(), targets: targets.to_vec() };
             write_info(lock, &info)?;
             Ok(Acquire::Got(Lock { file: f, path: lock.to_path_buf(), info, took_over }))
         }

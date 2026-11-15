@@ -20,14 +20,17 @@ pub const RESOLVE_SH: &str = r#"p="$1"; rest=""; while [ -n "$p" ] && [ "$p" != 
 /// A guard refused, or something else went wrong. A guard violation stops a tidy run (exit 3); the rest is an error (exit 2).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fatal {
+    /// A guard refused: it stops the run.
     Guard(String),
+    /// One item has a bad path or name and nothing was changed: it is reported and skipped, the run carries on.
+    Item(String),
     Other(String),
 }
 
 impl std::fmt::Display for Fatal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Fatal::Guard(s) | Fatal::Other(s) => f.write_str(s),
+            Fatal::Guard(s) | Fatal::Item(s) | Fatal::Other(s) => f.write_str(s),
         }
     }
 }
@@ -45,6 +48,13 @@ pub type R<T> = Result<T, Fatal>;
 pub fn guard<T>(msg: String) -> R<T> {
     Err(Fatal::Guard(msg))
 }
+
+pub fn refuse<T>(msg: String) -> R<T> {
+    Err(Fatal::Item(msg))
+}
+
+/// The recycle bin's memory of when tidy first saw each entry (a file inside the bin).
+pub const SEEN: &str = ".gatetrain-seen.json";
 
 /// What a command returned: `rc` is `None` when it did not finish in time (Python's TIMEOUT), and then never equals 0.
 #[derive(Debug, Clone)]
@@ -103,33 +113,33 @@ fn control(c: char) -> bool {
 /// With `under`, the path must be exactly one component below that folder (a recycle-bin entry).
 pub fn safe_path(p: &str, under: Option<&str>) -> R<()> {
     if p.is_empty() {
-        return guard(format!("refusing to remove {}: empty", repr_str(p)));
+        return refuse(format!("refusing to remove {}: empty", repr_str(p)));
     }
     if p.chars().any(control) {
-        return guard(format!("refusing {}: control character in the path", repr_str(p)));
+        return refuse(format!("refusing {}: control character in the path", repr_str(p)));
     }
     let s = p.replace('\\', "/");
     if s.starts_with("//") {
-        return guard(format!("refusing {}: a network path", repr_str(p)));
+        return refuse(format!("refusing {}: a network path", repr_str(p)));
     }
     let b = s.as_bytes();
     let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/';
     if !(s.starts_with('/') || drive) {
-        return guard(format!("refusing {}: not an absolute path", repr_str(p)));
+        return refuse(format!("refusing {}: not an absolute path", repr_str(p)));
     }
     let comps: Vec<&str> = s.split('/').skip(1).filter(|c| !c.is_empty()).collect();
     if comps.is_empty() {
-        return guard(format!("refusing {}: a root", repr_str(p)));
+        return refuse(format!("refusing {}: a root", repr_str(p)));
     }
     if comps.iter().any(|c| *c == "." || *c == "..") {
-        return guard(format!("refusing {}: a . or .. component", repr_str(p)));
+        return refuse(format!("refusing {}: a . or .. component", repr_str(p)));
     }
     if let Some(under) = under {
         let u = norm(under);
         let nn = norm(p);
         let rest = nn.strip_prefix(&format!("{u}/")).map(String::from);
         if rest.as_deref().map(|r| r.is_empty() || r.contains('/')).unwrap_or(true) {
-            return guard(format!("{p} is not exactly one component below {under}"));
+            return refuse(format!("{p} is not exactly one component below {under}"));
         }
     }
     Ok(())
@@ -185,7 +195,7 @@ impl<'a> Ops<'a> {
         }
         bad.sort();
         bad.dedup();
-        guard(format!("refusing to put {} on a Windows command line (contains {})", repr_str(v), repr_str(&bad.iter().collect::<String>())))
+        refuse(format!("refusing to put {} on a Windows command line (contains {})", repr_str(v), repr_str(&bad.iter().collect::<String>())))
     }
 
     /// Quote a PATH for the host's shell. Windows has no safe escape for its metacharacters, so a path holding one is refused.
@@ -390,6 +400,56 @@ impl<'a> Ops<'a> {
 
     pub fn free_gb(&self, p: &str) -> R<Option<f64>> {
         free_gb(self.host, self.runner, p)
+    }
+
+    /// True when a file inside p changed in the last `minutes` (a bounded walk, depth 6, `size_timeout_s`), False when none did, None
+    /// when that cannot be told (a timeout or an error): unknown is never read as idle.
+    pub fn recent(&self, p: &str, minutes: f64) -> R<Option<bool>> {
+        let n = (minutes.ceil() as i64).max(1);
+        let to = Some(self.cfg.size_timeout_s);
+        let c = if self.win {
+            self.run(
+                &format!(
+                    "powershell -NoProfile -Command \"Get-ChildItem -LiteralPath {} -Recurse -Depth 6 -Force -File -ErrorAction SilentlyContinue | Where-Object {{ $_.LastWriteTime -gt (Get-Date).AddMinutes(-{n}) }} | Select-Object -First 1 -ExpandProperty FullName\"",
+                    self.psq(p)?
+                ),
+                to,
+            )?
+        } else {
+            self.run(&format!("find {} -maxdepth 6 -type f -mmin -{n} -print -quit", self.q(p)?), to)?
+        };
+        Ok(if !c.ok() { None } else { Some(!strip(&c.out).is_empty()) })
+    }
+
+    /// (normalised folder, run id) named by a running hold: the `targets` its lock sidecar (`<lock_file>.info`) lists while it is `held`.
+    pub fn hold_named(&self) -> R<Vec<(String, String)>> {
+        let Some(lf) = self.host.lock_file.as_deref().filter(|l| !l.is_empty()) else { return Ok(vec![]) };
+        let c = self.run0(&format!("{}{}", if self.win { "type " } else { "cat " }, self.q(&format!("{lf}.info"))?))?;
+        if !c.ok() || strip(&c.out).is_empty() {
+            return Ok(vec![]);
+        }
+        let Ok(j) = serde_json::from_str::<serde_json::Value>(&c.out) else { return Ok(vec![]) };
+        if j.get("state").and_then(|s| s.as_str()) != Some("held") {
+            return Ok(vec![]);
+        }
+        let run = j.get("run_id").and_then(|r| r.as_str()).unwrap_or("?").to_string();
+        Ok(j.get("targets").and_then(|t| t.as_array()).into_iter().flatten().filter_map(|t| t.as_str()).map(|t| (norm(t), run.clone())).collect())
+    }
+
+    /// When tidy first saw each entry of the recycle bin (epoch seconds), from the file inside it.
+    pub fn read_seen(&self, trash: &str) -> R<std::collections::BTreeMap<String, f64>> {
+        let c = self.run0(&format!("{}{}", if self.win { "type " } else { "cat " }, self.q(&self.join(trash, SEEN))?))?;
+        let mut out = std::collections::BTreeMap::new();
+        if c.ok() && !strip(&c.out).is_empty() {
+            if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(&c.out) {
+                for (k, v) in m {
+                    if let Some(f) = v.as_f64() {
+                        out.insert(k, f);
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     // -- git
@@ -652,7 +712,7 @@ impl<'a> Ops<'a> {
             return Ok(("stopped", format!("removal did not finish in {}s; re-probe: {}; not counted as done", crate::pycompat::fmt_g(self.cfg.remove_timeout_s), probe_word(e))));
         }
         if !self.gone(p)? {
-            return guard(format!("{p} still exists after removal"));
+            return Ok(("failed", format!("PARTLY REMOVED: {p} still exists after the removal (a long path, a locked file or a permission); some of it may be gone. Left as it is for a person.")));
         }
         for (l, t) in &targets {
             if let Some(t) = t {

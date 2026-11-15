@@ -242,7 +242,8 @@ keep_lanes    = ["lane-x"]              # lane names are the worktree FOLDER NAM
 worktree_prefix = "wt-"                 # a prefix of the folder name (wt-lane-x -> lane-x), never a path: a separator is a config error
 target_roots  = ["/srv/build/targets"]  # each child folder is one lane's target, named after the lane
 targets       = [{ path = "/srv/build/chain", budget_gb = 300 }]   # a shared target: reported, cleaned only by hand
-min_idle_min  = 60                      # a folder used more recently is kept
+min_idle_min  = 60                      # a folder used more recently is kept (the newest file inside counts, not only the folder's own time)
+worktree_min_idle_days = 2              # a worktree with a file changed in the last N days is kept, even when merged and clean (0 = off)
 trash_dir     = "/srv/trash"
 trash_days    = 7
 container_prefix = "gate-"

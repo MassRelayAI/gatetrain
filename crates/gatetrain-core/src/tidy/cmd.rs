@@ -56,7 +56,7 @@ fn hosts(config_path: &str, host: Option<&str>) -> Result<(Config, Vec<usize>), 
 
 fn fatal(mut o: CliOut, h: &Host, e: Fatal, stop: &str) -> CliOut {
     match e {
-        Fatal::Guard(m) => {
+        Fatal::Guard(m) | Fatal::Item(m) => {
             o.err(format!("guard violation on {}: {}{}", h.name, m, stop));
             o.rc = 3;
         }

@@ -71,8 +71,8 @@ class BranchNameTests(Base):
         sim = linux_sim()
         h, t, inv = gather(sim, {"log": self.log})
         inv.items = [T.Item("worktrees", "remove-worktree", "/repo/wt/lane-a", 0, "x", extra={"branch": "x;touch pwned", "links": 0})]
-        with self.assertRaises(T.GuardViolation):
-            T.apply_plan(h, sim, t, inv, ["worktrees"], now=NOW)
+        self.assertEqual(T.apply_plan(h, sim, t, inv, ["worktrees"], now=NOW), (0, 1))     # refused and reported, never run
+        self.assertEqual([r["status"] for r in self.recs()], ["refused"])
         self.assertFalse([c for c in sim.calls if "pwned" in c and ("tag" in c or "update-ref" in c)])
 
     def test_git_never_goes_through_a_shell_string(self):
@@ -198,7 +198,7 @@ class RealGitRemovalTests(Base):
             g("merge", "--no-edit", "line/lane")
             sha = g("rev-parse", "line/lane").strip()
             g("tag", "archive/line/lane", g("rev-parse", "main~1").strip())      # the name is taken by another commit
-            tidy = {"main_checkout": main, "log": self.log}
+            tidy = {"main_checkout": main, "log": self.log, "worktree_min_idle_days": 0}
             if os.name == "nt":                      # a Windows host must prove its link listing works: one known junction
                 canary = os.path.join(d, "canary"); os.makedirs(canary)
                 r = subprocess.run(["cmd", "/c", "mklink", "/J", os.path.join(canary, "l"), main], capture_output=True, text=True)
@@ -244,8 +244,8 @@ class PathSafetyTests(Base):
         sim = linux_sim()
         h, t, inv = gather(sim, {"log": self.log})
         inv.items = [T.Item("trash", "remove", "/trash/old/x", 0, "x")]
-        with self.assertRaises(T.GuardViolation):
-            T.apply_plan(h, sim, t, inv, ["trash"], now=NOW)
+        self.assertEqual(T.apply_plan(h, sim, t, inv, ["trash"], now=NOW), (0, 1))
+        self.assertEqual([r["status"] for r in self.recs()], ["refused"])
         self.assertIn("/trash/old/x", sim.fs)
 
     def test_trash_that_resolves_onto_a_kept_path_is_refused(self):
@@ -566,8 +566,8 @@ class RealFindShapeTests(Base):
     def test_listdir_strips_the_find_prefix(self):
         sim = linux_sim()
         ops, _ = ops_for(sim)
-        self.assertEqual(sorted(ops.listdir("/trash")), ["new", "old"])
-        self.assertEqual(sorted(ops.listdir("/trash/")), ["new", "old"])
+        self.assertEqual(sorted(x for x in ops.listdir("/trash") if x != T.SEEN), ["new", "old"])
+        self.assertEqual(sorted(x for x in ops.listdir("/trash/") if x != T.SEEN), ["new", "old"])
 
     def test_listdir_refuses_a_line_without_the_prefix(self):
         sim = linux_sim()
@@ -802,6 +802,122 @@ class ReviewFixTests(Base):
         self.apply(sim, ["targets"])
         rs = [r for r in self.recs() if r["action"] == "clean"]
         self.assertTrue(rs and all(r["status"] == "failed" and "exited 101" in r["note"] for r in rs), rs)
+
+
+# ---------------------------------------------------------------- review of e2c543b, round 2
+
+class ReviewFix2Tests(Base):
+    def _gather(self, sim, extra=None, lock=None, now=NOW):
+        cfg, h = hostcfg(dict(extra or {}, log=self.log))
+        if lock is not None:
+            h.lock_file = "/run/h.lock"
+            sim.scripts["/run/h.lock.info"] = json.dumps(lock)
+        t = T.build_cfg(cfg, h)
+        return h, t, T.gather(h, sim, t, now=now)
+
+    def test_a_target_with_a_file_changed_inside_is_kept_though_its_folder_is_old(self):
+        sim = linux_sim()
+        sim.add("/build/targets/lane-a/debug/fresh.o", "file", 5, 120)          # the folder's own time is 10 days old; a file inside is 2 minutes old
+        h, t, inv = self._gather(sim)
+        tg = next(x for x in inv.targets if x["path"] == "/build/targets/lane-a")
+        self.assertIn("a file inside changed", tg["keep"])
+        self.assertEqual(by(inv, "/build/targets/lane-a"), [])
+
+    def test_an_activity_probe_that_cannot_answer_means_not_idle(self):
+        sim = linux_sim()
+        orig = sim.run
+        sim.run = lambda cmd, timeout=None: (1, "") if "-mmin" in cmd else orig(cmd, timeout)
+        h, t, inv = self._gather(sim)
+        self.assertEqual(by(inv, "/build/targets/lane-a"), [])
+        self.assertIn("cannot be read", next(x for x in inv.targets if x["path"] == "/build/targets/lane-a")["keep"])
+
+    def test_a_target_named_by_a_running_hold_is_kept_and_a_released_one_is_not(self):
+        held = {"run_id": "r7", "state": "held", "targets": ["/build/targets/lane-a/"]}
+        h, t, inv = self._gather(linux_sim(), lock=held)
+        self.assertEqual(by(inv, "/build/targets/lane-a"), [])
+        self.assertIn("named by the running hold r7", next(x for x in inv.targets if x["path"] == "/build/targets/lane-a")["keep"])
+        h, t, inv = self._gather(linux_sim(), lock=dict(held, state="released"))
+        self.assertEqual(len(by(inv, "/build/targets/lane-a")), 1)
+        # a hold that names the lane's folder by another spelling of its parent still names its lane
+        h, t, inv = self._gather(linux_sim(), lock={"run_id": "r8", "state": "held", "targets": ["/elsewhere/Lane-B"]})
+        self.assertIn("named by the running hold r8", next(x for x in inv.targets if x["path"] == "/build/targets/lane-b")["keep"])
+
+    def test_a_worktree_with_recent_files_is_kept_until_it_is_old_enough(self):
+        sim = linux_sim()                                                       # lane-a: merged, clean, its files are a day old
+        h, t, inv = self._gather(sim, {"worktree_min_idle_days": 2})
+        w = next(x for x in inv.worktrees if x["path"] == "/repo/wt/lane-a")
+        self.assertIn("used in the last 2 days", w["keep"])
+        self.assertEqual(by(inv, "/repo/wt/lane-a"), [])
+        sim.add("/repo/wt/lane-a/src.rs", "file", 5, 3 * DAY)
+        sim.add("/repo/wt/lane-a", age_s=3 * DAY)
+        h, t, inv = self._gather(sim, {"worktree_min_idle_days": 2})
+        self.assertEqual(len(by(inv, "/repo/wt/lane-a")), 1)
+        self.assertEqual(T.TidyCfg().worktree_min_idle_days, 2)
+
+    def test_a_lane_that_is_no_longer_proven_is_not_cleaned_even_from_an_old_plan(self):
+        sim = linux_sim()
+        h, t, inv = self._gather(sim)
+        it = next(i for i in inv.items if i.key == "/build/targets/lane-a")
+        self.assertEqual(it.extra["branch"], "line/lane-a")
+        sim.mtree.clear()                                                        # main moved on: merging lane-a would now change something
+        self.assertEqual(T.apply_plan(h, sim, t, inv, ["targets"], now=NOW), (0, 1))
+        r = [r for r in self.recs() if r["item"] == "/build/targets/lane-a"][0]
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("not proven", r["note"])
+        self.assertFalse([c for c in sim.calls if c.startswith("cargo clean") and "lane-a" in c])
+        self.assertIn("/build/targets/lane-a/debug/big.o", sim.fs)
+
+    def test_a_bad_item_is_reported_and_skipped_and_the_rest_carries_on(self):
+        sim = linux_sim()
+        h, t, inv = self._gather(sim)
+        inv.items = [T.Item("worktrees", "remove-worktree", "/repo/wt/lane-a", 0, "x", extra={"branch": "x;touch pwned", "links": 0}),
+                     T.Item("containers", "rm-container", "gate-1", 0, "x")]
+        self.assertEqual(T.apply_plan(h, sim, t, inv, ["worktrees", "containers"], now=NOW), (1, 1))
+        self.assertEqual([r["status"] for r in self.recs()], ["refused", "ok"])
+
+    def test_a_plain_file_in_the_trash_is_removed_and_a_half_removed_folder_is_reported_loudly(self):
+        sim = linux_sim()
+        sim.add("/trash/stray.log", "file", 40, 10 * DAY)
+        done, failed = self.apply(sim, ["trash"])
+        self.assertEqual(failed, 0)
+        self.assertNotIn("/trash/stray.log", sim.fs)
+        Path(self.log).unlink()
+        sim = linux_sim()
+        sim.rm_noop = True                                                       # a long path or a locked file: the removal "succeeds" and nothing goes
+        done, failed = self.apply(sim, ["trash", "containers"])
+        r = [r for r in self.recs() if r["class"] == "trash"][0]
+        self.assertEqual(r["status"], "failed")
+        self.assertIn("PARTLY REMOVED", r["note"])
+        self.assertTrue([r for r in self.recs() if r["class"] == "containers" and r["status"] == "ok"], "the run carried on")
+
+    def test_a_half_removed_worktree_keeps_its_branch(self):
+        sim = linux_sim()
+        sim.rm_noop = True
+        done, failed = self.apply(sim, ["worktrees"])
+        self.assertEqual(sim.deleted_branches, [])
+        self.assertTrue(self.recs() and all("PARTLY REMOVED" in r["note"] for r in self.recs() if r["status"] == "failed"))
+
+    def test_a_windows_worktree_path_with_a_metacharacter_is_kept_not_fatal(self):
+        sim = winsim()
+        sim.add("C:/repo/wt/a&b", age_s=DAY)
+        sim.worktrees.append(("C:/repo/wt/a&b", "line/lane-x"))
+        sim.branches.append("line/lane-x")
+        sim.ancestors.add("line/lane-x")
+        h, t, inv = gather(sim, dict(WIN_EXTRA), win=True)
+        self.assertEqual(next(x for x in inv.worktrees if x["path"].endswith("a&b"))["keep"], "unsafe name")
+
+    def test_an_unstamped_trash_entry_ages_from_when_tidy_first_saw_it(self):
+        sim = linux_sim()
+        sim.fs["/trash/zz"] = dict(type="dir", size=0, mtime=NOW - 30 * DAY, target=None)      # an old folder time is no age
+        sim.fs["/trash/zz/f"] = dict(type="file", size=5, mtime=NOW - 30 * DAY, target=None)
+        h, t, inv = self._gather(sim)
+        self.assertEqual(by(inv, "/trash/zz"), [])                                # first seen now: age 0
+        self.assertIn('"zz"', sim.scripts["/trash/.gatetrain-seen.json"])
+        h, t, inv = self._gather(sim, now=NOW + 3 * DAY)
+        self.assertEqual(by(inv, "/trash/zz"), [])                                # 3 days: under trash_days
+        h, t, inv = self._gather(sim, now=NOW + 8 * DAY)
+        self.assertEqual(len(by(inv, "/trash/zz")), 1)                            # seen 8 days ago
+        self.assertNotIn(T.SEEN, [i.key.rsplit("/", 1)[-1] for i in inv.items])
 
 
 if __name__ == "__main__":

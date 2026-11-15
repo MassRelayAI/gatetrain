@@ -14,7 +14,7 @@ pub const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Extra {
     None,
-    Target { cargo: bool, tag: Option<bool> },
+    Target { cargo: bool, tag: Option<bool>, branch: Option<String> },
     Worktree { branch: String, links: usize },
 }
 
@@ -53,7 +53,7 @@ impl Item {
                 "extra".into(),
                 match &self.extra {
                     Extra::None => J::Obj(vec![]),
-                    Extra::Target { cargo, tag } => J::Obj(vec![("cargo".into(), J::Bool(*cargo)), ("tag".into(), J::opt_bool(*tag))]),
+                    Extra::Target { cargo, tag, branch } => J::Obj(vec![("cargo".into(), J::Bool(*cargo)), ("tag".into(), J::opt_bool(*tag)), ("branch".into(), J::opt_str(branch))]),
                     Extra::Worktree { branch, links } => J::Obj(vec![("branch".into(), J::s(branch)), ("links".into(), J::Int(*links as i64))]),
                 },
             ),
@@ -225,7 +225,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             info.keep = Some("locked".into());
         } else if wbranch.is_none() {
             info.keep = Some("detached head".into());
-        } else if !safe_branch(wbranch.as_deref().unwrap()) {
+        } else if !safe_branch(wbranch.as_deref().unwrap()) || (ops.win && ops.win_unsafe(wpath)) {
             info.keep = Some("unsafe name".into());
         } else if ops.is_link(wpath)? != Some(false) {
             info.keep = Some(if ops.is_link(wpath)? == Some(true) { "is a link" } else { "link state unknown" }.into());
@@ -243,6 +243,8 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 info.keep = Some(if info.dirty == Some(true) { "uncommitted work" } else { "status unreadable" }.into());
             } else if info.merged != Some(true) {
                 info.keep = Some(if info.merged == Some(false) { "not merged" } else { "merge state unknown" }.into());
+            } else if cfg.worktree_min_idle_days > 0.0 && ops.recent(wpath, cfg.worktree_min_idle_days * 1440.0)? != Some(false) {
+                info.keep = Some(format!("used in the last {} days", fmt_g(cfg.worktree_min_idle_days)));
             }
         }
         if info.keep.is_none() {
@@ -254,6 +256,17 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         inv.worktrees.push(info);
     }
     // targets
+    let held = ops.hold_named()?;
+    let held_by = |path: &str, lane: Option<&str>| -> Option<String> {
+        let np = norm(path);
+        for (h, run) in &held {
+            let base = h.rsplit('/').next().unwrap_or("").to_lowercase();
+            if np == *h || np.starts_with(&format!("{h}/")) || h.starts_with(&format!("{np}/")) || lane.map(|l| l.to_lowercase() == base).unwrap_or(false) {
+                return Some(run.clone());
+            }
+        }
+        None
+    };
     let mut entries: Vec<(String, Option<String>, Option<f64>)> = cfg.targets.iter().map(|x| (x.path.clone(), x.lane.clone(), x.budget_gb)).collect();
     for root in &cfg.target_roots {
         for nm in ops.listdir(root)? {
@@ -339,6 +352,8 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             };
             let reason: Option<String> = if kept_n.contains(&norm(&path)) || keep_lanes_l.contains(&lane.to_lowercase()) || br.as_ref().map(|b| cfg.keep_branches.contains(b)).unwrap_or(false) {
                 Some("keep list".into())
+            } else if let Some(run) = held_by(&path, Some(lane.as_str())) {
+                Some(format!("named by the running hold {run}"))
             } else if wt_dirty.map(|d| d != Some(false)).unwrap_or(false) {
                 Some("its worktree has uncommitted work".into())
             } else if t.idle_min.map(|i| i < cfg.min_idle_min).unwrap_or(true) {
@@ -347,19 +362,21 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 Some("no lane branch found (orphan_targets = keep)".into())
             } else if br.is_some() && t.merged != Some(true) {
                 Some(if t.merged == Some(false) { "lane not merged" } else { "merge state unknown" }.into())
+            } else if ops.recent(&path, cfg.min_idle_min)? != Some(false) {
+                Some(format!("a file inside changed in the last {} min (or its activity cannot be read)", fmt_g(cfg.min_idle_min)))
             } else {
                 None
             };
             t.keep = reason.clone();
             if reason.is_none() && size.map(|s| s != 0).unwrap_or(true) {
                 let mut it = Item::new("targets", if cargo { "clean" } else { "move" }, &path, size, &format!("lane {}: {}", lane, if br.is_some() { "branch content is on main" } else { "orphan" }));
-                it.extra = Extra::Target { cargo, tag: t.tag };
+                it.extra = Extra::Target { cargo, tag: t.tag, branch: br.clone() };
                 inv.items.push(it);
             }
-        } else if t.over && !kept_n.contains(&norm(&path)) && (cargo || !names.is_empty()) {
+        } else if t.over && !kept_n.contains(&norm(&path)) && held_by(&path, None).is_none() && (cargo || !names.is_empty()) {
             let mut it = Item::new("targets", if cargo { "clean" } else { "move" }, &path, size, &format!("over its {} GB budget", fmt_g(budget.unwrap())));
             it.attended_only = true;
-            it.extra = Extra::Target { cargo, tag: t.tag };
+            it.extra = Extra::Target { cargo, tag: t.tag, branch: None };
             inv.items.push(it);
         }
         inv.targets.push(t);
@@ -422,17 +439,31 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             inv.breaches.push(format!("cannot tell whether the recycle bin {td} exists; left alone"));
         }
         if te == Some(true) {
+            let seen = ops.read_seen(td)?;
+            let mut fresh: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
             for nm in ops.listdir(td)? {
+                if nm == super::ops::SEEN {
+                    continue;
+                }
                 let p = ops.join(td, &nm);
                 if ops.win && ops.win_unsafe(&nm) {
                     inv.trash.push(TrashInfo { path: p, bytes: None, age_days: None, keep: Some("unsafe name".into()) });
                     continue;
                 }
-                let mt = ops.mtime(&p)?;
-                let mut age = mt.map(|m| (now - m as f64) / 86400.0);
+                let age: Option<f64>;
                 if let Some(secs) = stamp_secs(&nm) {
                     // the name says when it was moved here; the folder's own mtime is when it was last used
                     age = Some((now - secs).max(0.0) / 86400.0);
+                } else {
+                    // no stamp: it counts from when tidy FIRST SAW it, never from a folder time that may be old or reset
+                    let first = match seen.get(&nm) {
+                        Some(f) => *f,
+                        None => {
+                            fresh.insert(nm.clone(), now);
+                            now
+                        }
+                    };
+                    age = Some(((now - first) / 86400.0).max(0.0));
                 }
                 let sz = ops.size(&p)?;
                 inv.trash.push(TrashInfo { path: p.clone(), bytes: sz, age_days: age, keep: None });
@@ -440,6 +471,15 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                     if a > cfg.trash_days {
                         inv.items.push(Item::new("trash", "remove", &p, sz, &format!("in the recycle bin {} days (> {})", crate::pycompat::fmt_f(a, 0), fmt_g(cfg.trash_days))));
                     }
+                }
+            }
+            if !fresh.is_empty() {
+                let present: HashSet<String> = ops.listdir(td)?.into_iter().collect();
+                let mut all: std::collections::BTreeMap<String, f64> = seen.iter().filter(|(k, _)| present.contains(*k)).map(|(k, v)| (k.clone(), *v)).collect();
+                all.extend(fresh);
+                let body = serde_json::to_string(&all).unwrap_or_default();
+                if let Err(e) = runner.put_file(&ops.join(td, super::ops::SEEN), &body) {
+                    inv.breaches.push(format!("cannot record when the recycle bin entries were first seen ({e}); their age stays 0"));
                 }
             }
         }

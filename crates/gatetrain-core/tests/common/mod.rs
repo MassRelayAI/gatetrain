@@ -78,6 +78,8 @@ pub struct SimState {
     pub crash_on: Option<String>,
     /// every shell line with the timeout it was given
     pub call_timeouts: Vec<(String, Option<f64>)>,
+    /// a recursive remove that says ok and removes nothing (a long path, a locked file)
+    pub rm_noop: bool,
 }
 
 impl SimState {
@@ -101,7 +103,21 @@ impl SimState {
         if let Some(slot) = self.fs.iter_mut().find(|(x, _)| *x == k) {
             slot.1 = e;
         } else {
-            self.fs.push((k, e));
+            self.fs.push((k.clone(), e));
+        }
+        if let Some((parent, name)) = k.rsplit_once('/') {
+            if ["/trash", "c:/trash"].contains(&parent.to_lowercase().as_str()) && name != ".gatetrain-seen.json" {
+                // the recycle bin remembers when tidy first saw each entry; a fixture entry that is `age_s` old was first seen `age_s` ago
+                let sp = format!("{parent}/.gatetrain-seen.json");
+                let mut seen: serde_json::Map<String, Value> = self.scripts.get(&sp).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
+                seen.insert(name.to_string(), json!(NOW - age_s));
+                self.scripts.insert(sp.clone(), serde_json::to_string(&seen).unwrap());
+                let fe = Entry { typ: "file", size: 10, mtime: NOW, target: None, ltype: None };
+                match self.fs.iter_mut().find(|(x, _)| *x == sp) {
+                    Some(slot) => slot.1 = fe,
+                    None => self.fs.push((sp, fe)),
+                }
+            }
         }
     }
     pub fn dir(&mut self, path: &str, age_s: i64) {
@@ -298,6 +314,23 @@ impl Sim {
         if st.unknown_exists.iter().any(|x| !x.is_empty() && c.contains(x.as_str())) && re(r"^(test -e|if exist)").is_match(&c) {
             return RunOut::done(1, "");
         }
+        let m = re(r"^find (.+?) -maxdepth 6 -type f -mmin -(\d+) -print -quit$").captures(&c).or_else(|| re(r"Get-ChildItem -LiteralPath (.+?) -Recurse -Depth 6 .*AddMinutes\(-(\d+)\)").captures(&c));
+        if let Some(m) = m {
+            let limit = NOW - m[2].parse::<i64>().unwrap() * 60;
+            for k in st.under(&m[1]) {
+                let e = st.get(&k).unwrap();
+                if e.typ == "file" && e.mtime > limit {
+                    return ok(format!("{k}\n"));
+                }
+            }
+            return ok(String::new());
+        }
+        if let Some(m) = re(r"^(?:cat|type) (.+)$").captures(&c) {
+            return match st.scripts.get(&n(&m[1])) {
+                Some(t) => ok(t.clone()),
+                None => RunOut::done(1, ""),
+            };
+        }
         if let Some(m) = re(r"^du -sk (.+)$").captures(&c) {
             return ok(format!("{}\t{}\n", st.total(&m[1]) / 1024, &m[1]));
         }
@@ -387,6 +420,9 @@ impl Sim {
             return ok(String::new());
         }
         if let Some(m) = re(r"^(?:rmdir /S /Q|rm -r --) (.+)$").captures(&c) {
+            if st.rm_noop {
+                return ok(String::new());
+            }
             st.rm_tree(&m[1], true); // the dangerous kind: follows what is still linked
             return ok(String::new());
         }
@@ -638,13 +674,13 @@ pub fn win_sim() -> Shared {
 pub fn base() -> Value {
     json!({"main_checkout": "/repo/main", "root_checkout": "/repo/root", "trash_dir": "/trash",
         "container_prefix": "gate-", "image_patterns": ["gate-img:*"], "cache_days": 3, "keep_lanes": ["lane-c"],
-        "target_roots": ["/build/targets"], "targets": [{"path": "/build/chain", "budget_gb": 1}]})
+        "target_roots": ["/build/targets"], "targets": [{"path": "/build/chain", "budget_gb": 1}], "worktree_min_idle_days": 0})
 }
 
 pub fn win_extra() -> Value {
     json!({"main_checkout": "C:/repo/main", "root_checkout": "C:/repo/root", "scratch_dir": "C:/tmp", "target_roots": [], "targets": [],
         "trash_dir": "C:/trash", "container_prefix": "x-", "image_patterns": [], "cache_days": 0, "keep_lanes": [],
-        "link_canary": "C:/canary", "link_canary_count": 1})
+        "link_canary": "C:/canary", "link_canary_count": 1, "worktree_min_idle_days": 0})
 }
 
 pub fn merged(extra: Value) -> Value {
