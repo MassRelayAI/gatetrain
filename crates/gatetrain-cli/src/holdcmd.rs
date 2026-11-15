@@ -1,6 +1,7 @@
 //! `gatetrain hold` and `gatetrain running` (design 4.3): the holder is the PARENT of the chain.
 use anyhow::{bail, Context, Result};
 use gatetrain_core::declog::{self, NewEntry};
+use gatetrain_core::disk;
 use gatetrain_core::hold::{self, Acquire, Info, Stale, State};
 use gatetrain_core::ledger::Ledger;
 use gatetrain_core::memory::{self, MemoryModel};
@@ -16,6 +17,10 @@ use std::time::{Duration, Instant};
 pub const EXIT_REFUSED: u8 = 75;
 /// Exit code of a hold refused by the memory rule.
 pub const EXIT_MEMORY: u8 = 76;
+/// Exit code of a hold refused by the disk rule.
+pub const EXIT_DISK: u8 = 77;
+/// Exit code of a hold refused because the working directory is not the expected repository root.
+pub const EXIT_CWD: u8 = 78;
 
 pub struct HoldArgs {
     pub run_id: Option<String>,
@@ -27,7 +32,32 @@ pub struct HoldArgs {
     pub log: Option<PathBuf>,
     /// Step names the chain would run; their predicted memory is admitted against the host before the lock is taken.
     pub steps: Vec<String>,
+    /// The repository root the chain runs in (pinned as the child's working directory).
+    pub repo_root: Option<PathBuf>,
+    /// Build folders the chain writes to (disk admission before, size recorded after).
+    pub target_dir: Vec<PathBuf>,
     pub cmd: Vec<String>,
+}
+
+/// `None` when `root` is the top level of a git repository, else why not.
+fn repo_root_problem(root: &Path) -> Option<String> {
+    if !root.is_dir() {
+        return Some(format!("{} is not a folder", root.display()));
+    }
+    let top = match Command::new("git").arg("-C").arg(root).args(["rev-parse", "--show-toplevel"]).output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Ok(_) => return Some(format!("{} is not inside a git repository", root.display())),
+        Err(e) => return Some(format!("git could not be run to check {}: {e}", root.display())),
+    };
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same(root, Path::new(&top)) {
+        None
+    } else {
+        Some(format!("{} is inside the repository {top} but is not its top level", root.display()))
+    }
 }
 
 fn resolve(lock: &Option<PathBuf>, hosts: &Option<PathBuf>, host: &Option<String>) -> Result<(PathBuf, Option<hold::HostCapacity>)> {
@@ -124,21 +154,50 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
         let mut l = Ledger::open(&a.db).with_context(|| format!("opening {}", a.db.display()))?;
         l.migrate()?;
     }
+    if let Some(root) = &a.repo_root {
+        // the chain runs where it was told to, or not at all (a build that fell back to the wrong folder filled a disk once, L70)
+        if let Some(why) = repo_root_problem(root) {
+            let ev = json!({"repo_root": root.display().to_string(), "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(), "rule": "the working directory must be the top level of the expected repository"});
+            append(&a.db, &entry("host.refuse-cwd", &run_id, "refused", why.clone(), ev))?;
+            say(&a.log, &format!("REFUSED-CWD {run_id} {why}"))?;
+            return Ok(ExitCode::from(EXIT_CWD));
+        }
+    }
     let model = match (&a.hosts, &a.host) {
         (Some(h), Some(n)) => Some(MemoryModel::from_hosts_toml(&std::fs::read_to_string(h)?, n)?),
         _ => None,
     };
-    if let (Some(m), false) = (&model, a.steps.is_empty()) {
+    // a hold without a step list is admitted as one `(chain)`: its own recorded peak is the prediction (the holder records it after every run)
+    let steps: Vec<String> = if a.steps.is_empty() { vec!["(chain)".to_string()] } else { a.steps.clone() };
+    if let Some(m) = &model {
         let hist = Ledger::open(&a.db)?.step_memory_history()?;
-        let ad = memory::admit(m, &a.steps, &hist);
+        let ad = memory::admit(m, &steps, &hist);
         say(&a.log, &format!("MEMORY {}", ad.rule))?;
         if !ad.admitted {
-            let cheap = memory::cheap_set(m, &a.steps, &hist);
+            let cheap = memory::cheap_set(m, &steps, &hist);
             let ev = json!({"predicted_mb": (ad.predicted_gb * 1024.0).round() as i64, "available_mb": (ad.available_gb * 1024.0).round() as i64, "unpredicted": ad.unpredicted, "cheap_set": cheap, "rule": "predicted <= memory_gb - memory_reserve_gb"});
             append(&a.db, &entry("host.refuse-memory", &run_id, "refused", ad.rule.clone(), ev))?;
             say(&a.log, &format!("REFUSED-MEMORY {run_id} predicted {:.1} GB > available {:.1} GB", ad.predicted_gb, ad.available_gb))?;
             say(&a.log, &format!("CHEAP-SET {}", cheap.join(",")))?;
             return Ok(ExitCode::from(EXIT_MEMORY));
+        }
+    }
+    if let (Some(h), Some(n)) = (&a.hosts, &a.host) {
+        let disks = disk::disks_from_hosts_toml(&std::fs::read_to_string(h)?, n)?;
+        if !disks.is_empty() {
+            let hist = Ledger::open(&a.db)?.step_memory_history()?;
+            for t in &a.target_dir {
+                let key = disk::step_key(&t.to_string_lossy());
+                let predicted_mb = memory::typical_mb(hist.get(&key).map(Vec::as_slice).unwrap_or(&[]));
+                let ad = disk::admit(&disks, &t.to_string_lossy(), predicted_mb, &disk::free_gb);
+                say(&a.log, &format!("DISK {}", ad.rule))?;
+                if !ad.admitted {
+                    let ev = json!({"target_dir": t.display().to_string(), "disk": ad.disk, "free_mb": ad.free_gb.map(|f| (f * 1024.0).round() as i64), "predicted_mb": (ad.predicted_gb * 1024.0).round() as i64, "min_free_mb": (ad.min_free_gb * 1024.0).round() as i64, "rule": "free - predicted target size >= min_free_gb"});
+                    append(&a.db, &entry("host.refuse-disk", &run_id, "refused", ad.rule.clone(), ev))?;
+                    say(&a.log, &format!("REFUSED-DISK {run_id} {}", ad.rule))?;
+                    return Ok(ExitCode::from(EXIT_DISK));
+                }
+            }
         }
     }
     let started = Instant::now();
@@ -174,6 +233,9 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
     }
     let mut c = Command::new(&a.cmd[0]);
     c.args(&a.cmd[1..]);
+    if let Some(root) = &a.repo_root {
+        c.current_dir(root).env("GATETRAIN_REPO_ROOT", root);
+    }
     // Parallelism is min(core-based, memory-based); both come from hosts.toml.
     let par = match (cap.as_ref().and_then(|c| c.parallel), &model) {
         (Some(p), Some(m)) => {
@@ -223,6 +285,12 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
     if let Some((mb, source)) = peak {
         let _ = Ledger::open(&a.db).and_then(|l| l.record_step_peak(&run_id, "(chain)", mb, source, &hold::now_iso()));
         let _ = say(&a.log, &format!("PEAK {run_id} {mb:.0} MB ({source})"));
+    }
+    for t in &a.target_dir {
+        // the size this folder reached is the prediction of the next run (the median of what is recorded)
+        let mb = disk::dir_size_mb(t);
+        let _ = Ledger::open(&a.db).and_then(|l| l.record_step_peak(&run_id, &disk::step_key(&t.to_string_lossy()), mb, "target-size", &hold::now_iso()));
+        let _ = say(&a.log, &format!("TARGET {run_id} {} {mb:.0} MB", t.display()));
     }
     let pid = lock.info.pid;
     lock.release()?; // sidecar says `released`, then the OS lock goes

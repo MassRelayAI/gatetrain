@@ -149,6 +149,14 @@ enum Cmd {
         /// Comma-separated step names the chain would run: their predicted memory is admitted before the lock is taken
         #[arg(long, value_delimiter = ',')]
         steps: Vec<String>,
+        /// The repository root the chain must run in: it is the child's working directory, and the hold is refused (exit 78) when it is
+        /// not the top level of a git repository (a script that fell back to the wrong folder must not run a build there)
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        /// A build folder the chain writes to (repeatable): the hold is refused (exit 77) when the configured disk that holds it would
+        /// drop under its `min_free_gb` by the size this folder reached on earlier runs; its size is recorded after the run
+        #[arg(long)]
+        target_dir: Vec<PathBuf>,
         /// Print FREE / HELD / STALE / STOPPED from the lock; exit 0 only when held
         #[arg(long)]
         status: bool,
@@ -369,8 +377,8 @@ fn run(cli: Cli, raw: &[String]) -> Result<ExitCode> {
             }
         }
         Cmd::Hold { status: true, lock, hosts, host, .. } => holdcmd::status(&lock, &hosts, &host),
-        Cmd::Hold { run_id, lock, db, hosts, host, wait_secs, log, steps, cmd, .. } => {
-            holdcmd::run(holdcmd::HoldArgs { run_id, lock, db, hosts, host, wait_secs, log, steps, cmd })
+        Cmd::Hold { run_id, lock, db, hosts, host, wait_secs, log, steps, repo_root, target_dir, cmd, .. } => {
+            holdcmd::run(holdcmd::HoldArgs { run_id, lock, db, hosts, host, wait_secs, log, steps, repo_root, target_dir, cmd })
         }
         Cmd::Memory { cmd: MemoryCmd::Record { db, run, step, peak_mb, source } } => holdcmd::memory_record(&db, &run, &step, peak_mb, &source),
         Cmd::Memory { cmd: MemoryCmd::Admit { db, hosts, host, steps } } => holdcmd::memory_admit(&db, &hosts, &host, &steps),
