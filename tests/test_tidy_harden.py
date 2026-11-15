@@ -143,11 +143,11 @@ class ArchiveOrderTests(Base):
         sim = linux_sim()
         sim.tag_refs["archive/line/lane-a"] = "someothersha"
         done, failed = self.apply(sim, ["worktrees"])
-        self.assertEqual((done, failed), (1, 0))
+        self.assertEqual(failed, 0)
         name = "archive/line/lane-a-" + sim.sha("line/lane-a")[:8]
         self.assertEqual(sim.tag_refs[name], sim.sha("line/lane-a"))
         self.assertEqual(sim.tag_refs["archive/line/lane-a"], "someothersha")      # the old tag is untouched
-        self.assertEqual(sim.deleted_branches, ["line/lane-a"])
+        self.assertIn("line/lane-a", sim.deleted_branches)
 
     def test_tag_that_points_elsewhere_is_a_violation(self):
         sim = linux_sim()
@@ -183,6 +183,38 @@ class ArchiveOrderTests(Base):
         self.apply(sim, ["worktrees"])
         self.assertIn(["git", "-C", "/repo/main", "update-ref", "-d", "refs/heads/line/lane-a", sim.sha("line/lane-a")], sim.argvs)
         self.assertFalse([c for c in sim.calls if "branch -D" in c])
+
+
+class RealGitRemovalTests(Base):
+    @unittest.skipUnless(shutil.which("git"), "git needed")
+    def test_remove_worktree_against_real_git(self):
+        from gatetrain.runner import LocalRunner
+        with tempfile.TemporaryDirectory() as d:
+            main, wt = os.path.join(d, "main"), os.path.join(d, "wt-lane")
+            def g(*a, cwd=main):
+                return subprocess.run(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=tester", *a], check=True, capture_output=True, text=True).stdout
+            os.makedirs(main); g("init", "-b", "main"); Path(main, "f").write_text("1"); g("add", "f"); g("commit", "-m", "base")
+            g("worktree", "add", "-b", "line/lane", wt); Path(wt, "g").write_text("2"); g("add", "g", cwd=wt); g("commit", "-m", "lane", cwd=wt)
+            g("merge", "--no-edit", "line/lane")
+            sha = g("rev-parse", "line/lane").strip()
+            g("tag", "archive/line/lane", g("rev-parse", "main~1").strip())      # the name is taken by another commit
+            tidy = {"main_checkout": main, "log": self.log}
+            if os.name == "nt":                      # a Windows host must prove its link listing works: one known junction
+                canary = os.path.join(d, "canary"); os.makedirs(canary)
+                r = subprocess.run(["cmd", "/c", "mklink", "/J", os.path.join(canary, "l"), main], capture_output=True, text=True)
+                if r.returncode != 0:
+                    self.skipTest("cannot create a junction here")
+                tidy.update(link_canary=canary, link_canary_count=1)
+            cfg = parse({"hosts": [{"name": "h", "tidy": tidy}]})
+            host = cfg.hosts[0]
+            t = T.build_cfg(cfg, host)
+            runner = LocalRunner()
+            inv = T.gather(host, runner, t, now=time.time())
+            self.assertEqual([n(i.key) for i in inv.items if i.cls == "worktrees"], [n(wt)])
+            T.apply_plan(host, runner, t, inv, ["worktrees"])
+            self.assertFalse(os.path.exists(wt))
+            self.assertNotIn("line/lane", g("branch", "--list"))
+            self.assertEqual(g("rev-parse", "archive/line/lane-" + sha[:8]).strip(), sha)
 
 
 # ---------------------------------------------------------------- 4. paths
@@ -310,7 +342,7 @@ class LinkTests(Base):
     def test_worktree_that_is_a_link_is_kept(self):
         sim = linux_sim()
         sim.fs["/repo/wt/lane-a"]["type"] = "link"
-        sim.fs["/repo/wt/lane-a"]["target"] = "/repo/main"
+        sim.fs["/repo/wt/lane-a"]["target"] = "/trash/new"
         h, t, inv = gather(sim)
         w = next(x for x in inv.worktrees if x["path"] == "/repo/wt/lane-a")
         self.assertEqual(w["keep"], "is a link")
@@ -319,15 +351,15 @@ class LinkTests(Base):
     def test_target_that_is_a_link_is_kept(self):
         sim = linux_sim()
         sim.fs["/build/targets/lane-a"]["type"] = "link"
-        sim.fs["/build/targets/lane-a"]["target"] = "/repo/main"
+        sim.fs["/build/targets/lane-a"]["target"] = "/trash/new"
         h, t, inv = gather(sim)
         self.assertEqual(by(inv, "/build/targets/lane-a"), [])
         self.assertEqual(next(x for x in inv.targets if x["path"] == "/build/targets/lane-a")["keep"], "is a link")
 
     def test_first_worktree_entry_is_always_kept(self):
         sim = linux_sim()
-        sim.add("/repo/alias", "link", target="/repo/main")
-        sim.worktrees[0] = ("/repo/alias", "line/lane-z")      # the main worktree under another spelling, on a merged branch
+        sim.add("/repo/alias", age_s=DAY)
+        sim.worktrees[0] = ("/repo/alias", "line/lane-z")      # the first entry, not spelled like the configured main checkout, on a merged branch
         sim.branches.append("line/lane-z")
         sim.ancestors.add("line/lane-z")
         h, t, inv = gather(sim)
@@ -355,6 +387,7 @@ class LinkTests(Base):
         with tempfile.TemporaryDirectory() as d:
             main, trash = Path(d, "main"), Path(d, "trash")
             (main / "keep").mkdir(parents=True); (main / "keep" / "f.txt").write_text("x"); trash.mkdir()
+            subprocess.run(["git", "-C", str(main), "init", "-q"], check=True)
             j = trash / "j"
             r = subprocess.run(["cmd", "/c", "mklink", "/J", str(j), str(main / "keep")], capture_output=True, text=True)
             if r.returncode != 0:

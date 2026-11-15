@@ -5,7 +5,9 @@ Nothing here uses a bulk prune, a glob, or a recursive force-remove; every remov
 """
 import fnmatch
 import json
+import math
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass, field, asdict
@@ -21,6 +23,11 @@ DEFAULT_UNATTENDED = ("targets", "containers", "trash")
 END = "__GT_END__"
 TIMEOUT = "timeout"          # the rc of a command that did not finish in time
 GB = 1024 ** 3
+SAFE_BRANCH = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")          # anything else is kept, never removed
+SAFE_CONTAINER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+SAFE_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$")
+WIN_BAD = set('"%^!&|<>')                                              # never interpolated into a Windows command line
+STAMP = re.compile(r"-(\d{14})$")                                      # the timestamp `move` puts in a recycle-bin name
 
 
 class GuardViolation(Exception):
@@ -54,12 +61,13 @@ class TidyCfg:
     link_canary: Optional[str] = None
     link_canary_count: Optional[int] = None
     size_timeout_s: float = 30                              # a size probe slower than this is unknown, never a crash
+    remove_timeout_s: float = 1800                          # a removal, move or cargo clean gets this long before it is "stopped"
 
 
 _LISTS = ("keep_paths", "keep_lanes", "keep_branches", "target_roots", "image_patterns", "evidence_dirs", "unattended")
 _STRS = ("main_checkout", "root_checkout", "main_branch", "worktree_prefix", "orphan_targets", "trash_dir",
          "container_prefix", "log", "scratch_dir", "link_canary")
-_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s")
+_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s")
 
 
 def build_cfg(cfg, host) -> TidyCfg:
@@ -86,9 +94,57 @@ def build_cfg(cfg, host) -> TidyCfg:
     for i, x in enumerate(t.targets):
         if not isinstance(x, dict) or not isinstance(x.get("path"), str):
             raise ConfigError(f"tidy.targets[{i}]: needs a table with a path")
+    if not SAFE_BRANCH.match(t.main_branch):
+        raise ConfigError(f"tidy.main_branch: {t.main_branch!r} is not a plain branch name")
+    if t.trash_dir:
+        check_trash_dir(t)
     if not t.container_prefix:
         t.container_prefix = host.container_prefix
     return t
+
+
+def check_trash_dir(t):
+    """A recycle bin that is a root, a drive, or that holds or sits inside anything we keep would let `remove` delete what it must not."""
+    try:
+        safe_path(t.trash_dir)
+    except GuardViolation as e:
+        raise ConfigError(f"tidy.trash_dir: {e}")
+    nt = norm(t.trash_dir)
+    kept = [t.main_checkout, t.root_checkout] + list(t.keep_paths) + list(t.target_roots) + [x["path"] for x in t.targets]
+    for k in kept:
+        if not k:
+            continue
+        nk = norm(k)
+        if nk == nt or nk.startswith(nt + "/"):
+            raise ConfigError(f"tidy.trash_dir {t.trash_dir} is, or contains, {k}")
+    for k in [t.main_checkout, t.root_checkout] + list(t.keep_paths):
+        if k and nt.startswith(norm(k) + "/"):
+            raise ConfigError(f"tidy.trash_dir {t.trash_dir} is inside {k}")
+
+
+def safe_path(p, under=None):
+    """One check for every path that may be removed: absolute, no `.` or `..` component, no control character, not a root, not a share.
+    With `under`, the path must be exactly one component below that folder (a recycle-bin entry)."""
+    if not isinstance(p, str) or not p:
+        raise GuardViolation(f"refusing to remove {p!r}: empty")
+    if any(ord(c) < 32 or ord(c) == 127 for c in p):
+        raise GuardViolation(f"refusing {p!r}: control character in the path")
+    s = p.replace("\\", "/")
+    if s.startswith("//"):
+        raise GuardViolation(f"refusing {p!r}: a network path")
+    if not (s.startswith("/") or re.match(r"[A-Za-z]:/", s)):
+        raise GuardViolation(f"refusing {p!r}: not an absolute path")
+    comps = [c for c in s.split("/")[1:] if c != ""]
+    if not comps:
+        raise GuardViolation(f"refusing {p!r}: a root")
+    if any(c in (".", "..") for c in comps):
+        raise GuardViolation(f"refusing {p!r}: a . or .. component")
+    if under is not None:
+        u = norm(under)
+        nn = norm(p)
+        rest = nn[len(u) + 1:] if nn.startswith(u + "/") else None
+        if not rest or "/" in rest:
+            raise GuardViolation(f"{p} is not exactly one component below {under}")
 
 
 # ---------------------------------------------------------------- host operations
@@ -118,11 +174,35 @@ class Ops:
         self._canary_ok = False
 
     # -- primitives
+    def _win_ok(self, v):
+        bad = [c for c in v if c in WIN_BAD or ord(c) < 32]
+        if bad:
+            raise GuardViolation(f"refusing to put {v!r} on a Windows command line (contains {''.join(sorted(set(bad)))!r})")
+
     def q(self, p):
-        return '"' + p.replace("/", "\\") + '"' if self.win else dr._q(p, "linux")
+        """Quote a PATH for the host's shell. Windows has no safe escape for its metacharacters, so a path holding one is refused."""
+        if self.win:
+            self._win_ok(p)
+            return '"' + p.replace("/", "\\") + '"'
+        return shlex.quote(p)
 
     def psq(self, p):
+        self._win_ok(p)
         return "'" + p.replace("/", "\\").replace("'", "''") + "'"
+
+    def run_argv(self, argv, timeout=None):
+        """Run a program with an argument list. A local runner uses no shell at all; ssh gets POSIX single-quote escaping."""
+        if "system prune" in " ".join(argv).lower():
+            raise GuardViolation(f"refusing a bulk command: {argv}")
+        try:
+            if self.win and not getattr(self.runner, "shell_free", False):
+                for a in argv:
+                    self._win_ok(a)
+                cmd = " ".join('"' + a + '"' if re.search(r"\s", a) else a for a in argv)
+                return self.runner.run(cmd) if timeout is None else self.runner.run(cmd, timeout=timeout)
+            return self.runner.run_argv(argv) if timeout is None else self.runner.run_argv(argv, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return TIMEOUT, ""
 
     def run(self, cmd, timeout=None):
         """(rc, out). A command that times out returns (TIMEOUT, "") instead of raising; callers treat it as a failure."""
@@ -148,8 +228,55 @@ class Ops:
         return a.rstrip("/\\") + ("\\" if self.win else "/") + b
 
     def exists(self, p):
+        """True, False, or None when the probe itself failed (unknown is never read as gone)."""
         cmd = f"if exist {self.q(p)} (echo yes) else (echo no)" if self.win else f"test -e {self.q(p)} && echo yes || echo no"
-        return self.run(cmd)[1].strip().startswith("yes")
+        rc, out = self.run(cmd)
+        o = out.strip()
+        if rc != 0:
+            return None
+        return True if o.startswith("yes") else False if o.startswith("no") else None
+
+    def gone(self, p):
+        e = self.exists(p)
+        if e is None:
+            raise GuardViolation(f"cannot tell whether {p} still exists; not assuming it is gone")
+        return not e
+
+    def is_link(self, p):
+        """True for a symlink or Windows reparse point (junction), False for a real item, None when the probe failed."""
+        if self.win:
+            rc, out = self.run(f"powershell -NoProfile -Command \"if ((Get-Item -LiteralPath {self.psq(p)} -Force).Attributes -band 1024) {{'yes'}} else {{'no'}}\"")
+        else:
+            rc, out = self.run(f"test -L {self.q(p)} && echo yes || echo no")
+        o = out.strip()
+        return None if rc != 0 else True if o.startswith("yes") else False if o.startswith("no") else None
+
+    def link_type(self, p):
+        """'dir' or 'file' for a Windows link; anything unclear is a violation (the script must pick rmdir or del)."""
+        rc, out = self.run(f"powershell -NoProfile -Command \"(Get-Item -LiteralPath {self.psq(p)} -Force).PSIsContainer\"")
+        o = out.strip().lower()
+        if rc != 0 or o not in ("true", "false"):
+            raise GuardViolation(f"cannot tell whether the link {p} is a folder or a file")
+        return "dir" if o == "true" else "file"
+
+    def rp(self, p):
+        """The resolved location of p (links followed), normalised; None when it cannot be resolved."""
+        cache = self.__dict__.setdefault("_rp", {})
+        if p not in cache:
+            if self.win:
+                rc, out = self.run_argv(["python", "-c", "import os,sys;print(os.path.realpath(sys.argv[1]))", p])
+            else:
+                rc, out = self.run_argv(["realpath", "-m", "--", p])
+            o = out.strip()
+            cache[p] = norm(o) if rc == 0 and o and "\n" not in o else None
+        return cache[p]
+
+    def rpl(self, p):
+        """Where the item itself sits: the parent resolved, the last component NOT followed (an item that is a link is judged as the link)."""
+        s = p.replace("\\", "/").rstrip("/")
+        parent, _, base = s.rpartition("/")
+        rpar = self.rp(parent or "/")
+        return None if rpar is None else rpar.rstrip("/") + "/" + base.lower()
 
     def size(self, p):
         """Bytes under p, or None when unknown (timeout, error, age-only disk). Never a fake 0 (L51)."""
@@ -175,32 +302,44 @@ class Ops:
         return int(s) if s.isdigit() else None
 
     def listdir(self, p):
-        rc, out = self.run(f"dir /B {self.q(p)}" if self.win else f"ls -1 {self.q(p)}")
-        return [l.strip() for l in out.splitlines() if l.strip()] if rc == 0 else []
+        """Names directly in p. A name with a control character (a newline) is refused, never split into two names."""
+        if self.win:
+            rc, out = self.run(f"dir /B {self.q(p)}")
+            names = [l.strip() for l in out.splitlines() if l.strip()] if rc == 0 else []
+        else:
+            rc, out = self.run(f"find {self.q(p)} -mindepth 1 -maxdepth 1 -print0")
+            names = [x for x in out.split("\0") if x] if rc == 0 else []
+        for nm in names:
+            if any(ord(c) < 32 or ord(c) == 127 for c in nm):
+                raise GuardViolation(f"{p} holds a name with a control character ({nm!r}); refusing to guess at it")
+        return names
 
     def free_gb(self, p):
         return dr.free_gb(self.host, self.runner, p)
 
     # -- git
-    def git(self, repo, args):
-        return self.run(f"git -C {self.q(repo)} {args}")
+    def git(self, repo, *args, timeout=None):
+        """git as an argument list: a branch, a path or a file name is data, never part of a command line."""
+        return self.run_argv(["git", "-C", repo, *args], timeout)
 
     def snapshot_main(self):
         m = self.cfg.main_checkout
         if not m:
             return None
         rc, files = self.git(m, "ls-files")
-        rc2, st = self.git(m, "status --porcelain")
+        rc2, st = self.git(m, "status", "--porcelain")
         if rc != 0 or rc2 != 0:
             raise GuardViolation(f"cannot read the main checkout {m}")
         return len([l for l in files.splitlines() if l.strip()]), st.strip()
 
     def worktrees(self):
-        rc, out = self.git(self.cfg.main_checkout, "worktree list --porcelain")
+        rc, out = self.git(self.cfg.main_checkout, "worktree", "list", "--porcelain")
         res, cur = [], None
         for line in out.splitlines() + [""]:
             if line.startswith("worktree "):
-                cur = {"path": line[9:].strip(), "branch": None}
+                cur = {"path": line[9:].strip(), "branch": None, "locked": False}
+            elif (line == "locked" or line.startswith("locked ")) and cur:
+                cur["locked"] = True
             elif line.startswith("branch ") and cur:
                 cur["branch"] = line[7:].strip().replace("refs/heads/", "", 1)
             elif not line.strip() and cur:
@@ -209,42 +348,26 @@ class Ops:
         return res
 
     def branches(self):
-        rc, out = self.git(self.cfg.main_checkout, "branch --list")
+        rc, out = self.git(self.cfg.main_checkout, "branch", "--list")
         return [l.strip().lstrip("*+ ").strip() for l in out.splitlines() if l.strip()] if rc == 0 else []
 
     def merged(self, branch):
-        """True when the branch content is on main: an ancestor, or every added line is present in main's version of the file."""
+        """True only when merging the branch into main would change nothing: an ancestor, or the merge result's tree equals main's tree
+        (git merge-tree --write-tree, git 2.38+). A conflict, an older git or any failure is not merged; an unusable name is unknown."""
         m, mb = self.cfg.main_checkout, self.cfg.main_branch
-        if self.git(m, f"merge-base --is-ancestor {self.q(branch)} {self.q(mb)}")[0] == 0:
-            return True
-        rc, out = self.git(m, f"diff --unified=0 --no-color {self.q(mb + '...' + branch)}")
-        if rc != 0:
+        if not SAFE_BRANCH.match(branch):
             return None
-        if not out.strip():
+        if self.git(m, "merge-base", "--is-ancestor", branch, mb)[0] == 0:
             return True
-        added, f = {}, None
-        for line in out.splitlines():
-            if line.startswith("+++ "):
-                f = line[4:].strip()
-                f = f[2:] if f.startswith("b/") else None if f == "/dev/null" else f
-                if f:
-                    added.setdefault(f, [])
-            elif line.startswith("+") and f:
-                added[f].append(line[1:].strip())
-        todo = [(f, [x for x in ls if x]) for f, ls in added.items()]
-        if not any(ls for _, ls in todo):
-            return False        # only deletions or renames: content cannot be proven present
-        for f, ls in todo:
-            rc, txt = self.git(m, f"show {self.q(mb + ':' + f)}")
-            if rc != 0:
-                return False
-            have = {l.strip() for l in txt.splitlines()}
-            if any(x not in have for x in ls):
-                return False
-        return True
+        rc, tree = self.git(m, "rev-parse", "--verify", mb + "^{tree}")
+        if rc != 0 or not tree.strip():
+            return None
+        rc, out = self.git(m, "merge-tree", "--write-tree", mb, branch)
+        lines = out.splitlines()
+        return rc == 0 and bool(lines) and lines[0].strip() == tree.strip()
 
     def dirty(self, path):
-        rc, out = self.git(path, "status --porcelain")
+        rc, out = self.git(path, "status", "--porcelain")
         return None if rc != 0 else bool(out.strip())
 
     # -- links (L12, L44)
@@ -255,28 +378,47 @@ class Ops:
         if END not in lines:
             raise GuardViolation(f"the link listing for {path} did not run (no end marker); refusing to continue")
         self.check_canary()
-        return [l for l in lines if l != END]
+        res = [l for l in lines if l != END]
+        pre = norm(path) + "/"
+        for l in res:
+            if not norm(l).startswith(pre):
+                raise GuardViolation(f"the link listing for {path} returned {l!r}, which is not inside it; not trusted")
+        return res
 
     def check_canary(self):
         c = self.cfg
-        if self._canary_ok or not (self.win and c.link_canary):
+        if not self.win:
+            return
+        if not c.link_canary or c.link_canary_count is None:
+            raise GuardViolation("a Windows host needs link_canary and link_canary_count: without a listing that is known to find links, an empty result means nothing")
+        if self._canary_ok:
             return
         self._canary_ok = True      # set first: the canary listing re-enters list_links
         rc, out = self.run(f"dir /AL /S /B {self.q(c.link_canary)} & echo {END}")
         n = len([l for l in out.splitlines() if l.strip() and l.strip() != END])
-        if c.link_canary_count is not None and n != c.link_canary_count:
+        if n != c.link_canary_count:
             self._canary_ok = False
             raise GuardViolation(f"link listing check: {c.link_canary} returned {n} links, expected {c.link_canary_count}; the listing command is not trusted")
+
+    def remove_link(self, p):
+        """Remove ONE link, never anything inside it. Windows: rmdir for a folder link, del for a file link, chosen by type."""
+        if self.win:
+            self.run(("rmdir " if self.link_type(p) == "dir" else "del ") + self.q(p))
+        else:
+            self.run(f"unlink {self.q(p)}")
 
     def unlink_all(self, path):
         links = self.list_links(path)
         if links:
+            for l in links:
+                if self.is_link(l) is not True:
+                    raise GuardViolation(f"{l} was listed as a link but is not one; refusing to unlink it")
             if self.win:
                 sd = self.cfg.scratch_dir or getattr(self.runner, "scratch_dir", None)
                 if not sd:
                     raise GuardViolation("scratch_dir is needed to write the unlink script on this host")
                 script = self.join(sd, "gatetrain-unlink.cmd")
-                body = "@echo off\r\n" + "".join(f'rmdir "{w}" 2>nul || del "{w}"\r\n' for w in (x.replace("/", "\\") for x in links))
+                body = "@echo off\r\n" + "".join(("rmdir " if self.link_type(l) == "dir" else "del ") + self.q(l) + "\r\n" for l in links)
                 self.runner.put_file(script, body)
                 self.run(self.q(script))
                 self.run(f"del {self.q(script)}")
@@ -288,22 +430,66 @@ class Ops:
         return len(links)
 
     # -- guarded removal
+    def kept(self):
+        return [k for k in [self.cfg.main_checkout, self.cfg.root_checkout] + list(self.cfg.keep_paths) if k]
+
     def check_path(self, p):
-        n = norm(p)
-        if not p or re.search(r"[*?\[]", p) or n in ("", "/") or re.fullmatch(r"[a-z]:", n):
+        safe_path(p)
+        if re.search(r"[*?\[]", p):
             raise GuardViolation(f"refusing to remove {p!r}")
-        for k in [self.cfg.main_checkout, self.cfg.root_checkout] + list(self.cfg.keep_paths):
-            if k and (n == norm(k) or norm(k).startswith(n + "/")):
+        n = norm(p)
+        for k in self.kept():
+            if n == norm(k) or norm(k).startswith(n + "/"):
                 raise GuardViolation(f"{p} is on the keep list or contains a kept path ({k})")
+        r = self.rpl(p)
+        if r is None:
+            raise GuardViolation(f"cannot resolve {p}; not removing what cannot be located")
+        for k in self.kept():
+            rk = self.rp(k)
+            if rk is None:
+                raise GuardViolation(f"cannot resolve the kept path {k}")
+            if r == rk or rk.startswith(r + "/"):
+                raise GuardViolation(f"{p} resolves to {r}, which is or contains the kept path {k}")
+
+    def check_trash_entry(self, p):
+        """A recycle-bin entry is exactly one component below a bin that resolves to a place of its own."""
+        td = self.cfg.trash_dir
+        safe_path(p, under=td)
+        rt = self.rp(td)
+        if rt is None:
+            raise GuardViolation(f"cannot resolve the recycle bin {td}")
+        for k in self.kept():
+            rk = self.rp(k)
+            if rk is None or rt == rk or rk.startswith(rt + "/") or rt.startswith(rk + "/"):
+                raise GuardViolation(f"the recycle bin {td} resolves to {rt}, which overlaps the kept path {k}")
+        par = self.rp(p.replace("\\", "/").rstrip("/").rpartition("/")[0])
+        if par != rt:
+            raise GuardViolation(f"{p} does not sit directly in the recycle bin {td} (resolves to {par})")
 
     def remove_dir(self, p):
+        """(status, note). A link is removed as a link and never walked; a timeout is 'stopped', never done."""
         self.check_path(p)
         before = self.snapshot_main()
+        lk = self.is_link(p)
+        if lk is None:
+            raise GuardViolation(f"cannot tell whether {p} is a link; not removing")
+        if lk:
+            self.remove_link(p)
+            if not self.gone(p):
+                raise GuardViolation(f"{p} (a link) still exists after removal")
+            self.assert_main(before)
+            return "ok", "link removed; its target was not touched"
         self.unlink_all(p)
-        self.run(f"rmdir /S /Q {self.q(p)}" if self.win else f"rm -r -- {self.q(p)}")
-        if self.exists(p):
+        rc, _ = self.run(f"rmdir /S /Q {self.q(p)}" if self.win else f"rm -r -- {self.q(p)}", timeout=self.cfg.remove_timeout_s)
+        if rc == TIMEOUT:
+            e = self.exists(p)
+            self.assert_main(before)
+            return "stopped", (f"removal did not finish in {self.cfg.remove_timeout_s:g}s; re-probe: "
+                               + ("still there" if e else "gone" if e is False else "unknown") + "; not counted as done")
+        if not self.gone(p):
             raise GuardViolation(f"{p} still exists after removal")
         self.assert_main(before)
+        return "ok", "removed"
 
     def assert_main(self, before):
         if before is None:
@@ -366,14 +552,26 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
         wts, branches = ops.worktrees(), ops.branches()
     kept = [cfg.main_checkout, cfg.root_checkout] + cfg.keep_paths
     kept_n = {norm(k) for k in kept if k}
+    kept_r = {ops.rp(k) for k in kept if k} - {None} if cfg.main_checkout else set()
+    first_n = norm(wts[0]["path"]) if wts else None
+    first_r = ops.rp(wts[0]["path"]) if wts else None
     # worktrees
-    for w in wts:
+    for idx, w in enumerate(wts):
         n = norm(w["path"])
+        wr = ops.rp(w["path"])
         info = {"path": w["path"], "branch": w["branch"], "merged": None, "dirty": None, "links": 0, "bytes": None, "keep": None}
-        if n in kept_n:
+        if n in kept_n or (wr is not None and wr in kept_r):
             info["keep"] = "main/root/keep list"
+        elif idx == 0 or n == first_n or (wr is not None and wr == first_r):
+            info["keep"] = "main worktree"            # the first entry of `git worktree list` is the main checkout, whatever its spelling
+        elif w.get("locked"):
+            info["keep"] = "locked"
         elif not w["branch"]:
             info["keep"] = "detached head"
+        elif not SAFE_BRANCH.match(w["branch"]):
+            info["keep"] = "unsafe name"
+        elif ops.is_link(w["path"]) is not False:
+            info["keep"] = "is a link" if ops.is_link(w["path"]) else "link state unknown"
         else:
             info["merged"] = ops.merged(w["branch"]) if w["branch"] != cfg.main_branch else None
             info["dirty"] = ops.dirty(w["path"])
@@ -397,9 +595,20 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
         entries += [(ops.join(root, n), n, None) for n in ops.listdir(root)]
     seen = set()
     for path, lane, budget in entries:
-        if norm(path) in seen or not ops.exists(path):
+        if norm(path) in seen:
+            continue
+        e = ops.exists(path)
+        if e is None:
+            inv.breaches.append(f"cannot tell whether {path} exists; left alone")
+            continue
+        if not e:
             continue
         seen.add(norm(path))
+        lk = ops.is_link(path)
+        if lk is not False:
+            inv.targets.append({"path": path, "lane": lane, "bytes": None, "idle_min": None, "cargo": False, "tag": None, "merged": None, "branch": None,
+                                "budget_gb": budget, "over": False, "keep": "is a link" if lk else "link state unknown"})
+            continue
         names = ops.listdir(path)
         size, mt = ops.size(path), ops.mtime(path)
         cargo = is_cargo(names)
@@ -470,11 +679,20 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                 inv.cache = {"size": parse_size(p[1]), "reclaimable": rec}
                 inv.items.append(Item("cache", "prune-cache", "build cache", rec, f"older than {cfg.cache_days:g} days (upper bound: all reclaimable)"))
     # recycle bin
-    if cfg.trash_dir and ops.exists(cfg.trash_dir):
-        for n in ops.listdir(cfg.trash_dir):
-            p = ops.join(cfg.trash_dir, n)
+    te = ops.exists(cfg.trash_dir) if cfg.trash_dir else False
+    if te is None:
+        inv.breaches.append(f"cannot tell whether the recycle bin {cfg.trash_dir} exists; left alone")
+    if te:
+        for nm in ops.listdir(cfg.trash_dir):
+            p = ops.join(cfg.trash_dir, nm)
             mt = ops.mtime(p)
             age = None if mt is None else (now - mt) / 86400
+            st = STAMP.search(nm)
+            if st:                                   # the name says when it was moved here; the folder's own mtime is when it was last used
+                try:
+                    age = max(0.0, (now - time.mktime(time.strptime(st.group(1), "%Y%m%d%H%M%S"))) / 86400)
+                except (ValueError, OverflowError):
+                    pass
             sz = ops.size(p)
             inv.trash.append({"path": p, "bytes": sz, "age_days": age})
             if age is not None and age > cfg.trash_days:
@@ -569,7 +787,8 @@ def log_action(path, rec):
 
 
 def apply_plan(host, runner, cfg: TidyCfg, inv: Inventory, classes, now=None, log=None, attended=False):
-    """Run the plan class by class. Returns (done, failed); raises GuardViolation after logging, stopping everything."""
+    """Run the plan class by class. Returns (done, failed); raises GuardViolation after logging, stopping everything.
+    Every action writes an `intent` record BEFORE it runs, so a crash mid-action leaves a trace of what was being done."""
     ops = Ops(host, runner, cfg)
     log = log or cfg.log
     done = failed = 0
@@ -579,9 +798,10 @@ def apply_plan(host, runner, cfg: TidyCfg, inv: Inventory, classes, now=None, lo
         for it in [i for i in inv.items if i.cls == cls and (attended or not i.attended_only)]:
             rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now or time.time())), "host": host.name,
                    "class": cls, "action": it.kind, "item": it.key, "before_bytes": it.bytes, "after_bytes": None}
+            log_action(log, dict(rec, status="intent", note="about to run"))
             fb = ops.free_gb(it.key) if it.kind in ("clean", "move", "remove", "remove-worktree") else None
             try:
-                after, status, note = do_item(ops, cfg, it)
+                after, status, note = do_item(ops, cfg, it, now)
             except GuardViolation as e:
                 rec.update(status="guard-violation", note=str(e))
                 log_action(log, rec)
@@ -597,7 +817,11 @@ def apply_plan(host, runner, cfg: TidyCfg, inv: Inventory, classes, now=None, lo
     return done, failed
 
 
-def do_item(ops, cfg, it):
+def cache_hours(cfg):
+    return max(1, math.ceil(cfg.cache_days * 24))      # a window under an hour is an hour, never `until=0h` (= everything)
+
+
+def do_item(ops, cfg, it, now=None):
     k = it.kind
     if k == "clean":
         return clean_target(ops, cfg, it)
@@ -605,34 +829,44 @@ def do_item(ops, cfg, it):
         if not cfg.trash_dir:
             return it.bytes, "skipped", "not a cargo target and no trash_dir configured; left alone"
         ops.check_path(it.key)
-        dest = ops.join(cfg.trash_dir, norm(it.key).rsplit("/", 1)[-1] + "-" + time.strftime("%Y%m%d%H%M%S"))
-        ops.run(f"move {ops.q(it.key)} {ops.q(dest)}" if ops.win else f"mv -- {ops.q(it.key)} {ops.q(dest)}")
+        name = it.key.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        dest = ops.join(cfg.trash_dir, name + "-" + time.strftime("%Y%m%d%H%M%S", time.localtime(now or time.time())))
+        safe_path(dest, under=cfg.trash_dir)
+        if ops.exists(dest) is not False:
+            return it.bytes, "failed", f"{dest} exists or cannot be probed; not moving onto it"
+        rc, _ = ops.run(f"move {ops.q(it.key)} {ops.q(dest)}" if ops.win else f"mv -- {ops.q(it.key)} {ops.q(dest)}", timeout=cfg.remove_timeout_s)
+        if rc == TIMEOUT:
+            return None, "stopped", f"move did not finish in {cfg.remove_timeout_s:g}s; not counted as done"
+        src, dst = ops.exists(it.key), ops.exists(dest)
+        if rc != 0 or src is not False or dst is not True:
+            return it.bytes, "failed", f"move did not complete (rc {rc}; source gone: {src}; destination exists: {dst})"
         return 0, "ok", f"moved to {dest}"
     if k == "remove":
-        if not (cfg.trash_dir and norm(it.key).startswith(norm(cfg.trash_dir) + "/")):
-            raise GuardViolation(f"{it.key} is not inside the configured recycle bin")
-        ops.remove_dir(it.key)
-        return 0, "ok", "removed from the recycle bin"
+        if not cfg.trash_dir:
+            raise GuardViolation(f"{it.key} is not inside a configured recycle bin")
+        ops.check_trash_entry(it.key)
+        status, note = ops.remove_dir(it.key)
+        return (0 if status == "ok" else None), status, note
     if k == "remove-worktree":
         return remove_worktree(ops, cfg, it)
     if k == "rm-container":
         rc, out = ops.run("docker ps --format \"{{.Names}}\"")
         if it.key in out.split():
             raise GuardViolation(f"container {it.key} is running")
-        if not it.key.startswith(cfg.container_prefix or "\0"):
+        if not SAFE_CONTAINER.match(it.key) or not it.key.startswith(cfg.container_prefix or "\0"):
             raise GuardViolation(f"container {it.key} does not match the prefix")
-        rc, _ = ops.run(f"docker rm {dr._q(it.key, 'linux')}")
+        rc, _ = ops.run_argv(["docker", "rm", it.key])
         return 0, "ok" if rc == 0 else "failed", "removed by exact name"
     if k == "rm-image":
-        if not any(fnmatch.fnmatchcase(it.key, p) for p in cfg.image_patterns):
+        if not SAFE_IMAGE.match(it.key) or not any(fnmatch.fnmatchcase(it.key, p) for p in cfg.image_patterns):
             raise GuardViolation(f"image {it.key} matches no configured pattern")
         rc, used = ops.run('docker ps -a --format "{{.Image}}"')
         if it.key in used.split():
             raise GuardViolation(f"image {it.key} is used by a container")
-        rc, _ = ops.run(f"docker rmi {dr._q(it.key, 'linux')}")
+        rc, _ = ops.run_argv(["docker", "rmi", it.key])
         return 0, "ok" if rc == 0 else "failed", "removed by exact name"
     if k == "prune-cache":
-        rc, _ = ops.run(f"docker builder prune -f --filter until={int(cfg.cache_days * 24)}h")
+        rc, _ = ops.run_argv(["docker", "builder", "prune", "-f", "--filter", f"until={cache_hours(cfg)}h"])
         return 0, "ok" if rc == 0 else "failed", f"build cache older than {cfg.cache_days:g} days"
     raise GuardViolation(f"unknown action {k}")
 
@@ -640,11 +874,18 @@ def do_item(ops, cfg, it):
 def clean_target(ops, cfg, it):
     p = it.key
     ops.check_path(p)
+    lk = ops.is_link(p)
+    if lk is not False:
+        return it.bytes, "failed", "is a link (or link state unknown); cargo clean not run"
+    if not is_cargo(ops.listdir(p)):         # re-check at the moment of action: the plan may be minutes old and sizing may have failed
+        return it.bytes, "failed", "no longer looks like a cargo target (no debug/release with tmp); cargo clean not run"
     before = ops.size(p)
     fb = ops.free_gb(p) if before is None else None      # sizing failed: fall back to the disk's free space (L51)
-    mp = f"--manifest-path {ops.q(ops.join(cfg.main_checkout, 'Cargo.toml'))} " if cfg.main_checkout else ""
-    cmd = f"cargo clean {mp}--target-dir {ops.q(p)}"          # never -q: a quiet clean can refuse and say nothing (L43)
-    ops.run(cmd)
+    mp = ["--manifest-path", ops.join(cfg.main_checkout, "Cargo.toml")] if cfg.main_checkout else []
+    cmd = ["cargo", "clean", *mp, "--target-dir", p]          # never -q: a quiet clean can refuse and say nothing (L43)
+    rc, _ = ops.run_argv(cmd, cfg.remove_timeout_s)
+    if rc == TIMEOUT:
+        return None, "stopped", f"cargo clean did not finish in {cfg.remove_timeout_s:g}s; not counted as done"
     after = ops.size(p)
     note = "cargo clean"
     if before is None:
@@ -655,7 +896,7 @@ def clean_target(ops, cfg, it):
         note = ""
         if d <= 0.001 and "CACHEDIR.TAG" not in ops.listdir(p):
             ops.runner.put_file(ops.join(p, "CACHEDIR.TAG"), CARGO_TAG)
-            ops.run(cmd)
+            ops.run_argv(cmd, cfg.remove_timeout_s)
             fa = ops.free_gb(p)
             d = (fa - fb) if fa is not None else None
             note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran; "
@@ -669,7 +910,7 @@ def clean_target(ops, cfg, it):
     names = ops.listdir(p) if after else []
     if before and after >= before * 0.99 and is_cargo(names) and "CACHEDIR.TAG" not in names:
         ops.runner.put_file(ops.join(p, "CACHEDIR.TAG"), CARGO_TAG)
-        ops.run(cmd)
+        ops.run_argv(cmd, cfg.remove_timeout_s)
         after = ops.size(p)
         note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran"
         if after is None:
@@ -680,23 +921,47 @@ def clean_target(ops, cfg, it):
 
 
 def remove_worktree(ops, cfg, it):
+    """Order: resolve the branch to one sha, archive THAT sha under a tag and verify it, unlink links, remove the worktree, then delete
+    the branch only if it still points at that sha. Any step that cannot be proven stops here with the branch intact."""
     p, br = it.key, it.extra["branch"]
     if not cfg.main_checkout:
         raise GuardViolation("worktree removal needs main_checkout in the config")
+    if not SAFE_BRANCH.match(br):
+        raise GuardViolation(f"branch {br!r} has an unsafe name; not removing")
+    m = cfg.main_checkout
     ops.check_path(p)
+    if ops.is_link(p) is not False:
+        raise GuardViolation(f"{p} is a link (or cannot be probed); not removing a worktree through it")
     if ops.dirty(p) is not False:
         raise GuardViolation(f"{p} has uncommitted work")
     if ops.merged(br) is not True:
         raise GuardViolation(f"branch {br} is not on {cfg.main_branch}")
     before = ops.snapshot_main()
+    rc, out = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}^{{commit}}")
+    sha = out.strip()
+    if rc != 0 or not re.fullmatch(r"\S+", sha):          # exactly one token
+        raise GuardViolation(f"cannot resolve branch {br} to one commit")
+    tag = f"archive/{br}"
+    rc, ex = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
+    if rc == 0 and ex.strip() != sha:
+        tag = f"{tag}-{sha[:8]}"                     # that name belongs to another commit: never overwrite or reuse it
+        rc, ex = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
+    if not (rc == 0 and ex.strip() == sha):
+        rc, _ = ops.git(m, "tag", tag, sha)
+        if rc != 0:
+            raise GuardViolation(f"could not create the archive tag {tag} for {br}; branch and worktree kept")
+    rc, got = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
+    if rc != 0 or got.strip() != sha:
+        raise GuardViolation(f"archive tag {tag} does not point at {sha}; branch and worktree kept")
     ops.unlink_all(p)
-    ops.git(cfg.main_checkout, f"tag archive/{br} {ops.q(br)}")
-    ops.git(cfg.main_checkout, f"worktree remove {ops.q(p)}")
-    if ops.exists(p):
+    ops.git(m, "worktree", "remove", p)
+    if not ops.gone(p):
         raise GuardViolation(f"{p} still exists after git worktree remove")
-    ops.git(cfg.main_checkout, f"branch -D {ops.q(br)}")
+    rc, _ = ops.git(m, "update-ref", "-d", f"refs/heads/{br}", sha)
+    if rc != 0:
+        raise GuardViolation(f"branch {br} no longer points at {sha} (or could not be deleted); it is kept, archived as {tag}")
     ops.assert_main(before)
-    return 0, "ok", f"links unlinked, tagged archive/{br}, worktree and branch removed, main checkout unchanged"
+    return 0, "ok", f"links unlinked, tagged {tag}, worktree and branch removed, main checkout unchanged"
 
 
 # ---------------------------------------------------------------- CLI

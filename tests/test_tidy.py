@@ -41,6 +41,8 @@ class SimHost:
         self.locked = set()
         self.tree_main = "TREE_MAIN"
 
+    shell_free = True                # models LocalRunner: run_argv never involves a shell
+
     def sha(self, br):
         return self.shas.get(br, "sha-" + br)
 
@@ -757,7 +759,7 @@ class ConfigAndGitTests(unittest.TestCase):
             cfg = parse({"hosts": [{"name": "h", "tidy": {"main_checkout": d}}]})
             host = cfg.hosts[0]
             ops = T.Ops(host, LocalRunner(), T.build_cfg(cfg, host))
-            self.assertTrue(ops.merged("lane-x"))        # not an ancestor, but every added line is on main
+            self.assertFalse(ops.merged("lane-x"))       # not an ancestor, and merging it conflicts with main: never "merged by content"
             self.assertFalse(ops.merged("lane-y"))
             self.assertTrue(ops.merged("main"))
 

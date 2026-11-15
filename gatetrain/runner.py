@@ -5,6 +5,13 @@ import tempfile
 
 
 class LocalRunner:
+    shell_free = True        # run_argv never involves a shell
+
+    def run_argv(self, argv, timeout=60):
+        """Run an argument list directly (no shell): every element reaches the program as one argument."""
+        p = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout, errors="replace")
+        return p.returncode, p.stdout
+
     def run(self, cmd, timeout=60):
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, errors="replace")
         return p.returncode, p.stdout
@@ -28,6 +35,10 @@ class SshRunner:
         argv = ["ssh", self.target, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", cmd]
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, errors="replace")
         return p.returncode, p.stdout
+
+    def run_argv(self, argv, timeout=60):
+        """The remote side is a POSIX shell: join with strict single-quote escaping."""
+        return self.run(shlex.join(list(argv)), timeout)
 
     scratch_dir = "/tmp"
 
