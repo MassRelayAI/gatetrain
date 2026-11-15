@@ -680,6 +680,23 @@ class RoundTwoLows(Base):
         ops, _ = ops_for(sim)
         self.assertEqual(sorted(n(x) for x in ops.list_links("/repo/wt/lane-a")), ["/repo/wt/lane-a/L", "/repo/wt/lane-a/node_modules"])
 
+    def test_keep_lanes_match_case_insensitively_on_windows(self):
+        sim = winsim()
+        sim.add("C:/repo/wt/Lane-A", age_s=DAY)
+        sim.add("C:/repo/wt/Lane-A/src.rs", "file", 5, DAY)
+        sim.worktrees[1] = ("C:/repo/wt/Lane-A", "line/lane-a")
+        h, t, inv = gather(sim, dict(WIN_EXTRA, keep_lanes=["Lane-A"]), win=True)
+        w = next(x for x in inv.worktrees if x["path"] == "C:/repo/wt/Lane-A")
+        self.assertEqual(w["keep"], "keep list")
+        self.assertEqual(by(inv, "C:/repo/wt/Lane-A"), [])
+
+    def test_keep_lanes_also_protect_a_target_with_a_capital(self):
+        sim = winsim()
+        sim.add("C:/targets", age_s=0)
+        cargo_target(sim, "C:/targets/Lane-B", tag=True)
+        h, t, inv = gather(sim, dict(WIN_EXTRA, keep_lanes=["lane-b"], target_roots=["C:/targets"]), win=True)
+        self.assertEqual(by(inv, "C:/targets/Lane-B"), [])
+
     def test_norm_keeps_case_on_posix_paths_only(self):
         self.assertEqual(T.norm("/Srv/Repo/"), "/Srv/Repo")
         self.assertEqual(T.norm("C:\\Srv\\Repo"), "c:/srv/repo")

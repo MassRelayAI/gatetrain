@@ -598,7 +598,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
             info["bytes"] = ops.size(w["path"])
             if w["branch"] == cfg.main_branch:
                 info["keep"] = "main branch"
-            elif w["branch"] in cfg.keep_branches or lane_of(w["path"], cfg) in cfg.keep_lanes:
+            elif w["branch"] in cfg.keep_branches or lane_of(w["path"], cfg).lower() in {x.lower() for x in cfg.keep_lanes}:
                 info["keep"] = "keep list"
             elif info["dirty"] is not False:
                 info["keep"] = "uncommitted work" if info["dirty"] else "status unreadable"
@@ -648,7 +648,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
             wt = next((w for w in inv.worktrees if w["branch"] == br), None) if br else None
             t["merged"] = ops.merged(br) if br else None
             reason = None
-            if norm(path) in kept_n or lane in cfg.keep_lanes or (br in cfg.keep_branches):
+            if norm(path) in kept_n or lane.lower() in {x.lower() for x in cfg.keep_lanes} or (br in cfg.keep_branches):
                 reason = "keep list"
             elif wt and wt["dirty"] is not False:
                 reason = "its worktree has uncommitted work"
