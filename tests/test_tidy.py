@@ -36,6 +36,7 @@ class SimHost:
         self.argvs = []                  # every argv-list command (no shell involved)
         self.shas, self.tag_refs, self.mtree, self.conflict = {}, {}, {}, set()
         self.tag_fails = self.mv_fails = False
+        self.wt_timeout = False          # git worktree remove never finishes
         self.rm_timeout = False          # a recursive remove that never finishes
         self.unknown_exists = ()         # path prefixes whose existence probe fails
         self.locked = set()
@@ -110,7 +111,7 @@ class SimHost:
             return (0, f"{e['mtime']}\n") if e else (1, "")
         m = re.match(r"find (.+?) -mindepth 1 -maxdepth 1 -print0$", c)
         if m:
-            return 0, "".join(x + "\0" for x in self.children(m.group(1)))
+            return 0, "".join(m.group(1).rstrip("/") + "/" + x + "\0" for x in self.children(m.group(1)))     # real find prints <path>/<name>
         m = re.match(r"test -L (.+?) &&", c) or re.search(r"Get-Item -LiteralPath (.+?) -Force\)\.Attributes", c)
         if m:
             e = self.fs.get(n(m.group(1)))
@@ -141,7 +142,8 @@ class SimHost:
         if c.startswith("unlink "):
             if not self.unlink_noop:
                 for p in c.split(" && "):
-                    self.fs.pop(n(p[7:]), None)
+                    for k in self.under(n(p[7:])):      # removing a link takes what hangs below it with it
+                        self.fs.pop(k, None)
             return 0, ""
         if c.startswith("del "):
             self.fs.pop(n(c[4:]), None)
@@ -195,7 +197,7 @@ class SimHost:
             return 0, "\n".join("  " + b for b in self.branches) + "\n"
         m = re.match(r"merge-base --is-ancestor (\S+) (\S+)", a)
         if m:
-            return (0 if m.group(1) in self.ancestors else 1), ""
+            return (0 if m.group(1).replace("sha-", "", 1) in self.ancestors else 1), ""
         m = re.match(r"rev-parse --verify --quiet refs/heads/(\S+?)\^\{commit\}$", a)
         if m:
             return (0, self.sha(m.group(1)) + "\n") if m.group(1) in self.branches else (1, "")
@@ -224,6 +226,8 @@ class SimHost:
         if m:
             return (0, self.shown[m.group(2)]) if m.group(2) in self.shown else (128, "")
         m = re.match(r"worktree remove (\S+)", a)
+        if m and self.wt_timeout:
+            raise subprocess.TimeoutExpired(c, 60)
         if m:
             self.rm_tree(m.group(1), follow_links=True)
             self.worktrees = [w for w in self.worktrees if n(w[0]) != n(m.group(1))]

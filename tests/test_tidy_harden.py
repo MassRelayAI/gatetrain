@@ -555,5 +555,129 @@ class SmallTests(Base):
         self.assertIn("/build/targets/plain/notes.txt", sim.fs)
 
 
+# ---------------------------------------------------------------- review round 2
+
+class RealFindShapeTests(Base):
+    def test_listdir_strips_the_find_prefix(self):
+        sim = linux_sim()
+        ops, _ = ops_for(sim)
+        self.assertEqual(sorted(ops.listdir("/trash")), ["new", "old"])
+        self.assertEqual(sorted(ops.listdir("/trash/")), ["new", "old"])
+
+    def test_listdir_refuses_a_line_without_the_prefix(self):
+        sim = linux_sim()
+        ops, _ = ops_for(sim)
+        orig = sim.run
+        sim.run = lambda cmd, timeout=None: (0, "/elsewhere/x\0") if cmd.startswith("find") else orig(cmd, timeout)
+        with self.assertRaises(T.GuardViolation):
+            ops.listdir("/trash")
+
+    def test_cargo_target_is_recognised_through_listdir(self):
+        sim = linux_sim()
+        h, t, inv = gather(sim)
+        self.assertTrue(next(x for x in inv.targets if x["path"] == "/build/targets/lane-a")["cargo"])
+
+    @unittest.skipIf(os.name == "nt", "real find needs Linux (run in WSL)")
+    def test_real_disk_listdir_and_inventory(self):
+        from gatetrain.runner import LocalRunner
+        with tempfile.TemporaryDirectory() as d:
+            roots, trash = Path(d, "targets"), Path(d, "trash")
+            for lane in ("lane-a", "lane-b"):
+                (roots / lane / "debug").mkdir(parents=True); (roots / lane / "tmp").mkdir()
+                (roots / lane / "debug" / "x.o").write_text("x" * 1000)
+            (trash / "old-20200101000000").mkdir(parents=True); (trash / "old-20200101000000" / "f").write_text("y")
+            os.makedirs(os.path.join(str(roots), "weird\nname"))
+            cfg = parse({"hosts": [{"name": "h", "os": "linux", "tidy": {"target_roots": [str(roots)], "trash_dir": str(trash), "log": self.log}}]})
+            host = cfg.hosts[0]
+            ops = T.Ops(host, LocalRunner(), T.build_cfg(cfg, host))
+            with self.assertRaises(T.GuardViolation):
+                ops.listdir(str(roots))                       # the newline name is refused, not split
+            os.rmdir(os.path.join(str(roots), "weird\nname"))
+            self.assertEqual(sorted(ops.listdir(str(roots))), ["lane-a", "lane-b"])
+            inv = T.gather(host, LocalRunner(), T.build_cfg(cfg, host), now=time.time())
+            self.assertEqual(sorted(t["path"] for t in inv.targets), [str(roots / "lane-a"), str(roots / "lane-b")])
+            self.assertTrue(all(t["cargo"] for t in inv.targets))
+            self.assertEqual([i.key for i in inv.items if i.cls == "trash"], [str(trash / "old-20200101000000")])
+            print("REAL-DISK listdir/gather ok:", len(inv.targets), "targets,", len(inv.trash), "trash entries")
+
+
+class PowershellQuoteTests(Base):
+    def test_typographic_quotes_are_refused(self):
+        sim = winsim()
+        ops, _ = ops_for(sim, WIN_EXTRA, win=True)
+        evil = "C:/Windows\u2019$(Write-Host INJECTED)\u2018x"
+        before = len(sim.calls)
+        for f in (ops.is_link, ops.link_type, ops.size, ops.mtime):
+            with self.assertRaises(T.GuardViolation):
+                f(evil)
+        self.assertEqual(len(sim.calls), before)       # nothing reached a shell
+
+
+class WorktreeTimeoutTests(Base):
+    def test_git_worktree_remove_timeout_is_stopped(self):
+        sim = linux_sim()
+        sim.wt_timeout = True
+        done, failed = self.apply(sim, ["worktrees"])
+        self.assertEqual(done, 0)
+        self.assertTrue(self.recs() and all(r["status"] == "stopped" for r in self.recs()))
+        self.assertEqual(sim.deleted_branches, [])
+
+    def test_worktree_remove_gets_the_removal_timeout(self):
+        sim = linux_sim()
+        seen = []
+        orig = sim.run_argv
+
+        def spy(argv, timeout=None):
+            if "worktree" in argv and "remove" in argv:
+                seen.append(timeout)
+            return orig(argv, timeout)
+        sim.run_argv = spy
+        self.apply(sim, ["worktrees"], {"remove_timeout_s": 4321})
+        self.assertTrue(seen and set(seen) == {4321})
+
+
+class RoundTwoLows(Base):
+    def test_merge_is_proved_on_the_resolved_sha(self):
+        sim = linux_sim()
+        self.apply(sim, ["worktrees"])
+        i = sim.argvs.index(["git", "-C", "/repo/main", "rev-parse", "--verify", "--quiet", "refs/heads/line/lane-a^{commit}"])
+        later = [a for a in sim.argvs[i:] if "--is-ancestor" in a]
+        self.assertTrue(later and all("line/lane-a" not in a and sim.sha("line/lane-a") in a for a in later))
+
+    def test_win_names_with_metacharacters_are_kept_not_fatal(self):
+        sim = winsim()
+        sim.add("C:/targets", age_s=0)
+        sim.add("C:/targets/a&b", age_s=DAY)
+        sim.add("C:/trash", age_s=0)
+        sim.add("C:/trash/x%y", age_s=10 * DAY)
+        h, t, inv = gather(sim, dict(WIN_EXTRA, target_roots=["C:/targets"]), win=True)
+        tg = next(x for x in inv.targets if x["path"].endswith("a&b"))
+        self.assertIn("unsafe", tg["keep"])
+        self.assertEqual(by(inv, "C:/trash/x%y"), [])
+        self.assertTrue(any(x["path"].endswith("x%y") for x in inv.trash))
+
+    def test_windows_without_canary_is_a_config_error(self):
+        cfg, h = hostcfg({k: v for k, v in WIN_EXTRA.items() if not k.startswith("link_canary")}, win=True)
+        with self.assertRaises(ConfigError):
+            T.build_cfg(cfg, h)
+
+    def test_trash_dir_holding_a_worktree_is_refused(self):
+        sim = linux_sim()
+        sim.worktrees.append(("/trash/old", "line/lane-t"))
+        with self.assertRaises(T.GuardViolation):
+            gather(sim)
+
+    def test_a_link_under_another_link_is_not_listed_for_unlinking(self):
+        sim = linux_sim()
+        sim.add("/repo/wt/lane-a/L", "link", target="/repo/main/node_modules")
+        sim.add("/repo/wt/lane-a/L/inner", "link", target="/repo/main/a.rs")
+        ops, _ = ops_for(sim)
+        self.assertEqual(sorted(n(x) for x in ops.list_links("/repo/wt/lane-a")), ["/repo/wt/lane-a/L", "/repo/wt/lane-a/node_modules"])
+
+    def test_norm_keeps_case_on_posix_paths_only(self):
+        self.assertEqual(T.norm("/Srv/Repo/"), "/Srv/Repo")
+        self.assertEqual(T.norm("C:\\Srv\\Repo"), "c:/srv/repo")
+
+
 if __name__ == "__main__":
     unittest.main()
