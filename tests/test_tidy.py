@@ -33,6 +33,23 @@ class SimHost:
         self.tags, self.deleted_branches = [], []
         self.main = "C:/repo/main" if win else "/repo/main"
         self.slow = ()                   # path prefixes whose du never finishes; ("",) = every path
+        self.argvs = []                  # every argv-list command (no shell involved)
+        self.shas, self.tag_refs, self.mtree, self.conflict = {}, {}, {}, set()
+        self.tag_fails = self.mv_fails = False
+        self.rm_timeout = False          # a recursive remove that never finishes
+        self.unknown_exists = ()         # path prefixes whose existence probe fails
+        self.locked = set()
+        self.tree_main = "TREE_MAIN"
+
+    def sha(self, br):
+        return self.shas.get(br, "sha-" + br)
+
+    def run_argv(self, argv, timeout=None):
+        """The shell-free path: git refs and paths arrive as separate arguments."""
+        self.argvs.append(list(argv))
+        if argv[0] == "git" and any("\\" in a for a in argv[3:]):
+            return 128, ""                 # a ref never contains a backslash
+        return self.run(" ".join(argv), timeout)
 
     def slow_du(self, cmd):
         c = n(cmd.replace('"', "").replace("'", ""))
@@ -76,6 +93,10 @@ class SimHost:
             return 0, f"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 9 9 {int(self.free * 1024 * 1024)} 1% /m\n"
         if c.startswith("python -c") and "shutil" in c:
             return 0, str(int(self.free * GB)) + "\n"
+        if self.rm_timeout and re.match(r"(rm -r --|rmdir /S /Q) ", c):
+            raise subprocess.TimeoutExpired(cmd, timeout or 60)
+        if any(x and x in c for x in self.unknown_exists) and re.match(r"(test -e|if exist)", c):
+            return 1, ""
         m = re.match(r"du -sk (.+)$", c)
         if m:
             return 0, f"{self.total(m.group(1)) // 1024}\t{m.group(1)}\n"
@@ -85,6 +106,24 @@ class SimHost:
         if m:
             e = self.fs.get(n(m.group(1)))
             return (0, f"{e['mtime']}\n") if e else (1, "")
+        m = re.match(r"find (.+?) -mindepth 1 -maxdepth 1 -print0$", c)
+        if m:
+            return 0, "".join(x + "\0" for x in self.children(m.group(1)))
+        m = re.match(r"test -L (.+?) &&", c) or re.search(r"Get-Item -LiteralPath (.+?) -Force\)\.Attributes", c)
+        if m:
+            e = self.fs.get(n(m.group(1)))
+            return 0, "yes\n" if e and e["type"] == "link" else "no\n"
+        m = re.search(r"Get-Item -LiteralPath (.+?) -Force\)\.PSIsContainer", c)
+        if m:
+            e = self.fs.get(n(m.group(1)))
+            return (0, "False\n" if e and e.get("ltype") == "file" else "True\n") if e else (1, "")
+        m = re.match(r"realpath -m -- (.+)$", c) or re.match(r"python -c .*os\.path\.realpath.*? (\S+)$", c)
+        if m:
+            p = n(m.group(1))
+            for k, e in sorted(self.fs.items(), key=lambda kv: -len(kv[0])):
+                if e["type"] == "link" and (p == k or p.startswith(k + "/")):
+                    return 0, e["target"] + p[len(k):] + "\n"
+            return 0, p + "\n"
         m = re.match(r"(?:ls -1|dir /B) (.+)$", c)
         if m:
             return 0, "\n".join(self.children(m.group(1))) + "\n"
@@ -105,10 +144,13 @@ class SimHost:
         if c.startswith("del "):
             self.fs.pop(n(c[4:]), None)
             return 0, ""
+        if c.startswith("rmdir ") and not c.startswith("rmdir /S"):
+            self.fs.pop(n(c[6:]), None)          # a plain rmdir on a link removes only the link
+            return 0, ""
         if c.endswith("gatetrain-unlink.cmd"):
             if not self.unlink_noop:
                 for l in self.scripts[n(c)].splitlines():
-                    m = re.match(r"rmdir (.+?) 2>nul", l.replace("\\", "/").replace('"', ""))
+                    m = re.match(r"(?:rmdir|del) (.+?)(?: 2>nul.*)?$", l.replace("\\", "/").replace('"', ""))
                     if m:
                         self.fs.pop(n(m.group(1)), None)       # rmdir on a link removes only the link
             return 0, ""
@@ -117,6 +159,8 @@ class SimHost:
             self.rm_tree(m.group(1), follow_links=True)     # the dangerous kind: follows what is still linked
             return 0, ""
         m = re.match(r"(?:mv --|move) (.+?) (.+)$", c)
+        if m and self.mv_fails:
+            return 1, ""
         if m:
             for k in self.under(m.group(1)):
                 self.fs[n(m.group(2)) + k[len(n(m.group(1))):]] = self.fs.pop(k)
@@ -144,12 +188,33 @@ class SimHost:
         if a == "status --porcelain":
             return 0, ("M x\n" if repo in self.dirty else "")
         if a.startswith("worktree list"):
-            return 0, "\n".join(f"worktree {w[0]}\nHEAD abc\nbranch refs/heads/{w[1]}\n" for w in self.worktrees)
+            return 0, "\n".join(f"worktree {w[0]}\nHEAD abc\nbranch refs/heads/{w[1]}\n" + ("locked\n" if n(w[0]) in self.locked else "") for w in self.worktrees)
         if a == "branch --list":
             return 0, "\n".join("  " + b for b in self.branches) + "\n"
         m = re.match(r"merge-base --is-ancestor (\S+) (\S+)", a)
         if m:
             return (0 if m.group(1) in self.ancestors else 1), ""
+        m = re.match(r"rev-parse --verify --quiet refs/heads/(\S+?)\^\{commit\}$", a)
+        if m:
+            return (0, self.sha(m.group(1)) + "\n") if m.group(1) in self.branches else (1, "")
+        m = re.match(r"rev-parse --verify --quiet refs/tags/(\S+?)\^\{commit\}$", a)
+        if m:
+            return (0, self.tag_refs[m.group(1)] + "\n") if m.group(1) in self.tag_refs else (1, "")
+        m = re.match(r"rev-parse --verify (\S+)\^\{tree\}$", a)
+        if m:
+            return 0, self.tree_main + "\n"
+        m = re.match(r"merge-tree --write-tree (\S+) (\S+)$", a)
+        if m:
+            if m.group(2) in self.conflict:
+                return 1, "TREE_C\n"
+            return 0, self.mtree.get(m.group(2), "TREE_OTHER") + "\n"
+        m = re.match(r"update-ref -d refs/heads/(\S+) (\S+)$", a)
+        if m:
+            if self.sha(m.group(1)) != m.group(2):
+                return 1, ""
+            self.deleted_branches.append(m.group(1))
+            self.branches = [b for b in self.branches if b != m.group(1)]
+            return 0, ""
         m = re.match(r"diff --unified=0 --no-color (\S+)\.\.\.(\S+)", a)
         if m:
             return 0, self.diffs.get(m.group(2), "")
@@ -162,7 +227,13 @@ class SimHost:
             self.worktrees = [w for w in self.worktrees if n(w[0]) != n(m.group(1))]
             return 0, ""
         if a.startswith("tag "):
-            self.tags.append(a.split()[1])
+            if self.tag_fails:
+                return 128, ""
+            parts = a.split()
+            if parts[1] in self.tag_refs:
+                return 128, ""
+            self.tags.append(parts[1])
+            self.tag_refs[parts[1]] = parts[2] if len(parts) > 2 else ""
             return 0, ""
         m = re.match(r"branch -D (\S+)", a)
         if m:
@@ -231,6 +302,7 @@ def linux_sim():
     s.diffs = {"line/lane-a": "--- a/f.rs\n+++ b/f.rs\n@@ -0,0 +1,2 @@\n+let x = 1;\n+let y = 2;\n",
                "line/lane-b": "--- a/f.rs\n+++ b/f.rs\n@@ -0,0 +1 @@\n+let z = 3;\n"}
     s.ancestors = {"line/lane-c", "line/lane-d", "line/lane-new", "main"}
+    s.mtree = {"line/lane-a": s.tree_main}                  # merging lane-a into main changes nothing
     s.add("/trash", age_s=0)
     s.add("/trash/old", age_s=10 * DAY); s.add("/trash/old/x", "file", 50 * MB, 10 * DAY)
     s.add("/trash/new", age_s=DAY); s.add("/trash/new/x", "file", 5 * MB, DAY)
@@ -248,7 +320,8 @@ BASE = {"main_checkout": "/repo/main", "root_checkout": "/repo/root", "trash_dir
         "target_roots": ["/build/targets"], "targets": [{"path": "/build/chain", "budget_gb": 1}]}
 
 WIN_EXTRA = {"main_checkout": "C:/repo/main", "root_checkout": "C:/repo/root", "scratch_dir": "C:/tmp", "target_roots": [], "targets": [],
-             "trash_dir": "C:/trash", "container_prefix": "x-", "image_patterns": [], "cache_days": 0, "keep_lanes": []}
+             "trash_dir": "C:/trash", "container_prefix": "x-", "image_patterns": [], "cache_days": 0, "keep_lanes": [],
+             "link_canary": "C:/canary", "link_canary_count": 1}
 
 
 def hostcfg(extra=None, win=False, mins=50):
@@ -460,6 +533,9 @@ class ApplyTests(unittest.TestCase):
         return T.apply_plan(h, sim, t, inv, classes, now=NOW), t
 
     def records(self):
+        return [r for r in self.all_records() if r["status"] != "intent"]
+
+    def all_records(self):
         return [json.loads(l) for l in Path(self.log).read_text().splitlines()]
 
     def test_quiet_clean_refusal_is_detected_and_fixed(self):
@@ -504,9 +580,12 @@ class ApplyTests(unittest.TestCase):
         sim.add("C:/repo/wt/lane-a", age_s=DAY)
         sim.add("C:/repo/wt/lane-a/src.rs", "file", 5, DAY)
         sim.add("C:/repo/wt/lane-a/node_modules", "link", target="C:/repo/main/node_modules")
+        sim.add("C:/canary", age_s=0)
+        sim.add("C:/canary/l1", "link", target="C:/repo/main/a.rs")
         sim.worktrees = [("C:/repo/main", "main"), ("C:/repo/wt/lane-a", "line/lane-a")]
         sim.branches = ["main", "line/lane-a"]
         sim.ancestors = {"line/lane-a", "main"}
+        sim.mtree = {"line/lane-a": sim.tree_main}
         return sim
 
     def test_windows_worktree_links_unlinked_and_main_untouched(self):
@@ -550,8 +629,6 @@ class ApplyTests(unittest.TestCase):
 
     def test_canary_must_return_expected_count(self):
         sim = self._win_sim()
-        sim.add("C:/canary", age_s=0)
-        sim.add("C:/canary/l1", "link", target="C:/repo/main/a.rs")
         with self.assertRaises(T.GuardViolation):
             gather(sim, dict(WIN_EXTRA, link_canary="C:/canary", link_canary_count=2), win=True)
         gather(sim, dict(WIN_EXTRA, link_canary="C:/canary", link_canary_count=1), win=True)
@@ -606,7 +683,7 @@ class ApplyTests(unittest.TestCase):
         self.run_apply(sim, ["trash"])
         text = Path(self.log).read_text()
         self.assertTrue(text.startswith(first))                              # appended, never rewritten
-        recs = [json.loads(l) for l in text.splitlines()]
+        recs = [r for r in map(json.loads, text.splitlines()) if r["status"] != "intent"]
         self.assertEqual([r["class"] for r in recs], ["containers", "trash"])
         for r in recs:
             self.assertTrue({"ts", "host", "action", "item", "before_bytes", "after_bytes", "status"} <= set(r))
