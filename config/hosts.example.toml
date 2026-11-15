@@ -103,6 +103,8 @@ generated_dirs = ["generated", "docs/_generated"]
 [tidy]                      # gatetrain check / tidy: see README "Tidy and check"
 main_checkout = "/srv/repo/main"
 root_checkout = "/srv/repo/root"
+worktree_prefix = "wt-"                   # folder-name prefix: /srv/wt/wt-lane-x is lane "lane-x" (a path here is refused)
+keep_lanes = ["lane-x"]                   # a lane to keep; an entry that matches no worktree or target is reported by `check`
 target_roots = ["/srv/build/targets"]     # one child folder per lane, named after the lane
 targets = [{ path = "/srv/build/chain", budget_gb = 300 }]
 trash_dir = "/srv/trash"

@@ -86,7 +86,7 @@ fn the_size_a_target_folder_reached_is_recorded_per_run_and_becomes_the_predicti
     let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(&target), "--", python(), "-c", &script]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     let hist = Ledger::open(&d.path().join("gatetrain.db")).unwrap().step_memory_history().unwrap();
-    let key = gatetrain_core::disk::step_key(&fwd(&target));
+    let key = gatetrain_core::disk::step_key(&gatetrain_core::disk::canon(&fwd(&target)));
     let mb = hist[&key][0];
     assert!((mb - 3.0).abs() < 0.05, "recorded {mb} MB under {key}");
     assert!(out(&o).contains("TARGET r1"), "{}", out(&o));

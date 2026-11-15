@@ -462,6 +462,13 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             inv.breaches.push(format!("{} browser-profile file(s) inside {}", inv.profiles.len(), root));
         }
     }
+    let mut names: HashSet<String> = inv.worktrees.iter().map(|w| lane_of(&w.path, cfg).to_lowercase()).collect();
+    names.extend(inv.targets.iter().filter_map(|t| t.lane.as_ref()).map(|l| l.to_lowercase()));
+    for kl in &cfg.keep_lanes {
+        if !names.contains(&kl.to_lowercase()) {
+            inv.breaches.push(format!("keep_lanes entry {} matches no worktree or target (worktree_prefix {}); it protects nothing", crate::pycompat::repr_str(kl), crate::pycompat::repr_str(&cfg.worktree_prefix)));
+        }
+    }
     Ok(inv)
 }
 

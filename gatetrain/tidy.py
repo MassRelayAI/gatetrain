@@ -95,6 +95,12 @@ def build_cfg(cfg, host) -> TidyCfg:
     for i, x in enumerate(t.targets):
         if not isinstance(x, dict) or not isinstance(x.get("path"), str):
             raise ConfigError(f"tidy.targets[{i}]: needs a table with a path")
+    if any(c in t.worktree_prefix for c in "/\\"):
+        raise ConfigError(f"tidy.worktree_prefix: {t.worktree_prefix!r} holds a path separator; it is a prefix of the worktree FOLDER NAME "
+                          "(for example \"wt-\"), compared with the last part of each worktree path")
+    for k in [t.main_checkout, t.root_checkout] + list(t.keep_paths):
+        if k and (k.startswith("\\\\") or k.replace("\\", "/").startswith("//")):
+            raise ConfigError(f"tidy: the path {k!r} is a UNC or extended-length (\\\\?\\) spelling; write the drive path (C:/dir) so the keep list compares like the removal guards")
     if not SAFE_BRANCH.match(t.main_branch):
         raise ConfigError(f"tidy.main_branch: {t.main_branch!r} is not a plain branch name")
     if d and dr.host_os(host) == "windows" and (not t.link_canary or t.link_canary_count is None):
@@ -316,6 +322,8 @@ class Ops:
             names = [l.strip() for l in out.splitlines() if l.strip()] if rc == 0 else []
         else:
             rc, out = self.run(f"find {self.q(p)} -mindepth 1 -maxdepth 1 -print0")
+            if rc != 0:
+                raise GuardViolation(f"listing {p} failed (rc {rc}); a failed listing is never read as an empty folder")
             names = []
             pre = p.replace("\\", "/").rstrip("/") + "/"
             for r in ([x for x in out.split("\0") if x] if rc == 0 else []):
@@ -347,6 +355,8 @@ class Ops:
 
     def worktrees(self):
         rc, out = self.git(self.cfg.main_checkout, "worktree", "list", "--porcelain")
+        if rc != 0:
+            raise GuardViolation("git worktree list failed; an unreadable git is never read as 'no worktrees'")
         res, cur = [], None
         for line in out.splitlines() + [""]:
             if line.startswith("worktree "):
@@ -362,20 +372,24 @@ class Ops:
 
     def branches(self):
         rc, out = self.git(self.cfg.main_checkout, "branch", "--list")
-        return [l.strip().lstrip("*+ ").strip() for l in out.splitlines() if l.strip()] if rc == 0 else []
+        if rc != 0:
+            raise GuardViolation("git branch --list failed; an unreadable git is never read as 'no branches'")
+        return [l.strip().lstrip("*+ ").strip() for l in out.splitlines() if l.strip()]
 
-    def merged(self, branch):
+    def merged(self, branch, sha=False):
         """True only when merging the branch into main would change nothing: an ancestor, or the merge result's tree equals main's tree
         (git merge-tree --write-tree, git 2.38+). A conflict, an older git or any failure is not merged; an unusable name is unknown."""
         m, mb = self.cfg.main_checkout, self.cfg.main_branch
         if not SAFE_BRANCH.match(branch):
             return None
-        if self.git(m, "merge-base", "--is-ancestor", branch, mb)[0] == 0:
+        ref = branch if sha else "refs/heads/" + branch       # a bare name could be a tag or a path: only a branch or a sha is proved
+        mref = "refs/heads/" + mb
+        if self.git(m, "merge-base", "--is-ancestor", ref, mref)[0] == 0:
             return True
-        rc, tree = self.git(m, "rev-parse", "--verify", mb + "^{tree}")
+        rc, tree = self.git(m, "rev-parse", "--verify", mref + "^{tree}")
         if rc != 0 or not tree.strip():
             return None
-        rc, out = self.git(m, "merge-tree", "--write-tree", mb, branch)
+        rc, out = self.git(m, "merge-tree", "--write-tree", mref, ref)
         lines = out.splitlines()
         return rc == 0 and bool(lines) and lines[0].strip() == tree.strip()
 
@@ -493,6 +507,7 @@ class Ops:
                 raise GuardViolation(f"{p} (a link) still exists after removal")
             self.assert_main(before)
             return "ok", "link removed; its target was not touched"
+        targets = [(l, self.rp(l)) for l in self.list_links(p)]        # where every link inside points, before anything is removed
         self.unlink_all(p)
         rc, _ = self.run(f"rmdir /S /Q {self.q(p)}" if self.win else f"rm -r -- {self.q(p)}", timeout=self.cfg.remove_timeout_s)
         if rc == TIMEOUT:
@@ -502,6 +517,9 @@ class Ops:
                                + ("still there" if e else "gone" if e is False else "unknown") + "; not counted as done")
         if not self.gone(p):
             raise GuardViolation(f"{p} still exists after removal")
+        for l, t in targets:
+            if t is not None and self.exists(t) is not True:
+                raise GuardViolation(f"the target {t} of the link {l} is gone after removing {p}; stopping")
         self.assert_main(before)
         return "ok", "removed"
 
@@ -737,6 +755,10 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                 inv.profiles.append(l.strip())
         if inv.profiles:
             inv.breaches.append(f"{len(inv.profiles)} browser-profile file(s) inside {root}")
+    names = {lane_of(w["path"], cfg).lower() for w in inv.worktrees} | {str(t["lane"]).lower() for t in inv.targets if t.get("lane")}
+    for kl in cfg.keep_lanes:
+        if kl.lower() not in names:
+            inv.breaches.append(f"keep_lanes entry {kl!r} matches no worktree or target (worktree_prefix {cfg.worktree_prefix!r}); it protects nothing")
     return inv
 
 
@@ -916,6 +938,8 @@ def clean_target(ops, cfg, it):
     rc, _ = ops.run_argv(cmd, cfg.remove_timeout_s)
     if rc == TIMEOUT:
         return None, "stopped", f"cargo clean did not finish in {cfg.remove_timeout_s:g}s; not counted as done"
+    if rc != 0:
+        return ops.size(p), "failed", f"cargo clean exited {rc}"
     after = ops.size(p)
     note = "cargo clean"
     if before is None:
@@ -926,7 +950,11 @@ def clean_target(ops, cfg, it):
         note = ""
         if d <= 0.001 and "CACHEDIR.TAG" not in ops.listdir(p):
             ops.runner.put_file(ops.join(p, "CACHEDIR.TAG"), CARGO_TAG)
-            ops.run_argv(cmd, cfg.remove_timeout_s)
+            rc, _ = ops.run_argv(cmd, cfg.remove_timeout_s)
+            if rc == TIMEOUT:
+                return None, "stopped", f"the cargo clean rerun did not finish in {cfg.remove_timeout_s:g}s; not counted as done"
+            if rc != 0:
+                return after, "failed", f"the cargo clean rerun exited {rc}"
             fa = ops.free_gb(p)
             d = (fa - fb) if fa is not None else None
             note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran; "
@@ -940,7 +968,11 @@ def clean_target(ops, cfg, it):
     names = ops.listdir(p) if after else []
     if before and after >= before * 0.99 and is_cargo(names) and "CACHEDIR.TAG" not in names:
         ops.runner.put_file(ops.join(p, "CACHEDIR.TAG"), CARGO_TAG)
-        ops.run_argv(cmd, cfg.remove_timeout_s)
+        rc, _ = ops.run_argv(cmd, cfg.remove_timeout_s)
+        if rc == TIMEOUT:
+            return None, "stopped", f"the cargo clean rerun did not finish in {cfg.remove_timeout_s:g}s; not counted as done"
+        if rc != 0:
+            return after, "failed", f"the cargo clean rerun exited {rc}"
         after = ops.size(p)
         note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran"
         if after is None:
@@ -968,7 +1000,7 @@ def remove_worktree(ops, cfg, it):
     sha = out.strip()
     if rc != 0 or not re.fullmatch(r"\S+", sha):          # exactly one token
         raise GuardViolation(f"cannot resolve branch {br} to one commit")
-    if ops.merged(sha) is not True:                         # proved on the very commit that is archived and deleted
+    if ops.merged(sha, sha=True) is not True:                         # proved on the very commit that is archived and deleted
         raise GuardViolation(f"branch {br} ({sha}) is not on {cfg.main_branch}")
     before = ops.snapshot_main()
     tag = f"archive/{br}"
@@ -983,15 +1015,14 @@ def remove_worktree(ops, cfg, it):
     rc, got = ops.git(m, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}")
     if rc != 0 or got.strip() != sha:
         raise GuardViolation(f"archive tag {tag} does not point at {sha}; branch and worktree kept")
-    ops.unlink_all(p)
-    rc, _ = ops.git(m, "worktree", "remove", p, timeout=cfg.remove_timeout_s)
-    if rc == TIMEOUT:
-        e = ops.exists(p)
-        ops.assert_main(before)
-        return None, "stopped", (f"git worktree remove did not finish in {cfg.remove_timeout_s:g}s; re-probe: "
-                                 + ("still there" if e else "gone" if e is False else "unknown") + f"; branch {br} kept, archived as {tag}")
-    if not ops.gone(p):
-        raise GuardViolation(f"{p} still exists after git worktree remove")
+    # the folder goes by a removal that never follows a link (`git worktree remove` may), links first and their targets checked after;
+    # git is then told the folder is gone
+    status, note = ops.remove_dir(p)
+    if status != "ok":
+        return None, "stopped", f"{note}; branch {br} kept, archived as {tag}"
+    rc, _ = ops.git(m, "worktree", "prune", timeout=cfg.remove_timeout_s)
+    if rc != 0:
+        raise GuardViolation(f"git worktree prune failed after removing {p}; branch {br} kept, archived as {tag}")
     rc, _ = ops.git(m, "update-ref", "-d", f"refs/heads/{br}", sha)
     if rc != 0:
         raise GuardViolation(f"branch {br} no longer points at {sha} (or could not be deleted); it is kept, archived as {tag}")

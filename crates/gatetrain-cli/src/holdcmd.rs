@@ -183,13 +183,15 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
         }
     }
     if let (Some(h), Some(n)) = (&a.hosts, &a.host) {
-        let disks = disk::disks_from_hosts_toml(&std::fs::read_to_string(h)?, n)?;
+        // both sides are canonicalised before matching: a relative spelling, a link or a short name must not slip past the rule
+        let disks: Vec<disk::DiskRule> = disk::disks_from_hosts_toml(&std::fs::read_to_string(h)?, n)?.into_iter().map(|d| disk::DiskRule { path: disk::canon(&d.path), ..d }).collect();
         if !disks.is_empty() {
             let hist = Ledger::open(&a.db)?.step_memory_history()?;
             for t in &a.target_dir {
-                let key = disk::step_key(&t.to_string_lossy());
+                let tc = disk::canon(&t.to_string_lossy());
+                let key = disk::step_key(&tc);
                 let predicted_mb = memory::typical_mb(hist.get(&key).map(Vec::as_slice).unwrap_or(&[]));
-                let ad = disk::admit(&disks, &t.to_string_lossy(), predicted_mb, &disk::free_gb);
+                let ad = disk::admit(&disks, &tc, predicted_mb, &disk::free_gb);
                 say(&a.log, &format!("DISK {}", ad.rule))?;
                 if !ad.admitted {
                     let ev = json!({"target_dir": t.display().to_string(), "disk": ad.disk, "free_mb": ad.free_gb.map(|f| (f * 1024.0).round() as i64), "predicted_mb": (ad.predicted_gb * 1024.0).round() as i64, "min_free_mb": (ad.min_free_gb * 1024.0).round() as i64, "rule": "free - predicted target size >= min_free_gb"});
@@ -289,7 +291,7 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
     for t in &a.target_dir {
         // the size this folder reached is the prediction of the next run (the median of what is recorded)
         let mb = disk::dir_size_mb(t);
-        let _ = Ledger::open(&a.db).and_then(|l| l.record_step_peak(&run_id, &disk::step_key(&t.to_string_lossy()), mb, "target-size", &hold::now_iso()));
+        let _ = Ledger::open(&a.db).and_then(|l| l.record_step_peak(&run_id, &disk::step_key(&disk::canon(&t.to_string_lossy())), mb, "target-size", &hold::now_iso()));
         let _ = say(&a.log, &format!("TARGET {run_id} {} {mb:.0} MB", t.display()));
     }
     let pid = lock.info.pid;

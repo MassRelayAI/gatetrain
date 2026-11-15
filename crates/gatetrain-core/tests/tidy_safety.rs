@@ -319,7 +319,7 @@ fn windows_worktree_links_unlinked_and_main_untouched() {
     assert!(!sim.s().has("C:/repo/wt/lane-a"));
     let calls = sim.calls();
     let i_unlink = calls.iter().position(|c| c.ends_with("gatetrain-unlink.cmd\"")).unwrap();
-    let i_remove = calls.iter().position(|c| c.contains("worktree remove")).unwrap();
+    let i_remove = calls.iter().position(|c| c.contains("rmdir /S /Q")).unwrap();
     assert!(i_unlink < i_remove, "links are unlinked before the worktree is removed");
     assert!(calls.iter().any(|c| c.starts_with("dir /AL /S /B")));
     assert!(sim.s().tags.contains(&"archive/line/lane-a".to_string()));
@@ -337,8 +337,9 @@ fn archive_tag_comes_before_worktree_remove_and_branch_delete() {
     apply_plan(&h, &sim, &t, &inv, &["worktrees".to_string()], Some(NOW as f64), None, false).unwrap();
     let calls = sim.calls();
     let pos = |needle: &str| calls.iter().position(|c| c.contains(needle)).unwrap_or_else(|| panic!("no call with {needle}"));
-    assert!(pos("tag archive/line/lane-a") < pos("worktree remove"));
-    assert!(pos("worktree remove") < pos("update-ref -d refs/heads/line/lane-a"));
+    assert!(pos("tag archive/line/lane-a") < pos("rmdir /S /Q"));
+    assert!(pos("rmdir /S /Q") < pos("worktree prune"));
+    assert!(pos("worktree prune") < pos("update-ref -d refs/heads/line/lane-a"));
     assert!(!calls.iter().any(|c| c.contains("branch -D")), "the branch is deleted by ref and sha, never by name");
 }
 
@@ -350,7 +351,7 @@ fn linux_worktree_symlinks_are_unlinked_by_exact_path_before_removal() {
     assert_eq!(r.unwrap(), (2, 0));
     let calls = sim.calls();
     let i_unlink = calls.iter().position(|c| c == "unlink /repo/wt/lane-a/node_modules").expect("unlink by exact path");
-    let i_remove = calls.iter().position(|c| c.starts_with("git -C /repo/main worktree remove /repo/wt/lane-a")).unwrap();
+    let i_remove = calls.iter().position(|c| c.starts_with("rm -r -- /repo/wt/lane-a")).unwrap();
     assert!(i_unlink < i_remove);
     assert!(sim.s().has("/repo/main/node_modules/pkg.js"));
 }
@@ -402,7 +403,7 @@ fn canary_must_return_expected_count() {
 fn main_checkout_change_is_caught() {
     let sim = win_sim();
     sim.post(Box::new(|st, cmd| {
-        if cmd.contains("worktree remove") {
+        if cmd.contains("rmdir /S") {
             st.pop("C:/repo/main/a.rs"); // something deletes a tracked file meanwhile
         }
     }));

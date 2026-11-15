@@ -195,6 +195,9 @@ pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     if c.rc.is_none() {
         return Ok((None, "stopped", format!("cargo clean did not finish in {}s; not counted as done", fmt_g(cfg.remove_timeout_s))));
     }
+    if !c.ok() {
+        return Ok((ops.size(p)?, "failed", format!("cargo clean exited {}", c.rc.unwrap_or(-1))));
+    }
     let mut after = ops.size(p)?;
     let mut note = "cargo clean".to_string();
     let tag = || cargo_tag();
@@ -207,7 +210,13 @@ pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
         note = String::new();
         if d.unwrap() <= 0.001 && !ops.listdir(p)?.iter().any(|n| n == "CACHEDIR.TAG") {
             ops.runner.put_file(&ops.join(p, "CACHEDIR.TAG"), &tag())?;
-            ops.run_argv(&cmd, Some(cfg.remove_timeout_s))?;
+            let c2 = ops.run_argv(&cmd, Some(cfg.remove_timeout_s))?;
+            if c2.rc.is_none() {
+                return Ok((None, "stopped", format!("the cargo clean rerun did not finish in {}s; not counted as done", fmt_g(cfg.remove_timeout_s))));
+            }
+            if !c2.ok() {
+                return Ok((after, "failed", format!("the cargo clean rerun exited {}", c2.rc.unwrap_or(-1))));
+            }
             fa = ops.free_gb(p)?;
             d = fa.map(|fa| fa - fb);
             note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran; ".into();
@@ -225,7 +234,13 @@ pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     let names = if after.map(|a| a != 0).unwrap_or(false) { ops.listdir(p)? } else { vec![] };
     if before_v != 0 && after.unwrap_or(0) as f64 >= before_v as f64 * 0.99 && is_cargo(&names) && !names.iter().any(|n| n == "CACHEDIR.TAG") {
         ops.runner.put_file(&ops.join(p, "CACHEDIR.TAG"), &tag())?;
-        ops.run_argv(&cmd, Some(cfg.remove_timeout_s))?;
+        let c2 = ops.run_argv(&cmd, Some(cfg.remove_timeout_s))?;
+        if c2.rc.is_none() {
+            return Ok((None, "stopped", format!("the cargo clean rerun did not finish in {}s; not counted as done", fmt_g(cfg.remove_timeout_s))));
+        }
+        if !c2.ok() {
+            return Ok((after, "failed", format!("the cargo clean rerun exited {}", c2.rc.unwrap_or(-1))));
+        }
         after = ops.size(p)?;
         note = "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran".into();
         if after.is_none() {
@@ -259,7 +274,7 @@ pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     if !r.ok() || sha.is_empty() || sha.contains(char::is_whitespace) {
         return guard(format!("cannot resolve branch {br} to one commit"));
     }
-    if ops.merged(&sha)? != Some(true) {
+    if ops.merged_sha(&sha)? != Some(true) {
         // proved on the very commit that is archived and deleted
         return guard(format!("branch {br} ({sha}) is not on {}", cfg.main_branch));
     }
@@ -280,19 +295,15 @@ pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     if !got.ok() || crate::pycompat::strip(&got.out) != sha {
         return guard(format!("archive tag {tag} does not point at {sha}; branch and worktree kept"));
     }
-    ops.unlink_all(p)?;
-    let w = ops.git_to(m, &["worktree", "remove", p], Some(cfg.remove_timeout_s))?;
-    if w.rc.is_none() {
-        let e = ops.exists(p)?;
-        ops.assert_main(before)?;
-        return Ok((
-            None,
-            "stopped",
-            format!("git worktree remove did not finish in {}s; re-probe: {}; branch {br} kept, archived as {tag}", fmt_g(cfg.remove_timeout_s), super::ops::probe_word(e)),
-        ));
+    // the folder goes by a removal that never follows a link (`git worktree remove` may), links first and their targets checked after;
+    // git is then told the folder is gone
+    let (status, note) = ops.remove_dir(p)?;
+    if status != "ok" {
+        return Ok((None, "stopped", format!("{note}; branch {br} kept, archived as {tag}")));
     }
-    if !ops.gone(p)? {
-        return guard(format!("{p} still exists after git worktree remove"));
+    let pr = ops.git_to(m, &["worktree", "prune"], Some(cfg.remove_timeout_s))?;
+    if !pr.ok() {
+        return guard(format!("git worktree prune failed after removing {p}; branch {br} kept, archived as {tag}"));
     }
     let d = ops.git(m, &["update-ref", "-d", &format!("refs/heads/{br}"), &sha])?;
     if !d.ok() {

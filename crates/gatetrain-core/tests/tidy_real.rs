@@ -40,7 +40,7 @@ fn canary(tidy: &mut Value) {
     if !cfg!(windows) {
         return;
     }
-    let d: &'static tempfile::TempDir = Box::leak(Box::new(tmp()));
+    let d = tmp();
     let (target, c) = (d.path().join("target"), d.path().join("canary"));
     std::fs::create_dir_all(&target).unwrap();
     std::fs::create_dir_all(&c).unwrap();
@@ -48,6 +48,12 @@ fn canary(tidy: &mut Value) {
     let o = tidy.as_object_mut().unwrap();
     o.insert("link_canary".into(), json!(fwd(&c)));
     o.insert("link_canary_count".into(), json!(1));
+    // dropped when the test's thread ends: nothing is left in the temp folder
+    CANARIES.with(|c| c.borrow_mut().push(d));
+}
+
+thread_local! {
+    static CANARIES: std::cell::RefCell<Vec<tempfile::TempDir>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn real_host(mut tidy: Value) -> (Config, Host) {

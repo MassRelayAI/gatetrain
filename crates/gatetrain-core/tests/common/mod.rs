@@ -344,7 +344,8 @@ impl Sim {
         }
         let m = re(r"^test -e (.+?) &&").captures(&c).or_else(|| re(r"^if exist (.+?) \(echo").captures(&c));
         if let Some(m) = m {
-            return ok(if st.has(&m[1]) { "yes\n".into() } else { "no\n".into() });
+            let have = st.has(&m[1]) || (st.win && st.fs.iter().any(|(k, _)| k.to_lowercase() == n(&m[1]).to_lowercase())); // Windows paths compare without case
+            return ok(if have { "yes\n".into() } else { "no\n".into() });
         }
         let m = re(r"^find (.+?) -type l; echo (\w+)").captures(&c).or_else(|| re(r"^dir /AL /S /B (.+?) & echo (\w+)").captures(&c));
         if let Some(m) = m {
@@ -439,7 +440,7 @@ impl Sim {
             return ok(st.branches.iter().map(|b| format!("  {b}")).collect::<Vec<_>>().join("\n") + "\n");
         }
         if let Some(m) = re(r"^merge-base --is-ancestor (\S+) (\S+)").captures(&a) {
-            return RunOut::done(if st.ancestors.contains(&m[1].replacen("sha-", "", 1)) { 0 } else { 1 }, "");
+            return RunOut::done(if st.ancestors.contains(&m[1].replacen("refs/heads/", "", 1).replacen("sha-", "", 1)) { 0 } else { 1 }, "");
         }
         if let Some(m) = re(r"^rev-parse --verify --quiet refs/heads/(\S+?)\^\{commit\}$").captures(&a) {
             return if st.branches.iter().any(|b| *b == m[1]) { ok(format!("{}\n", st.sha(&m[1]))) } else { RunOut::done(1, "") };
@@ -454,7 +455,7 @@ impl Sim {
             return ok(format!("{}\n", st.tree_main));
         }
         if let Some(m) = re(r"^merge-tree --write-tree (\S+) (\S+)$").captures(&a) {
-            let b2 = m[2].replacen("sha-", "", 1);
+            let b2 = m[2].replacen("refs/heads/", "", 1).replacen("sha-", "", 1);
             if st.conflict.contains(&b2) {
                 return RunOut::done(1, "TREE_C\n");
             }
@@ -476,6 +477,12 @@ impl Sim {
                 Some(t) => ok(t.clone()),
                 None => RunOut::done(128, ""),
             };
+        }
+        if a == "worktree prune" {
+            let main = n(&st.main);
+            let keep: Vec<(String, String)> = st.worktrees.iter().filter(|w| st.has(&w.0) || n(&w.0) == main).cloned().collect();
+            st.worktrees = keep;
+            return ok(String::new());
         }
         if let Some(m) = re(r"^worktree remove (\S+)").captures(&a) {
             if st.wt_timeout {

@@ -639,7 +639,7 @@ class PowershellQuoteTests(Base):
 class WorktreeTimeoutTests(Base):
     def test_git_worktree_remove_timeout_is_stopped(self):
         sim = linux_sim()
-        sim.wt_timeout = True
+        sim.rm_timeout = True                    # the folder removal is what can hang (the worktree goes by a non-traversing removal, then `git worktree prune`)
         done, failed = self.apply(sim, ["worktrees"])
         self.assertEqual(done, 0)
         self.assertTrue(self.recs() and all(r["status"] == "stopped" for r in self.recs()))
@@ -651,10 +651,15 @@ class WorktreeTimeoutTests(Base):
         orig = sim.run_argv
 
         def spy(argv, timeout=None):
-            if "worktree" in argv and "remove" in argv:
-                seen.append(timeout)
             return orig(argv, timeout)
         sim.run_argv = spy
+        orig_run = sim.run
+
+        def spy_run(cmd, timeout=None):
+            if cmd.startswith("rm -r"):
+                seen.append(timeout)
+            return orig_run(cmd, timeout)
+        sim.run = spy_run
         self.apply(sim, ["worktrees"], {"remove_timeout_s": 4321})
         self.assertTrue(seen and set(seen) == {4321})
 
@@ -718,6 +723,85 @@ class RoundTwoLows(Base):
     def test_norm_keeps_case_on_posix_paths_only(self):
         self.assertEqual(T.norm("/Srv/Repo/"), "/Srv/Repo")
         self.assertEqual(T.norm("C:\\Srv\\Repo"), "c:/srv/repo")
+
+
+# ---------------------------------------------------------------- review of e2c543b (inherited holes)
+
+class ReviewFixTests(Base):
+    def test_a_worktree_prefix_with_a_separator_is_a_config_error(self):
+        for bad in ("C:/wt/lane-", "/srv/wt/lane-", "wt\\lane-"):
+            cfg, h = hostcfg({"worktree_prefix": bad})
+            with self.assertRaises(ConfigError, msg=bad):
+                T.build_cfg(cfg, h)
+
+    def test_a_keep_lanes_entry_that_matches_nothing_is_reported(self):
+        sim = linux_sim()
+        h, t, inv = gather(sim, {"keep_lanes": ["lane-c", "no-such-lane"]})
+        self.assertTrue(any("no-such-lane" in b and "protects nothing" in b for b in inv.breaches), inv.breaches)
+        self.assertFalse(any("'lane-c'" in b for b in inv.breaches))
+
+    def test_unc_and_extended_length_keep_paths_are_refused(self):
+        for bad in ("\\\\?\\C:\\repo\\keep", "\\\\server\\share\\keep", "//server/share/keep"):
+            cfg, h = hostcfg({"keep_paths": [bad]})
+            with self.assertRaises(ConfigError, msg=bad):
+                T.build_cfg(cfg, h)
+
+    def test_the_merge_proof_names_branches_by_refs_heads(self):
+        sim = linux_sim()
+        gather(sim)
+        proofs = [a for a in sim.argvs if "--is-ancestor" in a or "merge-tree" in a]
+        self.assertTrue(proofs)
+        for a in proofs:
+            for x in a[a.index("--is-ancestor") + 1:] if "--is-ancestor" in a else a[a.index("--write-tree") + 1:]:
+                self.assertTrue(x.startswith("refs/heads/") or x.startswith("sha-"), a)
+
+    def test_an_unreadable_git_is_never_read_as_no_branches_or_no_worktrees(self):
+        for part, sub in (("worktree list", "worktree"), ("branch --list", "branch")):
+            sim = linux_sim()
+            orig = sim.run_argv
+            sim.run_argv = lambda argv, timeout=None, o=orig, p=part: (128, "") if " ".join(argv).startswith("git -C /repo/main " + p) else o(argv, timeout)
+            with self.assertRaises(T.GuardViolation, msg=part):
+                gather(sim)
+
+    def test_a_failed_listing_is_not_an_empty_folder(self):
+        sim = linux_sim()
+        ops, _ = ops_for(sim)
+        orig = sim.run
+        sim.run = lambda cmd, timeout=None: (1, "") if cmd.startswith("find") else orig(cmd, timeout)
+        with self.assertRaises(T.GuardViolation):
+            ops.listdir("/trash")
+
+    def test_a_link_target_that_vanishes_during_the_removal_stops_the_run(self):
+        sim = linux_sim()
+        orig = sim.run
+
+        def evil(cmd, timeout=None):
+            rc, out = orig(cmd, timeout)
+            if cmd.startswith("rm -r") and "/repo/wt/lane-a" in cmd:
+                for k in [k for k in sim.fs if k.startswith("/repo/main/node_modules")]:
+                    sim.fs.pop(k)                       # a traversing removal emptied what the link pointed to
+            return rc, out
+        sim.run = evil
+        with self.assertRaises(T.GuardViolation) as cm:
+            self.apply(sim, ["worktrees"])
+        self.assertIn("is gone after removing", str(cm.exception))
+
+    def test_a_worktree_is_removed_by_a_plain_removal_then_pruned(self):
+        sim = linux_sim()
+        self.apply(sim, ["worktrees"])
+        calls = sim.calls
+        i_rm = next(i for i, c in enumerate(calls) if c.startswith("rm -r") and "/repo/wt/lane-a" in c)
+        i_prune = next(i for i, c in enumerate(calls) if c.endswith("worktree prune"))
+        self.assertLess(i_rm, i_prune)
+        self.assertFalse([c for c in calls if "worktree remove" in c])
+
+    def test_cargo_clean_with_a_non_zero_exit_is_a_failure_not_freed_unknown(self):
+        sim = linux_sim()
+        orig = sim.run_argv
+        sim.run_argv = lambda argv, timeout=None: (101, "error") if argv[:2] == ["cargo", "clean"] else orig(argv, timeout)
+        self.apply(sim, ["targets"])
+        rs = [r for r in self.recs() if r["action"] == "clean"]
+        self.assertTrue(rs and all(r["status"] == "failed" and "exited 101" in r["note"] for r in rs), rs)
 
 
 if __name__ == "__main__":

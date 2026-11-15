@@ -11,3 +11,9 @@ Hardened by lessons L60-L65 (no shell for local commands, one `safe_path`, merge
 A lane that was squashed into main and then edited again is now "not merged" and is kept: `merged` means an ancestor, or merging the branch into main changes nothing (`git merge-tree --write-tree`). Review such a lane by hand and remove it yourself.
 
 Status: built. See docs/method.md and docs/lessons.md for the rules this module carries.
+
+## Lane names
+
+`worktree_prefix` is a prefix of the worktree **folder name**, not a path. `/srv/wt/wt-lane-x` with `worktree_prefix = "wt-"` is the lane
+`lane-x`, which is what `keep_lanes` and the folders under `target_roots` are matched against (case-insensitively). A prefix with a path
+separator is a config error, and `check` reports a `keep_lanes` entry that matches no worktree and no target, because it protects nothing.

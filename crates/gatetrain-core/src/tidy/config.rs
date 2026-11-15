@@ -202,6 +202,17 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             return err(format!("tidy.unattended: unknown class {}; allowed {}", repr_str(c), repr_list(&CLASSES)));
         }
     }
+    if t.worktree_prefix.contains(['/', '\\']) {
+        return err(format!(
+            "tidy.worktree_prefix: {} holds a path separator; it is a prefix of the worktree FOLDER NAME (for example \"wt-\"), compared with the last part of each worktree path",
+            repr_str(&t.worktree_prefix)
+        ));
+    }
+    for k in t.main_checkout.iter().chain(t.root_checkout.iter()).chain(t.keep_paths.iter()) {
+        if k.starts_with("\\\\") || k.replace('\\', "/").starts_with("//") {
+            return err(format!("tidy: the path {} is a UNC or extended-length (\\\\?\\) spelling; write the drive path (C:/dir) so the keep list compares like the removal guards", repr_str(k)));
+        }
+    }
     if !super::ops::safe_branch(&t.main_branch) {
         return err(format!("tidy.main_branch: {} is not a plain branch name", repr_str(&t.main_branch)));
     }

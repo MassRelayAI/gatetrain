@@ -238,7 +238,8 @@ measure = "age-only"                    # du | age-only (default du)
 main_checkout = "/srv/repo/main"        # needed for lane / worktree logic
 root_checkout = "/srv/repo/root"        # pinned, never touched
 keep_paths    = ["/srv/repo/chain-wt"]  # worktrees or folders in use
-keep_lanes    = ["lane-x"]
+keep_lanes    = ["lane-x"]              # lane names are the worktree FOLDER NAME minus worktree_prefix; an entry that matches nothing is reported
+worktree_prefix = "wt-"                 # a prefix of the folder name (wt-lane-x -> lane-x), never a path: a separator is a config error
 target_roots  = ["/srv/build/targets"]  # each child folder is one lane's target, named after the lane
 targets       = [{ path = "/srv/build/chain", budget_gb = 300 }]   # a shared target: reported, cleaned only by hand
 min_idle_min  = 60                      # a folder used more recently is kept

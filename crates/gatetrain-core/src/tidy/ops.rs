@@ -367,7 +367,10 @@ impl<'a> Ops<'a> {
             let c = self.run0(&format!("find {} -mindepth 1 -maxdepth 1 -print0", self.q(p)?))?;
             let pre = format!("{}/", p.replace('\\', "/").trim_end_matches('/'));
             let mut names = vec![];
-            if c.ok() {
+            if !c.ok() {
+                return guard(format!("listing {p} failed (rc {}); a failed listing is never read as an empty folder", c.rc.map(|r| r.to_string()).unwrap_or_else(|| "timeout".into())));
+            }
+            {
                 for r in c.out.split('\0').filter(|x| !x.is_empty()) {
                     if !r.starts_with(&pre) || r.len() == pre.len() {
                         return guard(format!("find returned {}, which is not directly inside {p}; not trusted", repr_str(r)));
@@ -417,7 +420,11 @@ impl<'a> Ops<'a> {
 
     /// The worktrees of the main checkout.
     pub fn worktrees(&self) -> R<Vec<Wt>> {
-        let out = self.git(self.main()?, &["worktree", "list", "--porcelain"])?.out;
+        let c = self.git(self.main()?, &["worktree", "list", "--porcelain"])?;
+        if !c.ok() {
+            return guard("git worktree list failed; an unreadable git is never read as 'no worktrees'".into());
+        }
+        let out = c.out;
         let mut res: Vec<Wt> = vec![];
         let mut cur: Option<Wt> = None;
         let mut lines = splitlines(&out);
@@ -440,29 +447,39 @@ impl<'a> Ops<'a> {
 
     pub fn branches(&self) -> R<Vec<String>> {
         let c = self.git(self.main()?, &["branch", "--list"])?;
-        Ok(if c.ok() {
-            splitlines(&c.out).iter().filter(|l| !strip(l).is_empty()).map(|l| strip(strip(l).trim_start_matches(['*', '+', ' '])).to_string()).collect()
-        } else {
-            vec![]
-        })
+        if !c.ok() {
+            return guard("git branch --list failed; an unreadable git is never read as 'no branches'".into());
+        }
+        Ok(splitlines(&c.out).iter().filter(|l| !strip(l).is_empty()).map(|l| strip(strip(l).trim_start_matches(['*', '+', ' '])).to_string()).collect())
     }
 
     /// True only when merging the branch into main would change nothing: an ancestor, or the merge result's tree equals main's tree
     /// (git merge-tree --write-tree, git 2.38+). A conflict, an older git or any failure is not merged; an unusable name is unknown.
     pub fn merged(&self, branch: &str) -> R<Option<bool>> {
+        self.merged_ref(branch, false)
+    }
+
+    /// The same proof on a commit id (the very commit that is archived and deleted).
+    pub fn merged_sha(&self, sha: &str) -> R<Option<bool>> {
+        self.merged_ref(sha, true)
+    }
+
+    fn merged_ref(&self, branch: &str, sha: bool) -> R<Option<bool>> {
         let m = self.main()?;
-        let mb = self.cfg.main_branch.as_str();
         if !safe_branch(branch) {
             return Ok(None);
         }
-        if self.git(m, &["merge-base", "--is-ancestor", branch, mb])?.ok() {
+        // a bare name could be a tag or a path: only `refs/heads/<name>` or a commit id is proved
+        let r = if sha { branch.to_string() } else { format!("refs/heads/{branch}") };
+        let mb = format!("refs/heads/{}", self.cfg.main_branch);
+        if self.git(m, &["merge-base", "--is-ancestor", &r, &mb])?.ok() {
             return Ok(Some(true));
         }
         let t = self.git(m, &["rev-parse", "--verify", &format!("{mb}^{{tree}}")])?;
         if !t.ok() || strip(&t.out).is_empty() {
             return Ok(None);
         }
-        let o = self.git(m, &["merge-tree", "--write-tree", mb, branch])?;
+        let o = self.git(m, &["merge-tree", "--write-tree", &mb, &r])?;
         let lines = splitlines(&o.out);
         Ok(Some(o.ok() && !lines.is_empty() && strip(&lines[0]) == strip(&t.out)))
     }
@@ -622,6 +639,11 @@ impl<'a> Ops<'a> {
             self.assert_main(before)?;
             return Ok(("ok", "link removed; its target was not touched".into()));
         }
+        let mut targets: Vec<(String, Option<String>)> = vec![]; // where every link inside points, before anything is removed
+        for l in self.list_links(p)? {
+            let t = self.rp(&l)?;
+            targets.push((l, t));
+        }
         self.unlink_all(p)?;
         let c = self.run(&if self.win { format!("rmdir /S /Q {}", self.q(p)?) } else { format!("rm -r -- {}", self.q(p)?) }, Some(self.cfg.remove_timeout_s))?;
         if c.rc.is_none() {
@@ -631,6 +653,13 @@ impl<'a> Ops<'a> {
         }
         if !self.gone(p)? {
             return guard(format!("{p} still exists after removal"));
+        }
+        for (l, t) in &targets {
+            if let Some(t) = t {
+                if self.exists(t)? != Some(true) {
+                    return guard(format!("the target {t} of the link {l} is gone after removing {p}; stopping"));
+                }
+            }
         }
         self.assert_main(before)?;
         Ok(("ok", "removed".into()))

@@ -132,7 +132,8 @@ class SimHost:
             return 0, "\n".join(self.children(m.group(1))) + "\n"
         m = re.match(r"test -e (.+?) &&", c) or re.match(r"if exist (.+?) \(echo", c)
         if m:
-            return 0, "yes\n" if n(m.group(1)) in self.fs else "no\n"
+            have = n(m.group(1)) in self.fs or (self.win and n(m.group(1)).lower() in {k.lower() for k in self.fs})     # Windows paths compare without case
+            return 0, "yes\n" if have else "no\n"
         m = re.match(r"find (.+?) -type l; echo (\w+)", c) or re.match(r"dir /AL /S /B (.+?) & echo (\w+)", c)
         if m:
             if self.broken_links:
@@ -197,7 +198,7 @@ class SimHost:
             return 0, "\n".join("  " + b for b in self.branches) + "\n"
         m = re.match(r"merge-base --is-ancestor (\S+) (\S+)", a)
         if m:
-            return (0 if m.group(1).replace("sha-", "", 1) in self.ancestors else 1), ""
+            return (0 if m.group(1).replace("refs/heads/", "", 1).replace("sha-", "", 1) in self.ancestors else 1), ""
         m = re.match(r"rev-parse --verify --quiet refs/heads/(\S+?)\^\{commit\}$", a)
         if m:
             return (0, self.sha(m.group(1)) + "\n") if m.group(1) in self.branches else (1, "")
@@ -209,7 +210,7 @@ class SimHost:
             return 0, self.tree_main + "\n"
         m = re.match(r"merge-tree --write-tree (\S+) (\S+)$", a)
         if m:
-            b2 = m.group(2).replace("sha-", "", 1)
+            b2 = m.group(2).replace("refs/heads/", "", 1).replace("sha-", "", 1)
             if b2 in self.conflict:
                 return 1, "TREE_C\n"
             return 0, self.mtree.get(b2, "TREE_OTHER") + "\n"
@@ -226,6 +227,9 @@ class SimHost:
         m = re.match(r"show (\S+?):(\S+)$", a)
         if m:
             return (0, self.shown[m.group(2)]) if m.group(2) in self.shown else (128, "")
+        if a == "worktree prune":
+            self.worktrees = [w for w in self.worktrees if n(w[0]) in self.fs or n(w[0]) == n(self.main)]
+            return 0, ""
         m = re.match(r"worktree remove (\S+)", a)
         if m and self.wt_timeout:
             raise subprocess.TimeoutExpired(c, 60)
@@ -609,7 +613,7 @@ class ApplyTests(unittest.TestCase):
         self.assertNotIn("C:/repo/wt/lane-a", sim.fs)
         calls = sim.calls
         i_unlink = next(i for i, c in enumerate(calls) if c.endswith('gatetrain-unlink.cmd"'))
-        i_remove = next(i for i, c in enumerate(calls) if "worktree remove" in c)
+        i_remove = next(i for i, c in enumerate(calls) if "rmdir /S /Q" in c)
         self.assertLess(i_unlink, i_remove)
         self.assertTrue(any(c.startswith("dir /AL /S /B") for c in calls))
         self.assertIn("archive/line/lane-a", sim.tags)
@@ -646,7 +650,7 @@ class ApplyTests(unittest.TestCase):
 
         def evil(cmd, timeout=None):
             rc, out = orig(cmd, timeout)
-            if "worktree remove" in cmd:
+            if "rmdir /S" in cmd:
                 sim.fs.pop("C:/repo/main/a.rs", None)       # something deletes a tracked file meanwhile
             return rc, out
         sim.run = evil

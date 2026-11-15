@@ -23,7 +23,10 @@ pub fn disks_from_hosts_toml(text: &str, host: &str) -> Result<Vec<DiskRule>> {
         .ok_or_else(|| Error::Canon(format!("hosts.toml: no host named {host:?}")))?;
     let mut out = vec![];
     for d in h.get("disks").and_then(|d| d.as_array()).into_iter().flatten() {
-        let (Some(path), Some(min)) = (d.get("path").and_then(|p| p.as_str()), d.get("min_free_gb").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64)))) else { continue };
+        let Some(path) = d.get("path").and_then(|p| p.as_str()) else { continue };
+        let Some(min) = d.get("min_free_gb").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))) else {
+            return Err(Error::Canon(format!("hosts.toml: the disk {path:?} of host {host:?} has no min_free_gb; a disk entry without a minimum protects nothing")));
+        };
         out.push(DiskRule { path: path.to_string(), min_free_gb: min });
     }
     Ok(out)
@@ -75,13 +78,14 @@ pub fn admit(disks: &[DiskRule], dir: &str, predicted_mb: f64, free_of: &dyn Fn(
         return DiskAdmission { admitted: true, disk: None, free_gb: None, min_free_gb: 0.0, predicted_gb, rule: format!("no configured disk holds {dir}; nothing to protect") };
     };
     let Some(free) = free_of(&rule.path) else {
+        // min_free_gb is set (it is required): a disk that cannot be read cannot be shown to keep it
         return DiskAdmission {
-            admitted: true,
+            admitted: false,
             disk: Some(rule.path.clone()),
             free_gb: None,
             min_free_gb: rule.min_free_gb,
             predicted_gb,
-            rule: format!("free space of {} is unknown (could not be read); admitted without a disk check", rule.path),
+            rule: format!("free space of {} is unknown (could not be read) and min_free_gb {:.1} is set; refused", rule.path, rule.min_free_gb),
         };
     };
     let left = free - predicted_gb;
@@ -131,6 +135,31 @@ pub fn free_gb(path: &str) -> Option<f64> {
         let line = text.lines().rev().find(|l| !l.trim().is_empty())?;
         let cols: Vec<&str> = line.split_whitespace().collect();
         cols.get(3)?.parse::<f64>().ok().map(|k| k / 1048576.0)
+    }
+}
+
+/// A path as the disk rules compare it: links resolved up to the nearest existing folder, the rest appended as written, forward
+/// slashes, no `\\?\` prefix. (A relative spelling, a link or a 8.3 name of the same folder must not slip past the match.)
+pub fn canon(p: &str) -> String {
+    let path = Path::new(p);
+    let mut rest: Vec<std::ffi::OsString> = vec![];
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(c) = cur.canonicalize() {
+            let mut out = c;
+            for r in rest.iter().rev() {
+                out.push(r);
+            }
+            let s = out.to_string_lossy().replace('\\', "/");
+            return s.strip_prefix("//?/").map(String::from).unwrap_or(s);
+        }
+        match (cur.file_name().map(|f| f.to_os_string()), cur.parent().map(|x| x.to_path_buf())) {
+            (Some(f), Some(par)) if !par.as_os_str().is_empty() => {
+                rest.push(f);
+                cur = par;
+            }
+            _ => return p.replace('\\', "/"),
+        }
     }
 }
 
@@ -196,7 +225,7 @@ mod tests {
     fn unreadable_free_space_and_an_unconfigured_folder_say_so() {
         let d = disks();
         let a = admit(&d, "/mnt/hdd/x", 5.0, &|_| None);
-        assert!(a.admitted && a.free_gb.is_none() && a.rule.contains("unknown"), "{a:?}");
+        assert!(!a.admitted && a.free_gb.is_none() && a.rule.contains("unknown") && a.rule.contains("refused"), "an unreadable disk with a minimum is a refusal: {a:?}");
         let a = admit(&d, "/elsewhere", 5.0, &|_| Some(1.0));
         assert!(a.admitted && a.disk.is_none() && a.rule.contains("nothing to protect"), "{a:?}");
     }
@@ -204,9 +233,23 @@ mod tests {
     #[test]
     fn hosts_toml_disks_and_the_ledger_key() {
         let t = "[[hosts]]\nname = \"pc\"\n[[hosts.disks]]\npath = \"D:/build\"\nmin_free_gb = 40\n[[hosts.disks]]\npath = \"E:/x\"\n";
+        let e = disks_from_hosts_toml(t, "pc").unwrap_err().to_string();
+        assert!(e.contains("no min_free_gb") && e.contains("E:/x"), "{e}");
+        let t = "[[hosts]]\nname = \"pc\"\n[[hosts.disks]]\npath = \"D:/build\"\nmin_free_gb = 40\n";
         assert_eq!(disks_from_hosts_toml(t, "pc").unwrap(), vec![DiskRule { path: "D:/build".into(), min_free_gb: 40.0 }]);
         assert_eq!(step_key("D:\\Build\\Lane-A\\"), "target:d:/build/lane-a");
         assert!(disk_of(&disks_from_hosts_toml(t, "pc").unwrap(), "d:\\BUILD\\x").is_some(), "drive paths compare case-insensitively");
+    }
+
+    #[test]
+    fn canon_resolves_the_nearest_existing_folder_and_keeps_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let real = canon(&d.path().to_string_lossy());
+        assert!(!real.contains('\\') && !real.starts_with("//?/"), "{real}");
+        let dotted = format!("{}/sub/../a/b", d.path().to_string_lossy());
+        std::fs::create_dir_all(d.path().join("sub")).unwrap();
+        assert_eq!(canon(&format!("{}/sub/../x/y", d.path().to_string_lossy())), format!("{real}/x/y"), "dot-dot resolved, the missing tail kept");
+        assert_eq!(canon(&dotted), format!("{real}/a/b"));
     }
 
     #[test]

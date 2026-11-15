@@ -694,7 +694,7 @@ fn typographic_quotes_are_refused() {
 #[test]
 fn git_worktree_remove_timeout_is_stopped() {
     let sim = linux_sim();
-    sim.s().wt_timeout = true;
+    sim.s().rm_timeout = true; // the folder removal is what can hang: the worktree goes by a non-traversing removal, then `git worktree prune`
     let d = tempfile::tempdir().unwrap();
     let (done, _failed) = apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
     assert_eq!(done, 0);
@@ -708,7 +708,7 @@ fn worktree_remove_gets_the_removal_timeout() {
     let sim = linux_sim();
     let d = tempfile::tempdir().unwrap();
     apply(&sim, &["worktrees"], json!({"remove_timeout_s": 4321}), false, &log_in(&d)).unwrap();
-    let seen: Vec<Option<f64>> = sim.s().call_timeouts.iter().filter(|(c, _)| c.contains("worktree remove")).map(|(_, t)| *t).collect();
+    let seen: Vec<Option<f64>> = sim.s().call_timeouts.iter().filter(|(c, _)| c.starts_with("rm -r")).map(|(_, t)| *t).collect();
     assert!(!seen.is_empty() && seen.iter().all(|t| *t == Some(4321.0)), "{seen:?}");
 }
 
@@ -808,6 +808,104 @@ fn keep_lanes_also_protect_a_target_with_a_capital() {
 fn norm_keeps_case_on_posix_paths_only() {
     assert_eq!(norm("/Srv/Repo/"), "/Srv/Repo");
     assert_eq!(norm("C:\\Srv\\Repo"), "c:/srv/repo");
+}
+
+
+// ---------------------------------------------------------------- review of e2c543b (inherited holes)
+
+#[test]
+fn a_worktree_prefix_with_a_separator_is_a_config_error() {
+    for bad in ["C:/wt/lane-", "/srv/wt/lane-", "wt\\lane-"] {
+        let (cfg, h) = hostcfg(json!({"worktree_prefix": bad}), false, 50.0);
+        assert!(matches!(build_cfg(&cfg, &h), Err(ConfigError::Invalid(_))), "{bad}");
+    }
+}
+
+#[test]
+fn a_keep_lanes_entry_that_matches_nothing_is_reported() {
+    let sim = linux_sim();
+    let (_h, _t, inv) = gather_sim(&sim, json!({"keep_lanes": ["lane-c", "no-such-lane"]}), false, 50.0);
+    assert!(inv.breaches.iter().any(|b| b.contains("no-such-lane") && b.contains("protects nothing")), "{:?}", inv.breaches);
+    assert!(!inv.breaches.iter().any(|b| b.contains("'lane-c'")));
+}
+
+#[test]
+fn unc_and_extended_length_keep_paths_are_refused() {
+    for bad in ["\\\\?\\C:\\repo\\keep", "\\\\server\\share\\keep", "//server/share/keep"] {
+        let (cfg, h) = hostcfg(json!({"keep_paths": [bad]}), false, 50.0);
+        assert!(matches!(build_cfg(&cfg, &h), Err(ConfigError::Invalid(_))), "{bad}");
+    }
+}
+
+#[test]
+fn the_merge_proof_names_branches_by_refs_heads() {
+    let sim = linux_sim();
+    gather_sim(&sim, json!({}), false, 50.0);
+    let argvs = sim.s().argvs.clone();
+    let proofs: Vec<&Vec<String>> = argvs.iter().filter(|a| a.iter().any(|x| x == "--is-ancestor" || x == "--write-tree")).collect();
+    assert!(!proofs.is_empty());
+    for a in proofs {
+        let i = a.iter().position(|x| x == "--is-ancestor" || x == "--write-tree").unwrap();
+        for x in &a[i + 1..] {
+            assert!(x.starts_with("refs/heads/") || x.starts_with("sha-"), "{a:?}");
+        }
+    }
+}
+
+#[test]
+fn an_unreadable_git_is_never_read_as_no_branches_or_no_worktrees() {
+    for part in ["worktree list", "branch --list"] {
+        let sim = linux_sim();
+        let p = format!("git -C /repo/main {part}");
+        sim.pre(Box::new(move |_s, c| if c.starts_with(&p) { Some(RunOut::done(128, "")) } else { None }));
+        is_guard(gather_try(&sim, json!({}), false));
+    }
+}
+
+#[test]
+fn a_failed_listing_is_not_an_empty_folder() {
+    let sim = linux_sim();
+    sim.pre(Box::new(|_s, c| if c.starts_with("find") { Some(RunOut::done(1, "")) } else { None }));
+    ops_run(&sim, json!({}), false, |ops| {
+        is_guard(ops.listdir("/trash"));
+    });
+}
+
+#[test]
+fn a_link_target_that_vanishes_during_the_removal_stops_the_run() {
+    let sim = linux_sim();
+    sim.post(Box::new(|s, c| {
+        if c.starts_with("rm -r") && c.contains("/repo/wt/lane-a") {
+            for k in s.under("/repo/main/node_modules") {
+                s.pop(&k); // a traversing removal emptied what the link pointed to
+            }
+        }
+    }));
+    let d = tempfile::tempdir().unwrap();
+    let m = is_guard(apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)));
+    assert!(m.contains("is gone after removing"), "{m}");
+}
+
+#[test]
+fn a_worktree_is_removed_by_a_plain_removal_then_pruned() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    apply(&sim, &["worktrees"], json!({}), false, &log_in(&d)).unwrap();
+    let calls = sim.calls();
+    let i_rm = calls.iter().position(|c| c.starts_with("rm -r") && c.contains("/repo/wt/lane-a")).unwrap();
+    let i_prune = calls.iter().position(|c| c.ends_with("worktree prune")).unwrap();
+    assert!(i_rm < i_prune);
+    assert!(!calls.iter().any(|c| c.contains("worktree remove")));
+}
+
+#[test]
+fn cargo_clean_with_a_non_zero_exit_is_a_failure_not_freed_unknown() {
+    let sim = linux_sim();
+    sim.pre(Box::new(|_s, c| if c.starts_with("cargo clean") { Some(RunOut::done(101, "error")) } else { None }));
+    let d = tempfile::tempdir().unwrap();
+    apply(&sim, &["targets"], json!({}), false, &log_in(&d)).unwrap();
+    let rs: Vec<Value> = records(&log_in(&d)).into_iter().filter(|r| r["action"] == "clean").collect();
+    assert!(!rs.is_empty() && rs.iter().all(|r| r["status"] == "failed" && r["note"].as_str().unwrap().contains("exited 101")), "{rs:?}");
 }
 
 // ---------------------------------------------------------------- macOS: realpath has no -m
