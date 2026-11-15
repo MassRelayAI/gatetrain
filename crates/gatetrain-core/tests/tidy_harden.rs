@@ -670,6 +670,8 @@ fn real_disk_listdir_and_inventory() {
     let mut names = ops.listdir(&roots.to_string_lossy()).unwrap();
     names.sort();
     assert_eq!(names, ["lane-a", "lane-b"]);
+    // tidy saw that entry long ago (a name stamp alone no longer sets an age: the later of it and the first sighting counts)
+    std::fs::write(trash.join(".gatetrain-seen.json"), r#"{"old-20200101000000": {"t": 1577836800, "m": null}}"#).unwrap();
     let inv = gather(&h, &LocalRunner, &t, None).unwrap();
     let mut paths: Vec<String> = inv.targets.iter().map(|x| x.path.clone()).collect();
     paths.sort();

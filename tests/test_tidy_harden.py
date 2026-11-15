@@ -599,6 +599,8 @@ class RealFindShapeTests(Base):
                 ops.listdir(str(roots))                       # the newline name is refused, not split
             os.rmdir(os.path.join(str(roots), "weird\nname"))
             self.assertEqual(sorted(ops.listdir(str(roots))), ["lane-a", "lane-b"])
+            # tidy saw that entry long ago (a name stamp alone no longer sets an age: the later of it and the first sighting counts)
+            (trash / ".gatetrain-seen.json").write_text(json.dumps({"old-20200101000000": {"t": 1577836800, "m": None}}))
             inv = T.gather(host, LocalRunner(), T.build_cfg(cfg, host), now=time.time())
             self.assertEqual(sorted(t["path"] for t in inv.targets), [str(roots / "lane-a"), str(roots / "lane-b")])
             self.assertTrue(all(t["cargo"] for t in inv.targets))
