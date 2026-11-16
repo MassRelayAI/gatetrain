@@ -1,10 +1,10 @@
-# gatetrain red classes: the ONE rule table, read by gatetrain/diagnose.py (Python, tomllib) and by crates/gatetrain-core
-# (Rust, include_str!). A new failure class is a new [[rule]] here, never new code. FIRST MATCH WINS, per failure block.
+# gatetrain red classes: the ONE rule table, read by crates/gatetrain-core
+# (include_str!). A new failure class is a new [[rule]] here, never new code. FIRST MATCH WINS, per failure block.
 # Keys: id (name), cls (class printed), pattern (regex searched in the block, multiline), absent (optional regex: when it
 # matches anywhere in the block the rule does not apply), also (optional regex that must ALSO match in the block),
 # when ("slow" = the step's duration is far above its median), shrink (true: groups 1 and 2 of pattern are (expected, got)
 # and the rule applies only when got < expected), remedy (text), rerun (true = a rerun after the remedy suffices).
-# Regexes must be valid in BOTH Python re and Rust regex: no lookaround, no backreferences. Use ''''...''' literal strings.
+# Regexes are Rust regex: no lookaround, no backreferences. Use ''''...''' literal strings.
 
 [[rule]]
 id = "out-of-memory"

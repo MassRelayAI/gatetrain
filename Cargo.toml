@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gatetrain-core", "crates/gatetrain-cli"]
+members = ["crates/gatetrain-core", "crates/gatetrain-cli", "crates/gatetrain-testchild"]
 
 [workspace.package]
 version = "0.1.0"

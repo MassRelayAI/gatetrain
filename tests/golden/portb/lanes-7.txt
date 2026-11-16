@@ -1,0 +1,33 @@
+rc=0
+--- stdout
+lanes against main
+
+1. bases and containment
+   laneE: merge-base {SHA}, 2 own commits
+   laneA: contained in laneE: list only laneE
+   laneB: merge-base {SHA}, 1 own commits
+   pass 1: base {SHA} (on main): laneE, laneB
+
+2. collision hotspots
+   SAME-LINES  a.txt  [laneB x main] lines 2 -> certain conflict, merge by hand
+   SAME-LINES  a.txt  [laneE x laneB] lines 2 -> certain conflict, merge by hand
+   SAME-LINES  a.txt  [laneE x main] lines 2 -> certain conflict, merge by hand
+   CODE-BOTH   src/code.js: lanes laneE, laneB -> a person reads both diffs
+   SHARED-HUB  package.json  [laneE x laneB] -> rebuild, never text-merge; check entries survive
+
+3. doubled-line risk
+   a.txt:2 [laneE x laneB] -> likely doubled line after stacking: keep one, check it appears once
+   a.txt:2 [laneE x main] -> likely doubled line after stacking: keep one, check it appears once
+   a.txt:2 [laneB x main] -> likely doubled line after stacking: keep one, check it appears once
+
+4. resource clashes
+   port=51234 introduced by laneE and laneB (tools/gate-a.sh, tools/gate-b.sh) -> give each lane its own value before the gates run in parallel
+
+5. paired counts (heuristic)
+   laneB: MAX_ROUTES 5 -> 6 in src/c.js; count changed here but its check still says 5 in tests/c.test.js:1 -> update it
+
+6. parallel plan
+   group 1: laneE
+   group 2: laneB  (after the groups above; conflicts with them)
+2 lanes: 2 independent groups; 3 certain conflicts; 1 shared hubs; 1 resource clashes
+--- stderr

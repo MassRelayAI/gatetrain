@@ -1,4 +1,4 @@
-__pycache__/
-*.pyc
 *.db
 /target/
+config/hosts.toml
+__pycache__/

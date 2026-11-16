@@ -54,9 +54,26 @@ pub fn apply_plan_report(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, inv: &
                 ("class".into(), J::s(cls)),
                 ("action".into(), J::s(&it.kind)),
                 ("item".into(), J::s(&it.key)),
+                ("rule".into(), J::s(&it.rule)),
+                ("why".into(), J::s(&it.why)),
                 ("before_bytes".into(), J::opt_int(it.bytes)),
                 ("after_bytes".into(), J::Null),
             ];
+            // No removal without a named rule, and none on a protected path: checked again here, at the moment of action
+            let refusal = if it.rule.is_empty() {
+                Some("kept: no rule")
+            } else if matches!(cls, "worktrees" | "targets" | "trash") && ops.protect_hit(&it.key)?.is_some() {
+                Some("kept: protected")
+            } else {
+                None
+            };
+            if let Some(why_not) = refusal {
+                set(&mut rec, "status", J::s("refused"));
+                set(&mut rec, "note", J::s(why_not));
+                log_action(log, &J::Obj(rec))?;
+                failed += 1;
+                continue;
+            }
             let mut intent = rec.clone();
             intent.push(("status".into(), J::s("intent")));
             intent.push(("note".into(), J::s("about to run")));

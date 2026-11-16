@@ -82,6 +82,27 @@ pub fn norm(p: &str) -> String {
     }
 }
 
+/// Does the normalised path `n` fall inside, equal, or contain the normalised protect entry `pat`?
+/// A plain entry is a folder: `n` is it, is below it, or has it below. A glob entry (`*`, `?`, `[`) matches `n` or anything below a match,
+/// and `n` also counts when it is a folder above the entry's fixed leading part.
+pub fn protect_match(n: &str, pat: &str) -> bool {
+    use crate::pycompat::fnmatchcase;
+    let pat = pat.trim_end_matches('/');
+    if pat.is_empty() {
+        return false;
+    }
+    match pat.find(['*', '?', '[']) {
+        None => n == pat || n.starts_with(&format!("{pat}/")) || pat.starts_with(&format!("{n}/")),
+        Some(i) => {
+            if fnmatchcase(n, pat) || fnmatchcase(n, &format!("{pat}/*")) {
+                return true;
+            }
+            let fixed = pat[..i].rsplit_once('/').map(|x| x.0).unwrap_or("");
+            !fixed.is_empty() && (n == fixed || fixed.starts_with(&format!("{n}/")))
+        }
+    }
+}
+
 pub fn lane_of(path: &str, cfg: &TidyCfg) -> String {
     let n = norm(path);
     let b = n.rsplit('/').next().unwrap_or("").to_string();
@@ -766,6 +787,34 @@ impl<'a> Ops<'a> {
     // -- guarded removal
     pub fn kept(&self) -> Vec<String> {
         [self.cfg.main_checkout.clone(), self.cfg.root_checkout.clone()].into_iter().chain(self.cfg.keep_paths.iter().cloned().map(Some)).flatten().filter(|k| !k.is_empty()).collect()
+    }
+
+    /// The protect entry that covers `p`, if any: `p` is inside it, is it, or contains it (a glob entry matches by pattern),
+    /// by its own spelling or by where it really leads (a link into a protected folder is protected).
+    pub fn protect_hit(&self, p: &str) -> R<Option<String>> {
+        if self.cfg.protect.is_empty() {
+            return Ok(None);
+        }
+        let n = norm(p);
+        for pat in &self.cfg.protect {
+            if protect_match(&n, &norm(pat)) {
+                return Ok(Some(pat.clone()));
+            }
+        }
+        let Some(r) = self.rp(p)?.map(|r| norm(&r)) else { return Ok(None) };
+        for pat in &self.cfg.protect {
+            if protect_match(&r, &norm(pat)) {
+                return Ok(Some(pat.clone()));
+            }
+            if !pat.contains(['*', '?', '[']) {
+                if let Some(rk) = self.rp(pat)?.map(|k| norm(&k)) {
+                    if protect_match(&r, &rk) {
+                        return Ok(Some(pat.clone()));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn check_path(&self, p: &str) -> R<()> {

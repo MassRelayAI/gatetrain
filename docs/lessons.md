@@ -85,4 +85,4 @@ and is a candidate for the next check.
 
 ## Porting status of the checks
 
-The Rust binary answers every verb of the Python tool except the ones not yet needed in-process (`stop` and the rest are forwarded to `python -m gatetrain`). `check` and `tidy` are ported **with** the hardening of L60-L65 (spec: `tests/test_tidy_harden.py`, its Rust twin `crates/gatetrain-core/tests/tidy_harden.rs`): every mode, `--apply` and `--auto` included, runs in Rust, and the output is byte-identical to Python's on the simulated hosts and on a real-disk corpus.
+Every verb is Rust. The Python version was retired once the Rust binary owned every command; what its test suite proved lives on as Rust tests and as recorded outputs in `tests/golden/` and `tests/corpus/`. `check` and `tidy` carry the hardening of L60-L65 (spec: `crates/gatetrain-core/tests/tidy_harden.rs`, ported from the Python suite): every mode, `--apply` and `--auto` included, and the output equals what the Python version printed on the simulated hosts (`tests/golden/tidy_parity.txt`) and on a real-disk corpus.

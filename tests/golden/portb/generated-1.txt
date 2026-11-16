@@ -1,0 +1,4 @@
+rc=0
+--- stdout
+ok: no untracked files under gen
+--- stderr

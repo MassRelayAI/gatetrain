@@ -679,6 +679,8 @@ a file-lock crate (`std::fs::File::lock`, stable since Rust 1.89, which is there
 
 ### 9.3 Python and Rust side by side
 
+**Retired (2026-11-16).** Every subcommand is Rust and the Python package is gone; the forwarding below no longer exists, and `--which` was never added. What follows is the design as it was while both lived.
+
 - The Rust binary is named `gatetrain`. A subcommand it has not ported is forwarded to `python -m gatetrain` with the same arguments
   and exit code; `gatetrain --which <command>` says which implementation answers. Without Python installed, a forwarded command fails
   with one line that names the command and the release in which it is planned.
@@ -796,7 +798,7 @@ A guard is proven by a fixture that violates it, never by switching it off (L36)
   code is a failure.
 - **Lints.** `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`; `cargo deny check`. States, red classes, actions and
   rule ids are enums, so a misspelt one does not compile.
-- **Run.** `cargo test` for the workspace, then `python -m unittest discover -s tests -v` while Python commands remain, on Linux,
+- **Run.** `cargo test --workspace` on Linux,
   Windows and macOS. A test that cannot run on a platform is reported as skipped with its reason, never counted as passed.
 
 ## 14. Slice plan

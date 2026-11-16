@@ -9,8 +9,10 @@ fn real(dir: &Path) -> RealLock {
     RealLock { lock: dir.join("host.lock"), db: dir.join("g.db"), hosts: None, holder: vec![env!("CARGO_BIN_EXE_gatetrain").into(), "hold".into()] }
 }
 
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
+/// The synthetic child process (crates/gatetrain-testchild), built next to the gatetrain binary.
+fn child() -> String {
+    let b = std::path::Path::new(env!("CARGO_BIN_EXE_gatetrain"));
+    b.with_file_name(format!("gt-testchild{}", std::env::consts::EXE_SUFFIX)).to_string_lossy().into_owned()
 }
 
 #[test]
@@ -47,7 +49,7 @@ fn launch_starts_the_real_holder_which_holds_runs_the_chain_and_releases() {
         batch: "b".into(),
         sha: "x".into(),
         base: "y".into(),
-        command: vec![python().into(), "-c".into(), "import os; print('CHAIN ' + os.environ['GATETRAIN_RUN_ID'] + ' ' + os.environ.get('GATETRAIN_PARALLEL', 'unset'))".into()],
+        command: vec![child(), "chain".into()],
         log: log.clone(),
         workdir: d.path().to_path_buf(),
         env: vec![],

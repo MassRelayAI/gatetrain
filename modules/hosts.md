@@ -2,7 +2,7 @@
 
 The registry of machines and models: role, limits, disks, awake hours, cost; the active profile decides what may run where.
 
-Reads `hosts.toml` (standard library `tomllib`; `config/hosts.example.toml` is the template, the YAML file is documentation only). `gatetrain/config.py` validates it and names the failing field, e.g. `hosts[1].disks[0].min_free_gb`. A host with less than `min_free_gb` on a build disk takes no new run. In `zero-cost` no paid resource is started.
+Reads `hosts.toml` (`config/hosts.example.toml` is the template, the YAML file is documentation only). `gatetrain` validates it and names the failing field, e.g. `hosts[1].disks[0].min_free_gb`. A host with less than `min_free_gb` on a build disk takes no new run. In `zero-cost` no paid resource is started.
 
 ## A disk is a resource
 

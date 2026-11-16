@@ -1,0 +1,149 @@
+[
+  {
+    "host": "ssd-box",
+    "check": "disk",
+    "status": "PASS",
+    "lessons": [
+      "L18",
+      "L30"
+    ],
+    "message": "/srv/ssd: 150 GB free >= 50",
+    "fix": ""
+  },
+  {
+    "host": "ssd-box",
+    "check": "capacity",
+    "status": "PASS",
+    "lessons": [
+      "L18",
+      "L19"
+    ],
+    "message": "can run now: chain",
+    "fix": ""
+  },
+  {
+    "host": "usb-box",
+    "check": "disk",
+    "status": "WARN",
+    "lessons": [
+      "L18"
+    ],
+    "message": "/mnt/ext: removable disk is not mounted",
+    "fix": "attach and mount /mnt/ext; what it enables is dropped meanwhile"
+  },
+  {
+    "host": "usb-box",
+    "check": "capacity",
+    "status": "WARN",
+    "lessons": [
+      "L18",
+      "L19"
+    ],
+    "message": "can run now: nothing; cannot: chain (needs 120 GB free on an allowed disk); /mnt/ext (not mounted) would enable chain",
+    "fix": "add or mount a disk with use including the missing kind, enough free space and fast = true for chains"
+  },
+  {
+    "host": "hdd-box",
+    "check": "disk",
+    "status": "PASS",
+    "lessons": [
+      "L18",
+      "L30"
+    ],
+    "message": "/srv/hdd: 500 GB free >= 50",
+    "fix": ""
+  },
+  {
+    "host": "hdd-box",
+    "check": "disk-speed",
+    "status": "WARN",
+    "lessons": [
+      "L19"
+    ],
+    "message": "/srv/hdd: allowed for ['chain'] but not marked fast",
+    "fix": "put build outputs on a fast disk, or limit /srv/hdd to use = [\"archive\"]"
+  },
+  {
+    "host": "hdd-box",
+    "check": "capacity",
+    "status": "PASS",
+    "lessons": [
+      "L18",
+      "L19"
+    ],
+    "message": "can run now: chain",
+    "fix": ""
+  },
+  {
+    "host": "small-box",
+    "check": "disk",
+    "status": "PASS",
+    "lessons": [
+      "L18",
+      "L30"
+    ],
+    "message": "/mnt/a: 30 GB free >= 5",
+    "fix": ""
+  },
+  {
+    "host": "small-box",
+    "check": "capacity",
+    "status": "FAIL",
+    "lessons": [
+      "L18",
+      "L19"
+    ],
+    "message": "can run now: preflight; cannot: lane-gates (needs 40 GB free on an allowed disk), chain (needs 120 GB free on an allowed disk)",
+    "fix": "add or mount a disk with use including the missing kind, enough free space and fast = true for chains"
+  },
+  {
+    "host": "ports-box",
+    "check": "ports",
+    "status": "PASS",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 5500 is outside every ephemeral or reserved range",
+    "fix": ""
+  },
+  {
+    "host": "ports-box",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 6001 is inside the reserved range 6000-6100",
+    "fix": "move port 6001 outside 6000-6100"
+  },
+  {
+    "host": "ports-box",
+    "check": "ports",
+    "status": "PASS",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 57901 is inside the ephemeral range but reserved by the kernel (ip_local_reserved_ports)",
+    "fix": ""
+  },
+  {
+    "host": "ports-box",
+    "check": "ports",
+    "status": "FAIL",
+    "lessons": [
+      "L21"
+    ],
+    "message": "port 40000 is inside the ephemeral range 32768-60999",
+    "fix": "move port 40000 outside 32768-60999"
+  },
+  {
+    "host": "lock-box",
+    "check": "lock",
+    "status": "FAIL",
+    "lessons": [
+      "L32"
+    ],
+    "message": "/run/chain.lock: 10.0 h old with no released line (holder died?)",
+    "fix": "find the holder, then remove the lock by hand after checking no chain is running"
+  }
+]

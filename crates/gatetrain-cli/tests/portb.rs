@@ -1,6 +1,6 @@
-//! GT-PORT-B parity: `doctor`, `lanes` and `generated` in Rust against the Python reference, byte for byte.
-//! The Rust binary runs from an empty temp directory with a bogus GATETRAIN_PYROOT, so a forward to Python cannot pass for it
-//! (the red-first check: before the port these tests failed with "No module named gatetrain").
+//! `doctor`, `lanes` and `generated` in Rust against the outputs the Python version printed for the same inputs, byte for byte.
+//! tests/golden/portb/ holds those outputs (a temporary folder is written `{TMP}`); tests/corpus/portb holds the doctor transcripts.
+//! The Python version is retired; the recorded files are the proof. `GT_RECORD=1` rewrites them from this binary.
 use gatetrain_core::{config, doctor, pycompat::dumps_indent2, runner::FakeRunner};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -9,31 +9,72 @@ fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
 }
 
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
-}
-
-/// The Rust binary, with no Python to fall back on.
+/// The Rust binary, run from an empty temp directory.
 fn rs(cwd: &Path, args: &[&str]) -> Output {
-    let bogus = cwd.join("no-such-pyroot");
-    Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(args).current_dir(cwd).env("GATETRAIN_PYROOT", bogus).env_remove("PYTHONPATH").output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(args).current_dir(cwd).output().unwrap()
 }
 
-fn py(args: &[&str]) -> Output {
-    Command::new(python()).arg("-m").arg("gatetrain").args(args).current_dir(repo()).env("PYTHONIOENCODING", "utf-8").output().unwrap()
+/// Commit ids (9 or 40 hex digits) differ in every run: they are written `{SHA}`.
+fn sha_free(t: &str) -> String {
+    let cs: Vec<char> = t.chars().collect();
+    let mut o = String::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
+        let mut j = i;
+        while j < cs.len() && hex(cs[j]) {
+            j += 1;
+        }
+        let word_before = i > 0 && (cs[i - 1].is_ascii_alphanumeric() || cs[i - 1] == '_');
+        let word_after = j < cs.len() && (cs[j].is_ascii_alphanumeric() || cs[j] == '_');
+        if (j - i == 9 || j - i == 40) && !word_before && !word_after && cs[i..j].iter().any(|c| c.is_ascii_digit()) {
+            o.push_str("{SHA}");
+            i = j;
+        } else if j > i {
+            o.extend(&cs[i..j]);
+            i = j;
+        } else {
+            o.push(cs[i]);
+            i += 1;
+        }
+    }
+    o
 }
 
-/// Python writes stdout in text mode, so on Windows it ends lines with CRLF; the content is compared with that one translation undone.
-fn lf(b: &[u8]) -> Vec<u8> {
-    String::from_utf8_lossy(b).replace("\r\n", "\n").into_bytes()
+/// The recorded outputs of one test: the n-th call of the test is the file `<test>-<n>.txt`.
+struct Gold {
+    test: &'static str,
+    n: usize,
+    tmp: Vec<String>,
 }
 
-fn same(a: &Output, b: &Output, what: &str) {
-    let b = &Output { status: b.status, stdout: lf(&b.stdout), stderr: lf(&b.stderr) };
-    assert_eq!(String::from_utf8_lossy(&a.stderr).into_owned(), String::from_utf8_lossy(&b.stderr).into_owned(), "stderr: {what}");
-    assert_eq!(String::from_utf8_lossy(&a.stdout), String::from_utf8_lossy(&b.stdout), "stdout: {what}");
-    assert_eq!(a.stdout, b.stdout, "bytes: {what}");
-    assert_eq!(a.status.code(), b.status.code(), "exit: {what}");
+impl Gold {
+    fn new(test: &'static str, tmp: &[&Path]) -> Gold {
+        let fwd = |p: &Path| p.to_string_lossy().replace('\\', "/");
+        Gold { test, n: 0, tmp: tmp.iter().map(|p| fwd(p)).collect() }
+    }
+
+    fn render(&self, o: &Output) -> String {
+        let mut t = format!("rc={}\n--- stdout\n{}--- stderr\n{}", o.status.code().unwrap(), String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+        t = t.replace("\r\n", "\n");
+        t = sha_free(&t);
+        for d in &self.tmp {
+            t = t.replace(d.as_str(), "{TMP}").replace(&d.replace('/', "\\"), "{TMP}");
+        }
+        t
+    }
+
+    fn same(&mut self, o: &Output, what: &str) {
+        self.n += 1;
+        let p = repo().join(format!("tests/golden/portb/{}-{}.txt", self.test, self.n));
+        let got = self.render(o);
+        if std::env::var_os("GT_RECORD").is_some() {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, &got).unwrap();
+        }
+        let want = std::fs::read_to_string(&p).unwrap_or_else(|_| panic!("{} is missing: {what}", p.display())).replace("\r\n", "\n");
+        assert_eq!(got, want, "{what}");
+    }
 }
 
 fn doctor_cases() -> Vec<PathBuf> {
@@ -57,7 +98,7 @@ fn run_case(case: &Path) -> Vec<doctor::DResult> {
 }
 
 #[test]
-fn doctor_text_json_and_exit_match_python_on_every_transcript_case() {
+fn doctor_text_json_and_exit_match_the_recorded_output_on_every_transcript_case() {
     let mut checked = 0;
     for case in doctor_cases() {
         let res = run_case(&case);
@@ -67,14 +108,7 @@ fn doctor_text_json_and_exit_match_python_on_every_transcript_case() {
         assert_eq!(text, want("expected-stdout"), "text {}", case.display());
         assert_eq!(json, want("expected-json"), "json {}", case.display());
         assert_eq!(doctor::exit_code(&res).to_string(), want("expected-exit").trim(), "exit {}", case.display());
-        // and against the live Python, not only the committed files
-        for (flag, mine) in [(None, &text), (Some("--json"), &json)] {
-            let mut a = vec!["tests/corpus/portb_dump.py", "doctor", case.to_str().unwrap()];
-            a.extend(flag);
-            let o = Command::new(python()).args(&a).current_dir(repo()).output().unwrap();
-            assert_eq!(String::from_utf8_lossy(&o.stdout), *mine, "live python {:?} {}", flag, case.display());
-            checked += 1;
-        }
+        checked += 2;
     }
     assert!(checked >= 4);
 }
@@ -160,12 +194,14 @@ fn lanes_args<'a>(repo: &'a str, extra: &[&'a str], refs: &[&'a str]) -> Vec<&'a
 }
 
 #[test]
-fn lanes_text_and_json_match_python_on_synthetic_repos() {
+fn lanes_text_and_json_match_the_recorded_output_on_synthetic_repos() {
     let mut n = 0;
+    let scratch = tempfile::tempdir().unwrap();
+    let mut g = Gold::new("lanes", &[scratch.path()]);
     for on_main in [false, true] {
         let r = lane_repo(on_main);
         let rp = r.path().to_str().unwrap();
-        let scratch = tempfile::tempdir().unwrap();
+        g.tmp.push(r.path().to_string_lossy().replace('\\', "/"));
         let variants: Vec<(Vec<&str>, Vec<&str>)> = vec![
             (vec![], LANES.to_vec()),
             (vec!["--json"], LANES.to_vec()),
@@ -178,8 +214,8 @@ fn lanes_text_and_json_match_python_on_synthetic_repos() {
         ];
         for (extra, refs) in variants {
             let args = lanes_args(rp, &extra, &refs);
-            let (a, b) = (rs(scratch.path(), &args), py(&args));
-            same(&a, &b, &format!("on_main={on_main} {:?}", args));
+            let a = rs(scratch.path(), &args);
+            g.same(&a, &format!("on_main={on_main} {:?}", args));
             assert!(a.status.success(), "{}", String::from_utf8_lossy(&a.stderr));
             n += 1;
         }
@@ -193,24 +229,26 @@ fn lanes_text_and_json_match_python_on_synthetic_repos() {
 }
 
 #[test]
-fn lanes_errors_match_python() {
+fn lanes_errors_match_the_recorded_output() {
     let r = lane_repo(false);
     let rp = r.path().to_str().unwrap();
     let s = tempfile::tempdir().unwrap();
+    let mut g = Gold::new("lanes_errors", &[s.path(), r.path()]);
     for args in [vec!["lanes", "--repo", rp, "--main", "nope", "laneA"], vec!["lanes", "--repo", rp, "--main", "main", "laneA", "--resource-regex", "noequals"]] {
-        let (a, b) = (rs(s.path(), &args), py(&args));
-        same(&a, &b, &format!("{:?}", args));
+        let a = rs(s.path(), &args);
+        g.same(&a, &format!("{:?}", args));
         assert!(!a.status.success());
     }
 }
 
 #[test]
-fn generated_matches_python() {
+fn generated_matches_the_recorded_output() {
     let r = tempfile::tempdir().unwrap();
     let d = r.path();
     git(d, &["init", "-q", "-b", "main"]);
     commit(d, "c", &[("gen/tracked.txt", "t\n")]);
     let s = tempfile::tempdir().unwrap();
+    let mut g = Gold::new("generated", &[s.path(), d]);
     let rp = d.to_str().unwrap();
     let cfg = d.join("c.toml");
     std::fs::write(&cfg, "[stack]\ngenerated_dirs = [\"gen\", \"out\"]\n").unwrap();
@@ -231,8 +269,8 @@ fn generated_matches_python() {
             put(d, "gen/new a.txt", "n\n");
         }
         for args in &cases {
-            let (a, b) = (rs(s.path(), args), py(args));
-            same(&a, &b, &format!("{:?}", args));
+            let a = rs(s.path(), args);
+            g.same(&a, &format!("{:?}", args));
             codes.push(a.status.code().unwrap());
         }
     }
@@ -240,19 +278,24 @@ fn generated_matches_python() {
 }
 
 #[test]
-fn doctor_real_run_matches_python() {
+fn doctor_real_run_has_its_shape_and_its_errors() {
+    // the checks look at this machine, so the text is not recorded: the shape and the exit codes are
     let s = tempfile::tempdir().unwrap();
     let cfg = s.path().join("hosts.toml");
     std::fs::write(&cfg, "[[hosts]]\nname = \"here\"\nreach = \"local\"\ntools = [\"git\", \"definitely-not-a-tool-xyz\"]\ncontainer_prefix = \"mr-\"\n[[hosts]]\nname = \"far\"\nreach = \"pigeon\"\n").unwrap();
-    for extra in [vec![], vec!["--json"], vec!["--host", "far"], vec!["--host", "nobody"]] {
-        let mut args = vec!["doctor", "--config", cfg.to_str().unwrap()];
-        args.extend(extra);
-        let (a, b) = (rs(s.path(), &args), py(&args));
-        same(&a, &b, &format!("{:?}", args));
-    }
-    let bad = ["doctor", "--config", "missing.toml"];
-    let (a, b) = (rs(s.path(), &bad), py(&bad));
-    assert_eq!(a.status.code(), Some(2));
-    assert_eq!(a.status.code(), b.status.code());
-    assert!(String::from_utf8_lossy(&a.stderr).starts_with("config error: "));
+    let c = cfg.to_str().unwrap();
+    let text = rs(s.path(), &["doctor", "--config", c]);
+    let t = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(t.contains("definitely-not-a-tool-xyz") && t.contains("far"), "{t}");
+    assert_eq!(text.status.code(), Some(1), "a missing tool is a FAIL: {t}");
+    let json = rs(s.path(), &["doctor", "--config", c, "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(v.as_array().unwrap().iter().any(|r| r["host"] == "far" && r["status"] == "WARN"));
+    let far = rs(s.path(), &["doctor", "--config", c, "--host", "far"]);
+    assert_eq!(far.status.code(), Some(0), "{}", String::from_utf8_lossy(&far.stdout));
+    let nobody = rs(s.path(), &["doctor", "--config", c, "--host", "nobody"]);
+    assert_ne!(nobody.status.code(), Some(0));
+    let bad = rs(s.path(), &["doctor", "--config", "missing.toml"]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad.stderr).starts_with("config error: "));
 }

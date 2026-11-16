@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="The gatetrain commands in five groups: read a run (ingest, report, trace, eta, next-tick, status, flaky, diagnose), guard the host (doctor, hold, running, memory, stop), plan the stack (lanes, generated, batch), keep the disk clean (check, tidy), and look at the repository (watch). One binary, one ledger file.">
+  <style>
+    .bg{fill:#F6F5F1}.box{fill:#FFFFFF;stroke:#1F2226}.ink{fill:#1F2226}.sub{fill:#5A5F66}.acc{fill:#2E6F69}.band{fill:#E6EFEE}.ln{stroke:#1F2226;fill:none}
+    .t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.s{font:400 13px Inter,Segoe UI,Helvetica,Arial,sans-serif}.m{font:500 14px Consolas,Menlo,monospace}
+    @media (prefers-color-scheme: dark){.bg{fill:#17191C}.box{fill:#22262B;stroke:#D8D6CF}.ink{fill:#ECEAE4}.sub{fill:#A7ABB1}.band{fill:#1F3330}.ln{stroke:#D8D6CF}.acc{fill:#6FB5AD}}
+  </style>
+  <rect class="bg" width="960" height="400" rx="12"/>
+  <text class="t ink" x="32" y="40">One binary: gatetrain</text>
+  <text class="s sub" x="32" y="62">Every command is Rust. Nothing else to install.</text>
+
+  <g>
+    <rect class="box" x="32" y="86" width="280" height="140" rx="8"/>
+    <rect class="band" x="32" y="86" width="280" height="30" rx="8"/>
+    <text class="t ink" x="48" y="107">read a run</text>
+    <text class="m ink" x="48" y="140">ingest  report  trace</text>
+    <text class="m ink" x="48" y="162">eta  next-tick  status</text>
+    <text class="m ink" x="48" y="184">flaky  diagnose  parse</text>
+    <text class="s sub" x="48" y="210">from a chain log or the ledger</text>
+  </g>
+  <g>
+    <rect class="box" x="340" y="86" width="280" height="140" rx="8"/>
+    <rect class="band" x="340" y="86" width="280" height="30" rx="8"/>
+    <text class="t ink" x="356" y="107">guard the host</text>
+    <text class="m ink" x="356" y="140">doctor  hold  running</text>
+    <text class="m ink" x="356" y="162">memory  stop</text>
+    <text class="s sub" x="356" y="210">one chain at a time, memory first</text>
+  </g>
+  <g>
+    <rect class="box" x="648" y="86" width="280" height="140" rx="8"/>
+    <rect class="band" x="648" y="86" width="280" height="30" rx="8"/>
+    <text class="t ink" x="664" y="107">plan the stack</text>
+    <text class="m ink" x="664" y="140">lanes  generated</text>
+    <text class="m ink" x="664" y="162">batch</text>
+    <text class="s sub" x="664" y="210">collisions before the train starts</text>
+  </g>
+  <g>
+    <rect class="box" x="32" y="246" width="440" height="110" rx="8"/>
+    <rect class="band" x="32" y="246" width="440" height="30" rx="8"/>
+    <text class="t ink" x="48" y="267">keep the disk clean</text>
+    <text class="m ink" x="48" y="300">check  tidy  tidy --apply  tidy --auto</text>
+    <text class="s sub" x="48" y="330">a dry run first; archive tags, links unlinked first</text>
+  </g>
+  <g>
+    <rect class="box" x="488" y="246" width="440" height="110" rx="8"/>
+    <rect class="band" x="488" y="246" width="440" height="30" rx="8"/>
+    <text class="t ink" x="504" y="267">look at the repository</text>
+    <text class="m ink" x="504" y="300">watch  log verify  ledger migrate</text>
+    <text class="s sub" x="504" y="330">lanes and next assignments, read only</text>
+  </g>
+  <text class="s sub" x="32" y="384">Run gatetrain --help for the list, and gatetrain COMMAND --help for its options.</text>
+</svg>

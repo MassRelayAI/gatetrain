@@ -10,8 +10,10 @@ fn gt(d: &Path, args: &[&str]) -> Output {
 fn out(o: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
 }
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
+/// The synthetic child process (crates/gatetrain-testchild), built next to the gatetrain binary.
+fn child() -> String {
+    let b = std::path::Path::new(env!("CARGO_BIN_EXE_gatetrain"));
+    b.with_file_name(format!("gt-testchild{}", std::env::consts::EXE_SUFFIX)).to_string_lossy().into_owned()
 }
 fn git(d: &Path, args: &[&str]) {
     let o = Command::new("git").arg("-C").arg(d).args(["-c", "user.name=t", "-c", "user.email=t@example.com"]).args(args).output().unwrap();
@@ -26,7 +28,6 @@ fn decisions(db: &Path) -> Vec<(String, String)> {
     st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|x| x.unwrap()).collect()
 }
 
-const PRINT_CWD: &str = "import os; print('CWD=' + os.path.realpath(os.getcwd()))";
 
 // ---- the memory rule applies to a hold with no step list
 
@@ -39,19 +40,19 @@ fn a_hold_without_a_step_list_is_admitted_on_its_own_recorded_chain_peak() {
     // an earlier run of the whole chain peaked at 26 GB; 31 - 12 = 19 GB are available
     let o = gt(d.path(), &["memory", "record", "--run", "r0", "--step", "(chain)", "--peak-mb", &(26 * 1024).to_string()]);
     assert!(o.status.success(), "{}", out(&o));
-    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--", python(), "-c", "print('RAN')"]);
+    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--", child().as_str(), "print", "RAN"]);
     assert_eq!(o.status.code(), Some(76), "{}", out(&o));
     assert!(out(&o).contains("REFUSED-MEMORY") && !out(&o).contains("RAN"), "{}", out(&o));
     assert!(decisions(&d.path().join("gatetrain.db")).iter().any(|(k, _)| k == "host.refuse-memory"));
     // with no history at all nothing is invented: step_default_gb is REQUIRED once memory is configured
     let d2 = tempfile::tempdir().unwrap();
     std::fs::write(d2.path().join("hosts.toml"), HOSTS).unwrap();
-    let o = gt(d2.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--", python(), "-c", "print('RAN')"]);
+    let o = gt(d2.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--", child().as_str(), "print", "RAN"]);
     assert_eq!(o.status.code(), Some(76), "{}", out(&o));
     assert!(out(&o).contains("step_default_gb") && !out(&o).contains("RAN"), "{}", out(&o));
     // with the default set, the unknown chain counts it and fits
     std::fs::write(d2.path().join("hosts.toml"), format!("{HOSTS}step_default_gb = 4\n")).unwrap();
-    let o = gt(d2.path(), &["hold", "r2", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--", python(), "-c", "print('RAN')"]);
+    let o = gt(d2.path(), &["hold", "r2", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--", child().as_str(), "print", "RAN"]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     assert!(out(&o).contains("RAN"));
 }
@@ -66,7 +67,7 @@ fn a_hold_is_refused_when_the_disk_would_drop_under_its_minimum_and_nothing_star
     // a minimum no disk can meet: the configured disk is already under it
     let hosts = format!("[[hosts]]\nname = \"pc\"\nmemory_check = false\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 100000000\n", fwd(d.path()));
     std::fs::write(d.path().join("hosts.toml"), hosts).unwrap();
-    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(&target), "--", python(), "-c", "print('RAN')"]);
+    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(&target), "--", child().as_str(), "print", "RAN"]);
     assert_eq!(o.status.code(), Some(77), "{}", out(&o));
     let s = out(&o);
     assert!(s.contains("REFUSED-DISK") && s.contains("< min_free_gb"), "{s}");
@@ -76,7 +77,7 @@ fn a_hold_is_refused_when_the_disk_would_drop_under_its_minimum_and_nothing_star
     let other = tempfile::tempdir().unwrap();
     let hosts = "[[hosts]]\nname = \"pc\"\nmemory_check = false\n[[hosts.disks]]\npath = \"/nowhere/at/all\"\nmin_free_gb = 100000000\n";
     std::fs::write(other.path().join("hosts.toml"), hosts).unwrap();
-    let o = gt(other.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(other.path()), "--", python(), "-c", "print('RAN')"]);
+    let o = gt(other.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(other.path()), "--", child().as_str(), "print", "RAN"]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
 }
 
@@ -87,8 +88,8 @@ fn the_size_a_target_folder_reached_is_recorded_per_run_and_becomes_the_predicti
     let hosts = format!("[[hosts]]\nname = \"pc\"\nmemory_check = false\n[[hosts.disks]]\npath = \"{}\"\nmin_free_gb = 0\n", fwd(d.path()));
     std::fs::write(d.path().join("hosts.toml"), hosts).unwrap();
     // the chain writes 3 MB into its build folder
-    let script = format!("import os; os.makedirs(r'{0}', exist_ok=True); open(r'{0}/big.bin', 'wb').write(b'x' * 3 * 1048576)", fwd(&target));
-    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(&target), "--", python(), "-c", &script]);
+    let big = format!("{}/big.bin", fwd(&target));
+    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(&target), "--", child().as_str(), "write", &big, "3"]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     let hist = Ledger::open(&d.path().join("gatetrain.db")).unwrap().step_memory_history().unwrap();
     let key = gatetrain_core::disk::step_key(&gatetrain_core::disk::canon(&fwd(&target)));
@@ -96,7 +97,7 @@ fn the_size_a_target_folder_reached_is_recorded_per_run_and_becomes_the_predicti
     assert!((mb - 3.0).abs() < 0.05, "recorded {mb} MB under {key}");
     assert!(out(&o).contains("TARGET r1"), "{}", out(&o));
     // the next run prints the prediction it admits on
-    let o = gt(d.path(), &["hold", "r2", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(&target), "--", python(), "-c", "print('RAN')"]);
+    let o = gt(d.path(), &["hold", "r2", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--target-dir", &fwd(&target), "--", child().as_str(), "print", "RAN"]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     assert!(out(&o).contains("predicted 0.0 GB"), "3 MB rounds to 0.0 GB: {}", out(&o));
 }
@@ -112,7 +113,7 @@ fn a_hold_runs_the_chain_in_the_repo_root_it_was_given_whatever_the_callers_dire
     let elsewhere = d.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     // the caller stands in the wrong folder (a script that fell back); the chain still runs in the repository root
-    let o = gt(&elsewhere, &["hold", "r1", "--lock", "h.lock", "--repo-root", &fwd(&repo), "--", python(), "-c", PRINT_CWD]);
+    let o = gt(&elsewhere, &["hold", "r1", "--lock", "h.lock", "--repo-root", &fwd(&repo), "--", child().as_str(), "cwd"]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     let want = repo.canonicalize().unwrap();
     let want = want.to_string_lossy().trim_start_matches(r"\\?\").to_string();
@@ -129,7 +130,7 @@ fn a_hold_whose_root_is_not_a_repository_top_level_is_refused_before_anything_ru
     let plain = d.path().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
     for (root, why) in [(plain, "not inside a git repository"), (repo.join("sub"), "not its top level"), (d.path().join("missing"), "is not a folder")] {
-        let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--repo-root", &fwd(&root), "--", python(), "-c", "print('RAN')"]);
+        let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--repo-root", &fwd(&root), "--", child().as_str(), "print", "RAN"]);
         assert_eq!(o.status.code(), Some(78), "{root:?}: {}", out(&o));
         assert!(out(&o).contains("REFUSED-CWD") && out(&o).contains(why), "{root:?}: {}", out(&o));
         assert!(!out(&o).contains("RAN") && !out(&o).contains("HOLDS"), "the chain must not start: {}", out(&o));
@@ -148,9 +149,8 @@ fn the_lock_sidecar_names_the_target_folders_of_the_run() {
     let target = d.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
     // the chain reads its own sidecar while it holds the lock
-    let script = "import json,sys; j=json.load(open(sys.argv[1] + '.info')); print('SIDECAR=' + json.dumps(j))";
     let lock = fwd(&d.path().join("h.lock"));
-    let o = gt(d.path(), &["hold", "r1", "--lock", &lock, "--target-dir", &fwd(&target), "--", python(), "-c", script, &lock]);
+    let o = gt(d.path(), &["hold", "r1", "--lock", &lock, "--target-dir", &fwd(&target), "--", child().as_str(), "sidecar", &lock]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     let line = out(&o).lines().find_map(|l| l.strip_prefix("SIDECAR=").map(String::from)).unwrap();
     let j: serde_json::Value = serde_json::from_str(&line).unwrap();

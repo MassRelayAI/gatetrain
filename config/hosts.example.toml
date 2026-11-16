@@ -1,5 +1,5 @@
 # gatetrain hosts - copy to hosts.toml (git-ignored) and edit. Names are yours; nothing here is a real machine.
-# Read with the Python standard library (tomllib): no YAML library needed.
+# Plain TOML, read by gatetrain: no YAML library needed.
 profile = "mixed"            # zero-cost | budget | speed | mixed
 
 [budget]
@@ -106,6 +106,7 @@ root_checkout = "/srv/repo/root"
 worktree_prefix = "wt-"                   # folder-name prefix: /srv/wt/wt-lane-x is lane "lane-x" (a path here is refused)
 worktree_min_idle_days = 2                # a worktree with a file changed in the last 2 days is kept (0 = off)
 keep_lanes = ["lane-x"]                   # a lane to keep; an entry that matches no worktree or target is reported by `check`
+protect = ["/srv/captures"]                # never removed, never inside a removal, never reached through a link; paths or globs (default: none)
 target_roots = ["/srv/build/targets"]     # one child folder per lane, named after the lane
 targets = [{ path = "/srv/build/chain", budget_gb = 300 }]
 trash_dir = "/srv/trash"

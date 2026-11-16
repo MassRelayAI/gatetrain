@@ -496,7 +496,7 @@ fn first_violation_stops_the_run() {
     let d = tempfile::tempdir().unwrap();
     let log = d.path().join("l.jsonl");
     let (h, t, mut inv) = gather_sim(&sim, json!({"log": log.to_string_lossy()}), false, 50.0);
-    inv.items.insert(0, Item::new("targets", "clean", "/repo/main", Some(1), "poisoned"));
+    inv.items.insert(0, Item::new("targets", "clean", "/repo/main", Some(1), "poisoned").ruled("test-rule"));
     let classes = ["targets".to_string(), "containers".to_string()];
     is_guard(apply_plan(&h, &sim, &t, &inv, &classes, Some(NOW as f64), None, false));
     assert_eq!(sim.s().containers_exited, ["gate-1", "gate-9", "other-1"]); // nothing after it ran
@@ -512,7 +512,7 @@ fn poisoned(sim: &Shared, extra: serde_json::Value, it: Item) -> Result<(), Fata
 }
 
 fn wt_item(path: &str, branch: &str) -> Item {
-    let mut it = Item::new("worktrees", "remove-worktree", path, Some(0), "poisoned");
+    let mut it = Item::new("worktrees", "remove-worktree", path, Some(0), "poisoned").ruled("test-rule");
     it.extra = Extra::Worktree { branch: branch.into(), links: 0 };
     it
 }

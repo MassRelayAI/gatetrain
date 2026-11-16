@@ -1,0 +1,4 @@
+rc=1
+--- stdout
+--- stderr
+--resource-regex wants NAME=REGEX, got 'noequals'

@@ -16,7 +16,7 @@
   <a href="#roadmap">Roadmap</a>
 </p>
 
-<p align="center"><sub>Status: early. The method runs every day on a large monorepo; the scripts are being extracted and made generic. Skills, plugin and docs are usable today.</sub></p>
+<p align="center"><sub>Status: early. The method runs every day on a large monorepo. The tool is one Rust binary; the skills, plugin and docs are usable today.</sub></p>
 
 ---
 
@@ -39,7 +39,22 @@ line moving without lying to yourself.
 
 ## Installation
 
-Installation differs by harness. The skills are plain Markdown, so any coding agent that reads files can use them.
+gatetrain is one Rust binary, plus skills written as plain Markdown. There is no server and no database service to run: the ledger is one SQLite file that is compiled in. There is one small Python exception on Windows hosts, below.
+
+### The binary
+
+You need Rust 1.89 or newer. Release binaries are not published yet, so build it from source:
+
+```bash
+git clone https://github.com/MassRelayAI/gatetrain
+cd gatetrain
+cargo install --path crates/gatetrain-cli      # puts `gatetrain` in ~/.cargo/bin
+gatetrain --version
+```
+
+To skip the install, run `cargo build --release` and use `target/release/gatetrain`.
+
+One limit to know about: on a Windows host, `doctor` and `tidy` still call `python` for two small probes (the real path of a folder, and free disk space). Everything else is Rust. Linux and macOS hosts need nothing.
 
 ### Claude Code (plugin)
 
@@ -53,33 +68,83 @@ Installation differs by harness. The skills are plain Markdown, so any coding ag
 Copy the skills where your agent reads instructions, and point its rules file at `skills/using-gatetrain/SKILL.md`:
 
 ```bash
-git clone https://github.com/MassRelayAI/gatetrain
-cp -r gatetrain/skills ./.agents/gatetrain-skills     # or your agent's skills or rules folder
+cp -r skills ./.agents/gatetrain-skills     # or your agent's skills or rules folder
 ```
 
 ### Your machines and the ledger
 
 ```bash
-cp gatetrain/config/hosts.example.toml gatetrain/config/hosts.toml   # git-ignored: your machines, roles, disks, cost, profile
-sqlite3 gatetrain.db < gatetrain/ledger/schema.sql                   # or Postgres: the numbers exist from day one
+cp config/hosts.example.toml config/hosts.toml    # git-ignored: your machines, roles, disks, cost, profile
+gatetrain ledger migrate --db gatetrain.db        # creates the ledger file, or brings an old one forward
+```
+
+`ingest` and `status` also create and migrate the ledger when it is missing.
+
+### The commands
+
+<p align="center"><img src="docs/assets/commands.svg" alt="The gatetrain commands in five groups: read a run, guard the host, plan the stack, keep the disk clean, look at the repository" width="100%"></p>
+
+This is the list as `gatetrain --help` prints it. Each command has its own `--help` with every option.
+
+```text
+Commands:
+  parse      Parse a chain log (docs/log-format.md) and print what was read
+  diagnose   Classify every red step of a chain log: class, evidence, remedy, rerun needed
+  report     Text report of a chain log or of a run in the ledger
+  trace      Chrome trace events of a chain log, as one JSON line
+  eta        Predict when a running chain ends, from the ledger's history
+  config     The hosts.toml file
+  log        The decision log
+  batch      The batch state machine (design 3)
+  ledger     The ledger file
+  check      Find leftovers: build targets, worktrees, containers, images, cache, recycle bin (read-only)
+  tidy       Clean the leftovers `check` finds (dry run unless --apply or --auto)
+  watch      Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, blocked, next assignments
+  ingest     Parse a chain log into the ledger (a run id already there is refused; --replace only for a running or stopped run)
+  status     One table for every chain log given: state, eta and when to look next
+  next-tick  When to look at a running chain next
+  flaky      Steps red in one finished run and green in another on the same commit
+  stop       Stop a chain: queued followers first, then the processes (Linux only; a dry run unless --yes)
+  doctor     Pre-run checks per host
+  lanes      Pre-stack collision radar over lane refs
+  generated  List untracked files under the generated directories
+  hold       Hold the host lock as the PARENT of a command (the chain); `--status` reads the lock instead
+  memory     Memory in the host model: record a step peak, or ask the admission rule
+  running    Is a chain running? Reads the host lock, never the process table (exit 0 when held)
+```
+
+The three that change your disk have one shape. `check` only reads. `tidy` is a dry run until you ask:
+
+```text
+$ gatetrain tidy --help
+Clean the leftovers `check` finds (dry run unless --apply or --auto)
+
+Options:
+      --config <CONFIG>  [default: hosts.toml]
+      --host <HOST>      
+      --apply            execute the plan (the default is a dry run)
+      --class <CLS>      comma list of: targets,worktrees,containers,images,cache,trash
+      --auto             for schedulers: check, then apply only the unattended classes
 ```
 
 ### Try it on your own chain log
 
-Needs Python 3 only (standard library). Your chain prints a few marker lines, see [`docs/log-format.md`](docs/log-format.md).
+Your chain prints a few marker lines, see [`docs/log-format.md`](docs/log-format.md).
 
 ```bash
-bin/gatetrain ingest my-chain.log --db gatetrain.db        # parse it into the ledger (append-only)
-bin/gatetrain report --db gatetrain.db --run my-chain      # totals, reds, slowest steps, busiest stretch
-bin/gatetrain diagnose run-chain.log                       # per red step: class, evidence, remedy, full rerun needed
-bin/gatetrain trace my-chain.log > trace.json              # open trace.json in https://ui.perfetto.dev
-bin/gatetrain eta my-running.log --db gatetrain.db         # when will it end (needs earlier runs in the ledger)
-bin/gatetrain next-tick --log my-running.log --db gatetrain.db   # when to look next
+gatetrain ingest my-chain.log --db gatetrain.db            # parse it into the ledger
+gatetrain report --db gatetrain.db --run my-chain          # totals, reds, slowest steps, busiest stretch
+gatetrain diagnose my-chain.log                            # per red step: class, evidence, remedy, full rerun needed
+gatetrain trace my-chain.log > trace.json                  # open trace.json in https://ui.perfetto.dev
+gatetrain eta my-running.log --db gatetrain.db             # when will it end (needs earlier runs in the ledger)
+gatetrain next-tick --log my-running.log --db gatetrain.db # when to look next
 ```
 
-From the sample logs in `tests/fixtures/` (generated from real runs by `tools/synthesize_fixture.py`: real timings and shape, generic names): a 466-step run with one red, then a run in progress:
+The sample logs in `tests/fixtures/` have real timings and shape with generic names: a 466-step run with one red, then a run in progress. This is the output of the Rust binary on them:
 
 ```text
+$ gatetrain ingest tests/fixtures/run-one-red.log --db gatetrain.db
+ingested run-one-red: red, 466 steps, 1 red
 $ gatetrain report --db gatetrain.db --run run-one-red
 run run-one-red: red  commit 0a1b2c3d4  host builder-1
 steps 466  finished 466  red 1  cached 0  unknown start 0
@@ -99,22 +164,9 @@ $ gatetrain next-tick --log tests/fixtures/run-partial-red.log --db gatetrain.db
 5 min - a red appeared in the last 5 minutes: look again at the minimum
 ```
 
-Pre-run checks and a one-table view of several runs. Real output, from `doctor` on a Windows workstation with a small local config
-(`reach = "local"`; the ps-based checks for watchers and locks are skipped there and say so; the duplicate port, the missing tool and the
-unmounted removable disk are planted on purpose):
+A one-table view of several runs at once:
 
 ```text
-$ gatetrain doctor --config local.toml
-PASS  L18,L30  this-pc disk: F:/: 195 GB free >= 20
-WARN  L18      this-pc disk: E:/external-ssd: removable disk is not mounted  -> fix: attach and mount E:/external-ssd; what it enables is dropped meanwhile
-PASS  L18,L19  this-pc capacity: can run now: preflight
-PASS  L31      this-pc containers: no exited container with prefix gate-
-WARN  L24      this-pc watchers: skipped on windows: needs ps with elapsed time  -> fix: run this check on a host where it is supported
-PASS  L29      this-pc toolchain: python: Python 3.12.10
-FAIL  L29      this-pc toolchain: no-such-tool: does not resolve or prints no version  -> fix: install no-such-tool or fix the PATH or version file the chain uses
-FAIL  L22      this-pc ports: duplicate port(s): 5500  -> fix: give every gate its own port
-WARN  L32      this-pc lock: skipped on windows: needs stat and date  -> fix: run this check on a host where it is supported
-PASS  L26      this-pc chain: no chain running
 $ gatetrain status --log tests/fixtures/run-one-red.log --log tests/fixtures/run-partial-red.log --log tests/fixtures/run-stopped.log --now 2026-11-11T18:15:00+07:00
 run              host       steps    reds  state    eta    band         next look (min)
 run-one-red      builder-1  466/466  1     red      -      -            -
@@ -123,50 +175,75 @@ run-stopped      builder-1  31/465   1     stopped  -      -            -
 next look: 5 min (run-partial-red: a red appeared in the last 5 minutes: look again at the minimum)
 ```
 
-(The doctor output above is trimmed to one line per distinct check; the port lines for single ports are omitted.)
-`gatetrain stop PATTERN [--follower PATTERN] [--yes]` is a dry run until `--yes`, and works on Linux only. The ssh runner and the Linux
-checks are covered by tests with canned outputs, not yet by a run against a real host.
+Pre-run checks. Real output of `doctor` on a Windows workstation with a small local config (`reach = "local"`; the removable disk is not mounted, the tool does not exist and one port is listed twice, all on purpose):
 
-Before stacking, `gatetrain lanes` reads only git and tells you which lanes will collide, with each other, with a commit they both
-carry, and with main itself. Real output from a throwaway repo (`auth` and `billing` branched from an unmerged side branch that edits
-`server.rs`; `ui` from main and edits the same line; main has since moved on and edited the same import line as `ui`):
+```text
+$ gatetrain doctor --config local.toml
+PASS  L18,L30  this-pc disk: F:/: 417 GB free >= 20
+WARN  L18      this-pc disk: E:/external-ssd: removable disk is not mounted  -> fix: attach and mount E:/external-ssd; what it enables is dropped meanwhile
+PASS  L18,L19  this-pc capacity: can run now: preflight
+PASS  L31      this-pc containers: no exited container with prefix gate-
+PASS  L29      this-pc toolchain: git: git version 2.45.1.windows.1
+PASS  L29      this-pc toolchain: cargo: cargo 1.98.1 (797e8a9bc 2026-08-05)
+FAIL  L29      this-pc toolchain: no-such-tool: does not resolve or prints no version  -> fix: install no-such-tool or fix the PATH or version file the chain uses
+PASS  L21      this-pc ports: port 5500 is outside every ephemeral or reserved range
+PASS  L21      this-pc ports: port 5501 is outside every ephemeral or reserved range
+PASS  L21      this-pc ports: port 5500 is outside every ephemeral or reserved range
+FAIL  L22      this-pc ports: duplicate port(s): 5500  -> fix: give every gate its own port
+```
+
+`gatetrain stop PATTERN [--follower PATTERN] [--yes]` is a dry run until `--yes`, and works on Linux only. The ssh runner and the Linux checks are covered by tests with canned outputs, not yet by a run against a real host.
+
+Before stacking, `gatetrain lanes` reads only git and tells you which lanes will collide, with each other, with a commit they both carry, and with main itself. Real output from a throwaway repo (`auth` and `billing` branched from an unmerged side branch that edits `server.rs`; `ui` from main edits the same import line as the side branch; main has since moved on and edited the line `ui` also edits in `app.js`):
 
 ```text
 $ gatetrain lanes --repo . --main main auth billing ui
 lanes against main
 
 1. bases and containment
-   auth: merge-base 00e23bdd6, 2 own commits, base for stacking a18ea88c1
-   billing: merge-base 00e23bdd6, 2 own commits, base for stacking a18ea88c1
-   ui: merge-base 00e23bdd6, 1 own commits
-   both carry 1 commits up to a18ea88c1 (auth and billing): stack with that tip as lane base
-   pass 1: base 00e23bdd6 (on main): ui
-   pass 1: stack the carried commits up to a18ea88c1 (base 00e23bdd6) on main, once, for auth and billing
-   pass 2: base a18ea88c1 (carried tip, after pass 1): auth, billing
+   auth: merge-base c267d76fa, 2 own commits, base for stacking a322f8843
+   billing: merge-base c267d76fa, 2 own commits, base for stacking a322f8843
+   ui: merge-base c267d76fa, 1 own commits
+   both carry 1 commits up to a322f8843 (auth and billing): stack with that tip as lane base
+   pass 1: base c267d76fa (on main): ui
+   pass 1: stack the carried commits up to a322f8843 (base c267d76fa) on main, once, for auth and billing
+   pass 2: base a322f8843 (carried tip, after pass 1): auth, billing
 
 2. collision hotspots
-   SAME-LINES  app.js  [ui x main] lines 2 -> certain conflict, merge by hand
-   SAME-LINES  server.rs  [carried a18ea88c1 x ui] lines 2 -> certain conflict, merge by hand
+   SAME-LINES  app.js  [ui x main] lines 1-2 -> certain conflict, merge by hand
+   SAME-LINES  server.rs  [auth x billing] lines 3 -> certain conflict, merge by hand
+   SAME-LINES  server.rs  [carried a322f8843 x ui] lines 1 -> certain conflict, merge by hand
+   CODE-BOTH   server.rs: lanes auth, ui, billing -> a person reads both diffs
 
 3. doubled-line risk
-   server.rs:2 [carried a18ea88c1 x ui] -> likely doubled line after stacking: keep one, check it appears once
-   app.js:2 [ui x main] -> likely doubled line after stacking: keep one, check it appears once
+   server.rs:3 [auth x billing] -> likely doubled line after stacking: keep one, check it appears once
+   server.rs:1 [carried a322f8843 x ui] -> likely doubled line after stacking: keep one, check it appears once
 
 4. resource clashes
    none
 
 5. paired counts (heuristic)
+   ui: EXPECTED 13 -> 12 in app.js; count changed here but its check still says 13 in gate.test.mjs:1 -> update it
    ui: EXPECTED 13 -> 12 in gate.mjs; count changed here but its check still says 13 in gate.test.mjs:1 -> update it
 
 6. parallel plan
-   group 1: ui
-   group 2: auth, billing  (after the groups above; conflicts with them)
-3 lanes: 2 independent groups; 2 certain conflicts; 0 shared hubs; 0 resource clashes
+   group 1: auth
+   group 2: billing  (after the groups above; conflicts with them)
+   group 3: ui  (after the groups above; conflicts with them)
+3 lanes: 3 independent groups; 3 certain conflicts; 0 shared hubs; 0 resource clashes
 ```
 
 It is advice (exit 0 unless git fails); the same data with `--json`. Heuristics are listed in [`modules/plan.md`](modules/plan.md).
 
-Run the tests with `python -m unittest discover -s tests -v`.
+### Tests
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+python tools/privacy_check.py        # the one Python script left: a repository gate, not the product
+```
+
+Real run on Windows, from `cargo test --workspace`: 361 tests, 0 failed (gatetrain-core 290, gatetrain-cli 70, the test child program 1). Clippy with `-D warnings` is clean. The privacy gate has 7 tests of its own (`python -m unittest discover -s tests -p test_privacy.py`). CI repeats all of it on Linux, macOS and Windows. The tests that once compared against the Python version now read what it printed: `tests/golden/` and `tests/corpus/`.
 
 Works alongside single-branch development skill sets (brainstorming, plans, test-driven development, code review, such as
 [Superpowers](https://github.com/obra/superpowers)): those make one lane good; gatetrain runs many lanes on many machines and proves the batch.
@@ -175,13 +252,24 @@ Works alongside single-branch development skill sets (brainstorming, plans, test
 
 <p align="center"><img src="docs/assets/flow.svg" alt="The flow: plan, lanes, review, stack, pre-flight, chain, merge on proof, tidy; the tick watches every host; the ledger records every run" width="100%"></p>
 
-Work is cut into **lanes** (one branch, one worktree, one owner, a list of owned files). Lanes whose files do not overlap run **in parallel**
-on whatever machine has a free slot. Finished lanes are **stacked** into a **batch**, checked cheaply in a **pre-flight**, then proven by one
-**chain** (the full verification run) on the builder. Only a chain that is green on exactly the tested commit **merges**. A cheap recurring
-**tick** watches every machine, chain, lane and disk, acts only where a written rule covers it, and reports in a few lines. Everything is a row
-in the **ledger**. Every failure that happened twice becomes a **lesson**: a rule plus a test that proves it.
+Work is cut into **lanes**. A lane is one branch, one worktree, one owner and a list of owned files. Lanes whose files do not overlap run **in parallel** on whatever machine has a free slot.
 
-<p align="center"><img src="docs/assets/stack.svg" alt="Stack by base, in passes: lanes from different bases are stacked pass by pass; known artefacts are repaired, everything else stays red" width="100%"></p>
+Finished lanes are **stacked** into a **batch**. The batch gets a cheap **pre-flight**. Then one **chain** (the full verification run) proves it on the builder. Only a chain that is green on exactly the tested commit **merges**.
+
+A cheap recurring **tick** watches every machine, chain, lane and disk. It acts only where a written rule covers it, and it reports in a few lines. Everything is a row in the **ledger**. Every failure that happened twice becomes a **lesson**: a rule plus a test that proves it.
+
+The binary is the part that measures and guards:
+
+| step of the flow | commands that do it |
+|---|---|
+| plan and stack | `lanes`, `generated`, `batch` |
+| pre-flight and chain | `doctor`, `hold`, `memory`, `running`, `stop` |
+| read the run | `ingest`, `report`, `trace`, `eta`, `next-tick`, `status`, `diagnose`, `flaky` |
+| tick | `status`, `next-tick`, `watch` |
+| tidy | `check`, `tidy` |
+| the record | `ledger`, `log` |
+
+The agents' side of each step is a skill, see [the basic workflow](#the-basic-workflow).
 
 ### What a tick looks like (example)
 
@@ -221,6 +309,34 @@ worktrees with branch, merged, dirty and links inside, exited containers, images
 wrong place) and a "would tidy" plan with bytes per item. Exit code 1 means a threshold is crossed: a disk below its minimum, a target over
 its budget, a profile inside an evidence folder.
 
+### What tidy may remove, and why
+
+Tidy removes an item only when one of these rules names it. The rule is written to the action log with the removal. An item that matches no rule is never removed and is reported as `kept: no rule`.
+
+| class | rule (as logged) | what must be true |
+|---|---|---|
+| worktrees | `merged-clean-worktree` | The branch is not main, and its content is on main: an ancestor, or a merge into main changes nothing (`git merge-tree --write-tree`, git 2.38+). No uncommitted work (ignored files do not count). Not locked, not a link, not on a keep list, a plain branch name, and no file changed in the last `worktree_min_idle_days` when that is set. |
+| targets | `lane-merged-target` | A folder under `target_roots`, named after a lane whose branch content is on main. Idle for `min_idle_min`, no file inside changed in that time, not named by a running `hold`, its worktree not dirty, not a link, not on a keep list. |
+| targets | `orphan-target` | The same, for a lane with no branch, and only when `orphan_targets = "clean"`. |
+| targets | `over-budget-target` | A folder named in `targets` whose measured size is over its `budget_gb`. Attended only: `--auto` never takes it. |
+| containers | `exited-container` | The name starts with `container_prefix`, and the container exited and is not running. Removed by exact name. |
+| images | `unused-image` | The name matches `image_patterns`, and no container uses it. Removed by exact name. |
+| cache | `old-build-cache` | `cache_days` is above 0. Prunes build cache older than that. |
+| trash | `old-trash-entry` | A direct child of `trash_dir`, older than `trash_days`. Age counts from when tidy first saw it, or from the stamp in its name, whichever is later. |
+
+Every `--apply` and `--auto` action appends one line to the tidy log (`log`, default `tidy-log.jsonl`): the item, the class, the bytes before and after, the time, the `rule` and the `why` (the facts for this item, such as `branch line/x is on main`). A line with status `intent` is written before the action, so a crash leaves a trace.
+
+### Protected paths
+
+`protect` is a list of paths or globs. The default is empty.
+
+```toml
+[tidy]
+protect = ["/srv/captures", "/srv/repo/docs/reference/*"]
+```
+
+In a dry run, `--apply` and `--auto`, no class removes an item that is inside a protected path, is a protected path, or contains one. A link that leads into a protected path counts too, and is never followed for deletion. The item is kept and printed as `kept: protected`. The check runs twice: when the plan is made, and again at the moment of each action.
+
 It ends in bounded time and is never silent (L76): each worktree, target and recycle-bin entry is reported on stderr as soon as it is
 judged (`tidy: worktree 3/54 <path>: not merged`; ` [12s]` when an item was slow; `GATETRAIN_PROGRESS=0` turns it off). The cheap checks
 decide first (keep lists, merge proof, `git status`): only a worktree that would be removed has its links listed, its size measured
@@ -244,6 +360,7 @@ measure = "age-only"                    # du | age-only (default du)
 main_checkout = "/srv/repo/main"        # needed for lane / worktree logic
 root_checkout = "/srv/repo/root"        # pinned, never touched
 keep_paths    = ["/srv/repo/chain-wt"]  # worktrees or folders in use
+protect       = ["/srv/captures"]       # never removed, never contained in a removal, never reached through a link; paths or globs, default none
 keep_lanes    = ["lane-x"]              # lane names are the worktree FOLDER NAME minus worktree_prefix; an entry that matches nothing is reported
 worktree_prefix = "wt-"                 # a prefix of the folder name (wt-lane-x -> lane-x), never a path: a separator is a config error
 target_roots  = ["/srv/build/targets"]  # each child folder is one lane's target, named after the lane
@@ -364,7 +481,8 @@ Seventy-six so far, each with the rule and what enforces it ([`docs/lessons.md`]
 - [x] `gatetrain doctor` (pre-run checks per host, disks as resources) and `gatetrain stop` (chain plus queued followers)
 - [x] `gatetrain watch`: a repository's lanes and the next assignments, read-only (log watchers are still `status` / `next-tick`)
 - [ ] `gatetrain tick` (generic, host-aware); `status` and multi-log `next-tick` are built
-- [ ] `gatetrain chain` (holder, step runner, stop)
+- [x] `gatetrain hold`, `running`, `memory` and `batch`: the host lock, the memory rule and the batch state machine
+- [ ] `gatetrain chain` (step runner)
 - [x] Ledger writer: `gatetrain ingest` (chain logs into runs and steps), `report`, `trace` (Perfetto timeline)
 - [x] `gatetrain eta` (prediction from the ledger) and `gatetrain next-tick` (adaptive cadence)
 - [ ] `gatetrain stack` with base detection, artefact repair and pre-flight on a free host

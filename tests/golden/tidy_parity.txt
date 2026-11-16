@@ -1,0 +1,536 @@
+### check_text rc=1
+== h1
+disks
+path    free  min    state
+/build  5 GB  50 GB  LOW
+build targets
+path                     size      idle  lane      merged  tag  budget  plan
+/build/chain             3.0 GB    240h  -         -       yes  OVER    tidy
+/build/targets/lane-a    100.0 MB  240h  lane-a    yes     no   -       tidy
+/build/targets/lane-b    100.0 MB  240h  lane-b    no      yes  -       lane not merged
+/build/targets/lane-c    100.0 MB  240h  lane-c    yes     yes  -       keep list
+/build/targets/lane-new  100.0 MB  0h    lane-new  yes     yes  -       used in the last 60 min
+worktrees
+path               branch         merged  dirty  links  plan
+/repo/main         main           -       -      -      main/root/keep list
+/repo/wt/lane-a    line/lane-a    yes     no     1      tidy
+/repo/wt/lane-b    line/lane-b    no      no     -      not merged
+/repo/wt/lane-d    line/lane-d    yes     yes    -      uncommitted work
+/repo/wt/lane-c    line/lane-c    yes     no     -      keep list
+/repo/wt/lane-new  line/lane-new  yes     no     0      tidy
+exited containers: gate-1, gate-9
+images
+image       size    state
+gate-img:1  2.0 GB  unused
+gate-img:2  1.0 GB  in use
+build cache: 8.0 GB (6.0 GB reclaimable)
+recycle bin
+entry       size     age
+/trash/new  ?        1d
+/trash/old  50.0 MB  10d
+would tidy
+class       action           item                   bytes     mode      why
+worktrees   remove-worktree  /repo/wt/lane-a        -                   branch line/lane-a is on main
+worktrees   remove-worktree  /repo/wt/lane-new      -                   branch line/lane-new is on main
+targets     clean            /build/chain           3.0 GB    attended  over its 1 GB budget
+targets     clean            /build/targets/lane-a  100.0 MB            lane lane-a: branch content is on main
+containers  rm-container     gate-1                 -                   exited throwaway container
+images      rm-image         gate-img:1             2.0 GB              no container uses it; matches a configured pattern
+cache       prune-cache      build cache            6.0 GB              older than 3 days (upper bound: all reclaimable)
+trash       remove           /trash/old             50.0 MB             in the recycle bin 10 days (> 7)
+total reclaimable: 11.1 GB
+THRESHOLD: disk /build: 5 GB free < 50
+THRESHOLD: target /build/chain: 3.0 GB over budget 1 GB
+--- stderr
+### end
+### check_json rc=1
+{
+  "host": "h1",
+  "plan": [
+    {
+      "cls": "worktrees",
+      "kind": "remove-worktree",
+      "key": "/repo/wt/lane-a",
+      "bytes": 0,
+      "why": "branch line/lane-a is on main",
+      "keep": null,
+      "attended_only": false,
+      "extra": {
+        "branch": "line/lane-a",
+        "links": 1
+      }
+    },
+    {
+      "cls": "worktrees",
+      "kind": "remove-worktree",
+      "key": "/repo/wt/lane-new",
+      "bytes": 0,
+      "why": "branch line/lane-new is on main",
+      "keep": null,
+      "attended_only": false,
+      "extra": {
+        "branch": "line/lane-new",
+        "links": 0
+      }
+    },
+    {
+      "cls": "targets",
+      "kind": "clean",
+      "key": "/build/chain",
+      "bytes": 3221225472,
+      "why": "over its 1 GB budget",
+      "keep": null,
+      "attended_only": true,
+      "extra": {
+        "cargo": true,
+        "tag": true,
+        "branch": null
+      }
+    },
+    {
+      "cls": "targets",
+      "kind": "clean",
+      "key": "/build/targets/lane-a",
+      "bytes": 104857600,
+      "why": "lane lane-a: branch content is on main",
+      "keep": null,
+      "attended_only": false,
+      "extra": {
+        "cargo": true,
+        "tag": false,
+        "branch": "line/lane-a"
+      }
+    },
+    {
+      "cls": "containers",
+      "kind": "rm-container",
+      "key": "gate-1",
+      "bytes": 0,
+      "why": "exited throwaway container",
+      "keep": null,
+      "attended_only": false,
+      "extra": {}
+    },
+    {
+      "cls": "images",
+      "kind": "rm-image",
+      "key": "gate-img:1",
+      "bytes": 2147483648,
+      "why": "no container uses it; matches a configured pattern",
+      "keep": null,
+      "attended_only": false,
+      "extra": {}
+    },
+    {
+      "cls": "cache",
+      "kind": "prune-cache",
+      "key": "build cache",
+      "bytes": 6442450944,
+      "why": "older than 3 days (upper bound: all reclaimable)",
+      "keep": null,
+      "attended_only": false,
+      "extra": {}
+    },
+    {
+      "cls": "trash",
+      "kind": "remove",
+      "key": "/trash/old",
+      "bytes": 52428800,
+      "why": "in the recycle bin 10 days (> 7)",
+      "keep": null,
+      "attended_only": false,
+      "extra": {}
+    }
+  ],
+  "breaches": [
+    "disk /build: 5 GB free < 50",
+    "target /build/chain: 3.0 GB over budget 1 GB"
+  ]
+}
+--- stderr
+### end
+### check_ok rc=0
+== h1
+disks
+path    free    min    state
+/build  500 GB  50 GB  ok
+build targets
+path                     size      idle  lane      merged  tag  budget  plan
+/build/chain             1.0 MB    240h  -         -       yes  -       tidy
+/build/targets/lane-a    100.0 MB  240h  lane-a    yes     no   -       tidy
+/build/targets/lane-b    100.0 MB  240h  lane-b    no      yes  -       lane not merged
+/build/targets/lane-c    100.0 MB  240h  lane-c    yes     yes  -       keep list
+/build/targets/lane-new  100.0 MB  0h    lane-new  yes     yes  -       used in the last 60 min
+worktrees
+path               branch         merged  dirty  links  plan
+/repo/main         main           -       -      -      main/root/keep list
+/repo/wt/lane-a    line/lane-a    yes     no     1      tidy
+/repo/wt/lane-b    line/lane-b    no      no     -      not merged
+/repo/wt/lane-d    line/lane-d    yes     yes    -      uncommitted work
+/repo/wt/lane-c    line/lane-c    yes     no     -      keep list
+/repo/wt/lane-new  line/lane-new  yes     no     0      tidy
+exited containers: gate-1, gate-9
+images
+image       size    state
+gate-img:1  2.0 GB  unused
+gate-img:2  1.0 GB  in use
+build cache: 8.0 GB (6.0 GB reclaimable)
+recycle bin
+entry       size     age
+/trash/new  ?        1d
+/trash/old  50.0 MB  10d
+would tidy
+class       action           item                   bytes     mode  why
+worktrees   remove-worktree  /repo/wt/lane-a        -               branch line/lane-a is on main
+worktrees   remove-worktree  /repo/wt/lane-new      -               branch line/lane-new is on main
+targets     clean            /build/targets/lane-a  100.0 MB        lane lane-a: branch content is on main
+containers  rm-container     gate-1                 -               exited throwaway container
+images      rm-image         gate-img:1             2.0 GB          no container uses it; matches a configured pattern
+cache       prune-cache      build cache            6.0 GB          older than 3 days (upper bound: all reclaimable)
+trash       remove           /trash/old             50.0 MB         in the recycle bin 10 days (> 7)
+total reclaimable: 8.1 GB
+--- stderr
+### end
+### check_slow_text rc=1
+== h1
+disks
+path    free  min    state
+/build  5 GB  50 GB  LOW
+build targets
+path                     size      idle  lane      merged  tag  budget  plan
+/build/chain             3.0 GB    240h  -         -       yes  OVER    tidy
+/build/targets/lane-a    100.0 MB  240h  lane-a    yes     no   -       tidy
+/build/targets/lane-b    100.0 MB  240h  lane-b    no      yes  -       lane not merged
+/build/targets/lane-c    100.0 MB  240h  lane-c    yes     yes  -       keep list
+/build/targets/lane-new  100.0 MB  0h    lane-new  yes     yes  -       used in the last 60 min
+worktrees
+path               branch         merged  dirty  links  plan
+/repo/main         main           -       -      -      main/root/keep list
+/repo/wt/lane-a    line/lane-a    yes     no     1      tidy
+/repo/wt/lane-b    line/lane-b    no      no     -      not merged
+/repo/wt/lane-d    line/lane-d    yes     yes    -      uncommitted work
+/repo/wt/lane-c    line/lane-c    yes     no     -      keep list
+/repo/wt/lane-new  line/lane-new  yes     no     0      tidy
+exited containers: gate-1, gate-9
+images
+image       size    state
+gate-img:1  2.0 GB  unused
+gate-img:2  1.0 GB  in use
+build cache: 8.0 GB (6.0 GB reclaimable)
+recycle bin
+entry       size  age
+/trash/new  ?     1d
+/trash/old  ?     10d
+would tidy
+class       action           item                   bytes     mode      why
+worktrees   remove-worktree  /repo/wt/lane-a        -                   branch line/lane-a is on main
+worktrees   remove-worktree  /repo/wt/lane-new      -                   branch line/lane-new is on main
+targets     clean            /build/chain           3.0 GB    attended  over its 1 GB budget
+targets     clean            /build/targets/lane-a  100.0 MB            lane lane-a: branch content is on main
+containers  rm-container     gate-1                 -                   exited throwaway container
+images      rm-image         gate-img:1             2.0 GB              no container uses it; matches a configured pattern
+cache       prune-cache      build cache            6.0 GB              older than 3 days (upper bound: all reclaimable)
+trash       remove           /trash/old             ?                   in the recycle bin 10 days (> 7)
+total reclaimable: 11.1 GB + 1 item(s) of unknown size
+THRESHOLD: disk /build: 5 GB free < 50
+THRESHOLD: target /build/chain: 3.0 GB over budget 1 GB
+--- stderr
+### end
+### check_slow_json rc=1
+{
+  "host": "h1",
+  "plan": [
+    {
+      "cls": "worktrees",
+      "kind": "remove-worktree",
+      "key": "/repo/wt/lane-a",
+      "bytes": 0,
+      "why": "branch line/lane-a is on main",
+      "keep": null,
+      "attended_only": false,
+      "extra": {
+        "branch": "line/lane-a",
+        "links": 1
+      }
+    },
+    {
+      "cls": "worktrees",
+      "kind": "remove-worktree",
+      "key": "/repo/wt/lane-new",
+      "bytes": 0,
+      "why": "branch line/lane-new is on main",
+      "keep": null,
+      "attended_only": false,
+      "extra": {
+        "branch": "line/lane-new",
+        "links": 0
+      }
+    },
+    {
+      "cls": "targets",
+      "kind": "clean",
+      "key": "/build/chain",
+      "bytes": 3221225472,
+      "why": "over its 1 GB budget",
+      "keep": null,
+      "attended_only": true,
+      "extra": {
+        "cargo": true,
+        "tag": true,
+        "branch": null
+      }
+    },
+    {
+      "cls": "targets",
+      "kind": "clean",
+      "key": "/build/targets/lane-a",
+      "bytes": 104857600,
+      "why": "lane lane-a: branch content is on main",
+      "keep": null,
+      "attended_only": false,
+      "extra": {
+        "cargo": true,
+        "tag": false,
+        "branch": "line/lane-a"
+      }
+    },
+    {
+      "cls": "containers",
+      "kind": "rm-container",
+      "key": "gate-1",
+      "bytes": 0,
+      "why": "exited throwaway container",
+      "keep": null,
+      "attended_only": false,
+      "extra": {}
+    },
+    {
+      "cls": "images",
+      "kind": "rm-image",
+      "key": "gate-img:1",
+      "bytes": 2147483648,
+      "why": "no container uses it; matches a configured pattern",
+      "keep": null,
+      "attended_only": false,
+      "extra": {}
+    },
+    {
+      "cls": "cache",
+      "kind": "prune-cache",
+      "key": "build cache",
+      "bytes": 6442450944,
+      "why": "older than 3 days (upper bound: all reclaimable)",
+      "keep": null,
+      "attended_only": false,
+      "extra": {}
+    },
+    {
+      "cls": "trash",
+      "kind": "remove",
+      "key": "/trash/old",
+      "bytes": null,
+      "why": "in the recycle bin 10 days (> 7)",
+      "keep": null,
+      "attended_only": false,
+      "extra": {}
+    }
+  ],
+  "breaches": [
+    "disk /build: 5 GB free < 50",
+    "target /build/chain: 3.0 GB over budget 1 GB"
+  ]
+}
+--- stderr
+### end
+### check_all_slow rc=1
+== h1
+disks
+path    free  min    state
+/build  5 GB  50 GB  LOW
+build targets
+path                     size  idle  lane      merged  tag  budget        plan
+/build/chain             ?     240h  -         -       yes  size unknown  tidy
+/build/targets/lane-a    ?     240h  lane-a    yes     no   -             tidy
+/build/targets/lane-b    ?     240h  lane-b    no      yes  -             lane not merged
+/build/targets/lane-c    ?     240h  lane-c    yes     yes  -             keep list
+/build/targets/lane-new  ?     0h    lane-new  yes     yes  -             used in the last 60 min
+worktrees
+path               branch         merged  dirty  links  plan
+/repo/main         main           -       -      -      main/root/keep list
+/repo/wt/lane-a    line/lane-a    yes     no     1      tidy
+/repo/wt/lane-b    line/lane-b    no      no     -      not merged
+/repo/wt/lane-d    line/lane-d    yes     yes    -      uncommitted work
+/repo/wt/lane-c    line/lane-c    yes     no     -      keep list
+/repo/wt/lane-new  line/lane-new  yes     no     0      tidy
+exited containers: gate-1, gate-9
+images
+image       size    state
+gate-img:1  2.0 GB  unused
+gate-img:2  1.0 GB  in use
+build cache: 8.0 GB (6.0 GB reclaimable)
+recycle bin
+entry       size  age
+/trash/new  ?     1d
+/trash/old  ?     10d
+would tidy
+class       action           item                   bytes   mode  why
+worktrees   remove-worktree  /repo/wt/lane-a        ?             branch line/lane-a is on main
+worktrees   remove-worktree  /repo/wt/lane-new      ?             branch line/lane-new is on main
+targets     clean            /build/targets/lane-a  ?             lane lane-a: branch content is on main
+containers  rm-container     gate-1                 -             exited throwaway container
+images      rm-image         gate-img:1             2.0 GB        no container uses it; matches a configured pattern
+cache       prune-cache      build cache            6.0 GB        older than 3 days (upper bound: all reclaimable)
+trash       remove           /trash/old             ?             in the recycle bin 10 days (> 7)
+total reclaimable: 8.0 GB + 4 item(s) of unknown size
+THRESHOLD: disk /build: 5 GB free < 50
+--- stderr
+### end
+### tidy_dry rc=1
+== h1
+disks
+path    free  min    state
+/build  5 GB  50 GB  LOW
+build targets
+path                     size      idle  lane      merged  tag  budget  plan
+/build/chain             3.0 GB    240h  -         -       yes  OVER    tidy
+/build/targets/lane-a    100.0 MB  240h  lane-a    yes     no   -       tidy
+/build/targets/lane-b    100.0 MB  240h  lane-b    no      yes  -       lane not merged
+/build/targets/lane-c    100.0 MB  240h  lane-c    yes     yes  -       keep list
+/build/targets/lane-new  100.0 MB  0h    lane-new  yes     yes  -       used in the last 60 min
+worktrees
+path               branch         merged  dirty  links  plan
+/repo/main         main           -       -      -      main/root/keep list
+/repo/wt/lane-a    line/lane-a    yes     no     1      tidy
+/repo/wt/lane-b    line/lane-b    no      no     -      not merged
+/repo/wt/lane-d    line/lane-d    yes     yes    -      uncommitted work
+/repo/wt/lane-c    line/lane-c    yes     no     -      keep list
+/repo/wt/lane-new  line/lane-new  yes     no     0      tidy
+exited containers: gate-1, gate-9
+images
+image       size    state
+gate-img:1  2.0 GB  unused
+gate-img:2  1.0 GB  in use
+build cache: 8.0 GB (6.0 GB reclaimable)
+recycle bin
+entry       size     age
+/trash/new  ?        1d
+/trash/old  50.0 MB  10d
+would tidy
+class       action           item                   bytes     mode      why
+worktrees   remove-worktree  /repo/wt/lane-a        -                   branch line/lane-a is on main
+worktrees   remove-worktree  /repo/wt/lane-new      -                   branch line/lane-new is on main
+targets     clean            /build/chain           3.0 GB    attended  over its 1 GB budget
+targets     clean            /build/targets/lane-a  100.0 MB            lane lane-a: branch content is on main
+containers  rm-container     gate-1                 -                   exited throwaway container
+images      rm-image         gate-img:1             2.0 GB              no container uses it; matches a configured pattern
+cache       prune-cache      build cache            6.0 GB              older than 3 days (upper bound: all reclaimable)
+trash       remove           /trash/old             50.0 MB             in the recycle bin 10 days (> 7)
+total reclaimable: 11.1 GB
+THRESHOLD: disk /build: 5 GB free < 50
+THRESHOLD: target /build/chain: 3.0 GB over budget 1 GB
+dry run: 8 action(s) in classes targets,worktrees,containers,images,cache,trash; add --apply to execute
+--- stderr
+### end
+### tidy_dry_class rc=1
+== h1
+disks
+path    free  min    state
+/build  5 GB  50 GB  LOW
+build targets
+path                     size      idle  lane      merged  tag  budget  plan
+/build/chain             3.0 GB    240h  -         -       yes  OVER    tidy
+/build/targets/lane-a    100.0 MB  240h  lane-a    yes     no   -       tidy
+/build/targets/lane-b    100.0 MB  240h  lane-b    no      yes  -       lane not merged
+/build/targets/lane-c    100.0 MB  240h  lane-c    yes     yes  -       keep list
+/build/targets/lane-new  100.0 MB  0h    lane-new  yes     yes  -       used in the last 60 min
+worktrees
+path               branch         merged  dirty  links  plan
+/repo/main         main           -       -      -      main/root/keep list
+/repo/wt/lane-a    line/lane-a    yes     no     1      tidy
+/repo/wt/lane-b    line/lane-b    no      no     -      not merged
+/repo/wt/lane-d    line/lane-d    yes     yes    -      uncommitted work
+/repo/wt/lane-c    line/lane-c    yes     no     -      keep list
+/repo/wt/lane-new  line/lane-new  yes     no     0      tidy
+exited containers: gate-1, gate-9
+images
+image       size    state
+gate-img:1  2.0 GB  unused
+gate-img:2  1.0 GB  in use
+build cache: 8.0 GB (6.0 GB reclaimable)
+recycle bin
+entry       size     age
+/trash/new  ?        1d
+/trash/old  50.0 MB  10d
+would tidy
+class       action           item                   bytes     mode      why
+worktrees   remove-worktree  /repo/wt/lane-a        -                   branch line/lane-a is on main
+worktrees   remove-worktree  /repo/wt/lane-new      -                   branch line/lane-new is on main
+targets     clean            /build/chain           3.0 GB    attended  over its 1 GB budget
+targets     clean            /build/targets/lane-a  100.0 MB            lane lane-a: branch content is on main
+containers  rm-container     gate-1                 -                   exited throwaway container
+images      rm-image         gate-img:1             2.0 GB              no container uses it; matches a configured pattern
+cache       prune-cache      build cache            6.0 GB              older than 3 days (upper bound: all reclaimable)
+trash       remove           /trash/old             50.0 MB             in the recycle bin 10 days (> 7)
+total reclaimable: 11.1 GB
+THRESHOLD: disk /build: 5 GB free < 50
+THRESHOLD: target /build/chain: 3.0 GB over budget 1 GB
+dry run: 2 action(s) in classes trash,containers; add --apply to execute
+--- stderr
+### end
+### tidy_auto rc=0
+h1: 3 planned in targets,containers,trash; 3 done, 0 failed
+h1: 150.0 MB reclaimed (measured: size before minus size after, per item that went ok; 150.0 MB planned); log {DIR}/l.jsonl
+h1: disk /build 500 GB free (min 50)
+h1: 4 item(s) still plannable, 0 threshold(s) crossed
+--- stderr
+--- log
+{"action": "clean", "after_bytes": null, "before_bytes": 104857600, "class": "targets", "host": "h1", "item": "/build/targets/lane-a", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "clean", "after_bytes": 0, "before_bytes": 104857600, "class": "targets", "free_gb_after": 500.0, "free_gb_before": 500.0, "host": "h1", "item": "/build/targets/lane-a", "note": "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "rm-container", "after_bytes": null, "before_bytes": 0, "class": "containers", "host": "h1", "item": "gate-1", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "rm-container", "after_bytes": 0, "before_bytes": 0, "class": "containers", "host": "h1", "item": "gate-1", "note": "removed by exact name", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove", "after_bytes": null, "before_bytes": 52428800, "class": "trash", "host": "h1", "item": "/trash/old", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove", "after_bytes": 0, "before_bytes": 52428800, "class": "trash", "free_gb_after": 500.0, "free_gb_before": 500.0, "host": "h1", "item": "/trash/old", "note": "removed", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+### end
+### tidy_apply_all rc=1
+h1: 8 planned in targets,worktrees,containers,images,cache,trash; 8 done, 0 failed
+h1: 11.1 GB reclaimed (measured: size before minus size after, per item that went ok; 11.1 GB planned); log {DIR}/l.jsonl
+h1: disk /build 5 GB free (min 50)
+h1: 0 item(s) still plannable, 1 threshold(s) crossed
+h1: THRESHOLD: disk /build: 5 GB free < 50
+--- stderr
+--- log
+{"action": "clean", "after_bytes": null, "before_bytes": 3221225472, "class": "targets", "host": "h1", "item": "/build/chain", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "clean", "after_bytes": 0, "before_bytes": 3221225472, "class": "targets", "free_gb_after": 5.0, "free_gb_before": 5.0, "host": "h1", "item": "/build/chain", "note": "cargo clean", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "clean", "after_bytes": null, "before_bytes": 104857600, "class": "targets", "host": "h1", "item": "/build/targets/lane-a", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "clean", "after_bytes": 0, "before_bytes": 104857600, "class": "targets", "free_gb_after": 5.0, "free_gb_before": 5.0, "host": "h1", "item": "/build/targets/lane-a", "note": "cargo refused silently (no CACHEDIR.TAG); wrote cargo's standard tag and re-ran", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove-worktree", "after_bytes": null, "before_bytes": 0, "class": "worktrees", "host": "h1", "item": "/repo/wt/lane-a", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove-worktree", "after_bytes": 0, "before_bytes": 0, "class": "worktrees", "free_gb_after": 5.0, "free_gb_before": 5.0, "host": "h1", "item": "/repo/wt/lane-a", "note": "links unlinked, tagged archive/line/lane-a, worktree and branch removed, main checkout unchanged", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove-worktree", "after_bytes": null, "before_bytes": 0, "class": "worktrees", "host": "h1", "item": "/repo/wt/lane-new", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove-worktree", "after_bytes": 0, "before_bytes": 0, "class": "worktrees", "free_gb_after": 5.0, "free_gb_before": 5.0, "host": "h1", "item": "/repo/wt/lane-new", "note": "links unlinked, tagged archive/line/lane-new, worktree and branch removed, main checkout unchanged", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "rm-container", "after_bytes": null, "before_bytes": 0, "class": "containers", "host": "h1", "item": "gate-1", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "rm-container", "after_bytes": 0, "before_bytes": 0, "class": "containers", "host": "h1", "item": "gate-1", "note": "removed by exact name", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "rm-image", "after_bytes": null, "before_bytes": 2147483648, "class": "images", "host": "h1", "item": "gate-img:1", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "rm-image", "after_bytes": 0, "before_bytes": 2147483648, "class": "images", "host": "h1", "item": "gate-img:1", "note": "removed by exact name", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "prune-cache", "after_bytes": null, "before_bytes": 6442450944, "class": "cache", "host": "h1", "item": "build cache", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "prune-cache", "after_bytes": 0, "before_bytes": 6442450944, "class": "cache", "host": "h1", "item": "build cache", "note": "build cache older than 3 days", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove", "after_bytes": null, "before_bytes": 52428800, "class": "trash", "host": "h1", "item": "/trash/old", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove", "after_bytes": 0, "before_bytes": 52428800, "class": "trash", "free_gb_after": 5.0, "free_gb_before": 5.0, "host": "h1", "item": "/trash/old", "note": "removed", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+### end
+### tidy_apply_worktrees_win rc=0
+h1: 1 planned in worktrees; 1 done, 0 failed
+h1: 5 B reclaimed (measured: size before minus size after, per item that went ok; 5 B planned); log {DIR}/l.jsonl
+h1: disk /build 500 GB free (min 50)
+h1: 0 item(s) still plannable, 0 threshold(s) crossed
+--- stderr
+--- log
+{"action": "remove-worktree", "after_bytes": null, "before_bytes": 5, "class": "worktrees", "host": "h1", "item": "C:/repo/wt/lane-a", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "remove-worktree", "after_bytes": 0, "before_bytes": 5, "class": "worktrees", "free_gb_after": 500.0, "free_gb_before": 500.0, "host": "h1", "item": "C:/repo/wt/lane-a", "note": "links unlinked, tagged archive/line/lane-a, worktree and branch removed, main checkout unchanged", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+### end
+### tidy_bad_class rc=1
+--- stderr
+unknown class in --class; allowed ['targets', 'worktrees', 'containers', 'images', 'cache', 'trash']
+### end
+### tidy_unknown_host rc=1
+--- stderr
+no host nope in the config
+### end

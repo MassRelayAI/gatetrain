@@ -1,0 +1,4 @@
+rc=2
+--- stdout
+--- stderr
+no generated directories: give --dir or set [stack] generated_dirs in the config

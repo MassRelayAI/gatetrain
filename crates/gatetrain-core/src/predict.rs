@@ -135,3 +135,30 @@ pub fn eta_text(pred: &Prediction, reference: &Ts, finished: usize) -> String {
     }
     l.join("\n")
 }
+
+/// Python `next_tick`: minutes until the next look, and why. `reds` holds the time of every red now (some may be unknown).
+pub fn next_tick(first: Option<Ts>, reds: &[Option<Ts>], remaining_sec: Option<f64>, now: Ts, lo: i64, hi: i64) -> (i64, String) {
+    let clamp = |m: f64| -> i64 { m.round_ties_even().min(hi as f64).max(lo as f64) as i64 };
+    if reds.iter().flatten().any(|t| now.secs_since(t) <= 300.0) {
+        return (clamp(lo as f64), "a red appeared in the last 5 minutes: look again at the minimum".into());
+    }
+    let elapsed = first.map(|f| now.secs_since(&f) / 60.0).unwrap_or(0.0);
+    if elapsed < 10.0 {
+        return (clamp(lo.max(5) as f64), "run just started: catch early reds".into());
+    }
+    let has_reds = !reds.is_empty();
+    if let Some(r) = remaining_sec {
+        let rem = r / 60.0;
+        if rem <= 15.0 {
+            return (clamp(lo as f64), format!("predicted end in about {rem:.0} min: stay close"));
+        }
+        let mut m = clamp(rem / 3.0);
+        if has_reds {
+            m = m.min(30);
+        }
+        let tail = if has_reds { "; capped at 30 because reds exist" } else { "" };
+        return (m, format!("mid-run, about {rem:.0} min predicted left: a third of it{tail}"));
+    }
+    let m = clamp(elapsed / 3.0);
+    (if has_reds { m.min(30) } else { m }, "no history: a third of the elapsed time".into())
+}

@@ -1,0 +1,4 @@
+rc=2
+--- stdout
+--- stderr
+config error: [Errno 2] No such file or directory: 'no-such.toml'

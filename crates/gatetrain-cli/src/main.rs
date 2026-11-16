@@ -1,16 +1,16 @@
-//! The `gatetrain` binary. Ported here: `parse --json`, `log verify`, `ledger migrate`, `diagnose`, `hold`, `running`, `memory`, `batch`, `report`, `trace`, `eta`, `config dump`, `doctor`, `lanes`, `generated`, `tidy` (dry run, `--apply` and `--auto`) and `check`, hardened as Python at c46717c (spec tests/test_tidy_harden.py); `watch` is Rust only.
-//! Every other subcommand is forwarded to `python -m gatetrain` with the same arguments and exit code (design 9.3).
+//! The `gatetrain` binary: every command is Rust. See `gatetrain --help`.
 mod cmd_portb;
+mod cmd_runs;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use gatetrain_core::batch::{system_now, Engine, Outcome};
 use gatetrain_core::batchcfg::BatchConfig;
 use gatetrain_core::hostlock::{MemoryAdmission, RealLock};
-use gatetrain_core::{analysis, config, declog, diagnose, history, ledger::Ledger, logfmt, predict, trace};
+use gatetrain_core::{analysis, config, declog, diagnose, history, ledger::Ledger, logfmt, predict};
 mod holdcmd;
 mod tidycmd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(name = "gatetrain", version, about = "Gate train: the chain, the ledger, the decision log")]
@@ -45,7 +45,7 @@ enum Cmd {
         #[arg(long)]
         host: Option<String>,
     },
-    /// Text report of a chain log (a run read from the ledger, or one that needs the diagnosis block, is answered by Python)
+    /// Text report of a chain log or of a run in the ledger
     Report(AnalysisArgs),
     /// Chrome trace events of a chain log, as one JSON line
     Trace(AnalysisArgs),
@@ -95,6 +95,68 @@ enum Cmd {
         /// the time to judge ages against, epoch seconds (default: now)
         #[arg(long)]
         now: Option<i64>,
+    },
+    /// Parse a chain log into the ledger (a run id already there is refused; --replace only for a running or stopped run)
+    Ingest {
+        log: PathBuf,
+        #[arg(long, default_value = "gatetrain.db")]
+        db: String,
+        #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        replace: bool,
+        #[arg(long, default_value_t = 30.0)]
+        stale_min: f64,
+        /// the time to judge freshness against, ISO 8601 (default: now)
+        #[arg(long)]
+        now: Option<String>,
+    },
+    /// One table for every chain log given: state, eta and when to look next
+    Status {
+        #[arg(long, required = true)]
+        log: Vec<PathBuf>,
+        #[arg(long, default_value = ":memory:")]
+        db: String,
+        #[arg(long)]
+        now: Option<String>,
+        #[arg(long, default_value_t = 30.0)]
+        stale_min: f64,
+        #[arg(long = "min", default_value_t = 5)]
+        min: i64,
+        #[arg(long = "max", default_value_t = 60)]
+        max: i64,
+    },
+    /// When to look at a running chain next
+    NextTick {
+        #[arg(long)]
+        log: Vec<PathBuf>,
+        #[arg(long, default_value = "gatetrain.db")]
+        db: PathBuf,
+        #[arg(long)]
+        now: Option<String>,
+        #[arg(long = "min", default_value_t = 5)]
+        min: i64,
+        #[arg(long = "max", default_value_t = 60)]
+        max: i64,
+    },
+    /// Steps red in one finished run and green in another on the same commit
+    Flaky {
+        #[arg(long, default_value = "gatetrain.db")]
+        db: String,
+    },
+    /// Stop a chain: queued followers first, then the processes (Linux only; a dry run unless --yes)
+    Stop {
+        pattern: String,
+        #[arg(long)]
+        follower: Vec<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        host: Option<String>,
     },
     /// Pre-run checks per host
     Doctor {
@@ -189,7 +251,7 @@ enum Cmd {
     },
 }
 
-/// The flags of the Python `report`, `trace` and `eta`. What this binary cannot answer itself is forwarded unchanged.
+/// The flags of `report`, `trace` and `eta`.
 #[derive(clap::Args)]
 struct AnalysisArgs {
     log: Option<PathBuf>,
@@ -296,16 +358,8 @@ enum LedgerCmd {
     },
 }
 
-const PORTED: [&str; 18] = ["parse", "log", "ledger", "diagnose", "hold", "running", "memory", "batch", "report", "trace", "eta", "config", "doctor", "lanes", "generated", "check", "tidy", "watch"];
-
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Forward anything not ported (and not a flag of ours such as --help/--version) before clap sees it.
-    if let Some(first) = args.first() {
-        if !first.starts_with('-') && !PORTED.contains(&first.as_str()) {
-            return forward(&args);
-        }
-    }
     match Cli::try_parse().map(|c| run(c, &args)) {
         Ok(Ok(code)) => code,
         Ok(Err(e)) => {
@@ -319,11 +373,16 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, raw: &[String]) -> Result<ExitCode> {
+fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Report(a) => analysis_cmd("report", a, raw),
-        Cmd::Trace(a) => analysis_cmd("trace", a, raw),
-        Cmd::Eta(a) => analysis_cmd("eta", a, raw),
+        Cmd::Report(a) => analysis_cmd("report", a),
+        Cmd::Trace(a) => analysis_cmd("trace", a),
+        Cmd::Eta(a) => analysis_cmd("eta", a),
+        Cmd::Ingest { log, db, run_id, host, replace, stale_min, now } => cmd_runs::ingest(cmd_runs::IngestArgs { log, db, run_id, host, replace, stale_min, now }),
+        Cmd::Status { log, db, now, stale_min, min, max } => cmd_runs::status(cmd_runs::StatusArgs { logs: log, db, now, stale_min, lo: min, hi: max }),
+        Cmd::NextTick { log, db, now, min, max } => cmd_runs::next_tick(log, &db, now, min, max),
+        Cmd::Flaky { db } => cmd_runs::flaky(&db),
+        Cmd::Stop { pattern, follower, yes, config, host } => cmd_runs::stop_cmd(&pattern, follower, yes, config, host),
         Cmd::Config { cmd: ConfigCmd::Dump { file } } => {
             println!("{}", config::dump_line(&file));
             Ok(ExitCode::SUCCESS)
@@ -346,11 +405,7 @@ fn run(cli: Cli, raw: &[String]) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Diagnose { log, db, rules, parallel, config, host } => {
-            // The host's parallelism from --config/--host lives in the Python config reader until it is ported.
-            if parallel.unwrap_or(0) == 0 && (config.is_some() || host.is_some()) {
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                return Ok(forward(&args));
-            }
+            let parallel = configured_parallel(parallel, config.as_deref().map(Path::new), host.as_deref())?;
             let bytes = std::fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
             let text = String::from_utf8_lossy(&bytes);
             let p = logfmt::parse_log(&text)?;
@@ -507,70 +562,92 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
     })
 }
 
-fn now_or(s: &Option<String>) -> Result<logfmt::Ts> {
-    Ok(match s {
-        Some(t) => logfmt::parse_iso(t)?,
-        None => logfmt::Ts::now_utc(),
-    })
-}
 
-/// The configured parallelism: --parallel, else max_parallel_steps of --host in --config. `Err` = Python must answer
-/// (a config that does not load raises there).
-fn configured_parallel(a: &AnalysisArgs) -> std::result::Result<Option<i64>, ()> {
-    if let Some(p) = a.parallel.filter(|p| *p != 0) {
+/// The configured parallelism: --parallel, else max_parallel_steps of --host in --config.
+fn configured_parallel(parallel: Option<i64>, config: Option<&Path>, host: Option<&str>) -> Result<Option<i64>> {
+    if let Some(p) = parallel.filter(|p| *p != 0) {
         return Ok(Some(p));
     }
-    match (&a.config, &a.host) {
+    match (config, host) {
         (Some(c), Some(h)) => {
-            let cfg = config::load(c).map_err(|_| ())?;
-            Ok(cfg.hosts.iter().find(|x| &x.name == h).and_then(|x| x.max_parallel_steps).filter(|p| *p != 0))
+            let cfg = config::load(c).map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+            Ok(cfg.hosts.iter().find(|x| x.name == h).and_then(|x| x.max_parallel_steps).filter(|p| *p != 0))
         }
         _ => Ok(None),
     }
 }
 
-/// `report`, `trace` and `eta` over a log file. Anything else (a ledger run, the diagnosis block, a config that does not load,
-/// a ledger this reader does not understand) is forwarded to Python so the answer is the same.
-fn analysis_cmd(which: &str, a: AnalysisArgs, raw: &[String]) -> Result<ExitCode> {
-    let Some(log) = a.log.clone() else { return Ok(forward(raw)) };
-    if a.run.is_some() {
-        return Ok(forward(raw));
-    }
-    let Ok(configured) = configured_parallel(&a) else { return Ok(forward(raw)) };
-    let Ok(bytes) = std::fs::read(&log) else { return Ok(forward(raw)) };
-    let p = logfmt::parse_log(&String::from_utf8_lossy(&bytes))?;
-    let steps = &p.steps;
-    let run_id = log.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    match which {
-        "report" => {
-            let reds = steps.iter().any(|s| matches!(s.exit_code, Some(x) if x != 0));
-            if reds || configured.is_some() {
-                return Ok(forward(raw)); // the diagnosis block is not ported
-            }
-            let outcome = history::classify(&p, &now_or(&a.now)?, 30.0);
-            let meta = analysis::Meta { outcome, commit: p.commit.as_deref(), host: p.host.as_deref() };
-            println!("{}", analysis::report_text(&run_id, &meta, steps));
+fn fail(msg: &str) -> Result<ExitCode> {
+    eprintln!("{msg}");
+    Ok(ExitCode::from(1))
+}
+
+/// `report`, `trace` and `eta`, over a log file or (report, trace) a run in the ledger.
+fn analysis_cmd(which: &str, mut a: AnalysisArgs) -> Result<ExitCode> {
+    let configured = configured_parallel(a.parallel, a.config.as_deref(), a.host.as_deref())?;
+    if which == "eta" {
+        let Some(log) = a.log.clone() else {
+            eprintln!("error: the following arguments are required: <LOG>");
+            return Ok(ExitCode::from(2));
+        };
+        let (_, p) = cmd_runs::read_log(&log)?;
+        let run_id = cmd_runs::run_id(&log);
+        let Some(hist) = history::history_durations(&a.db, &run_id) else { return fail("the ledger could not be read") };
+        let reference = match p.last_ts() {
+            Some(t) => t,
+            None => cmd_runs::now_or(&a.now)?,
+        };
+        if p.steps.is_empty() {
+            return fail("no steps in log");
         }
-        "trace" => println!("{}", trace::trace_json(steps)),
-        _ => {
-            let Some(hist) = history::history_durations(&a.db, &run_id) else { return Ok(forward(raw)) };
-            let reference = match p.last_ts() {
-                Some(t) => t,
-                None => now_or(&a.now)?,
-            };
-            if steps.is_empty() {
-                eprintln!("no steps in log");
-                return Ok(ExitCode::from(1));
+        let pred = predict::predict(&p.steps, &hist, reference);
+        let finished = p.steps.iter().filter(|s| s.exit_code.is_some() || s.duration.is_some()).count();
+        println!("{}", predict::eta_text(&pred, &reference, finished));
+        if let Some(note) = analysis::parallelism_note(&p, configured) {
+            println!("{note}");
+        }
+        if p.gates_done {
+            println!("note: this run already printed GATES_DONE");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if which == "report" && a.run.is_none() && a.log.is_none() {
+        match cmd_runs::latest_run(&a.db)? {
+            Some(r) => a.run = Some(r),
+            None => return fail("ledger is empty"),
+        }
+    }
+    if which == "trace" && a.run.is_none() && a.log.is_none() {
+        return fail("give a log path or --run ID");
+    }
+    let (src, log_text) = if let Some(rid) = &a.run {
+        match cmd_runs::load_run(&a.db, rid)? {
+            Some(s) => (s, None),
+            None => return fail(&format!("no run {rid} in {}", a.db.display())),
+        }
+    } else {
+        let log = a.log.clone().unwrap();
+        let (text, p) = cmd_runs::read_log(&log)?;
+        let outcome = history::classify(&p, &cmd_runs::now_or(&a.now)?, 30.0);
+        (cmd_runs::Src { id: cmd_runs::run_id(&log), outcome: outcome.to_string(), commit: p.commit.clone(), host: p.host.clone(), steps: p.steps }, Some(text))
+    };
+    if which == "trace" {
+        println!("{}", cmd_runs::trace_text(&src));
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("{}", cmd_runs::report_text(&src));
+    if let Some(text) = log_text {
+        let reds = src.steps.iter().any(|s| matches!(s.exit_code, Some(x) if x != 0));
+        if reds || configured.is_some() {
+            let p = logfmt::parse_log(&text)?;
+            let findings = diagnose::diagnose_log(&text, &p, &diagnose::History::new(), diagnose::builtin_rules());
+            let body: Vec<String> = diagnose::format_findings(&findings).lines().map(|l| format!("  {l}")).collect();
+            let mut block = format!("diagnosis:\n{}", body.join("\n"));
+            if let Some(note) = diagnose::parallelism_note(&p, configured) {
+                block.push('\n');
+                block.push_str(&note);
             }
-            let pred = predict::predict(steps, &hist, reference);
-            let finished = steps.iter().filter(|s| s.exit_code.is_some() || s.duration.is_some()).count();
-            println!("{}", predict::eta_text(&pred, &reference, finished));
-            if let Some(note) = analysis::parallelism_note(&p, configured) {
-                println!("{note}");
-            }
-            if p.gates_done {
-                println!("note: this run already printed GATES_DONE");
-            }
+            println!("{block}");
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -587,51 +664,4 @@ fn open_existing(db: &Path) -> Result<Ledger> {
         l.version()?
     );
     Ok(l)
-}
-
-/// Find a checkout of the Python package: GATETRAIN_PYROOT, else walk up from the binary and the working directory.
-fn python_root() -> Option<PathBuf> {
-    if let Some(r) = std::env::var_os("GATETRAIN_PYROOT") {
-        return Some(PathBuf::from(r));
-    }
-    let starts = [std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)), std::env::current_dir().ok()];
-    for s in starts.into_iter().flatten() {
-        for d in s.ancestors() {
-            if d.join("gatetrain").join("__main__.py").is_file() {
-                return Some(d.to_path_buf());
-            }
-        }
-    }
-    None
-}
-
-fn forward(args: &[String]) -> ExitCode {
-    if std::env::var_os("GATETRAIN_NO_FORWARD").is_some() {
-        // test switch: proves a path is ported by refusing the Python fallback
-        eprintln!("gatetrain: `{}` would be forwarded to Python (GATETRAIN_NO_FORWARD is set)", args[0]);
-        return ExitCode::from(126);
-    }
-    let mut last_err = None;
-    let order: [&str; 2] = if cfg!(windows) { ["python", "python3"] } else { ["python3", "python"] };
-    for py in order {
-        let mut c = Command::new(py);
-        c.arg("-m").arg("gatetrain").args(args);
-        if let Some(root) = python_root() {
-            let mut paths = vec![root];
-            paths.extend(std::env::var_os("PYTHONPATH").iter().flat_map(std::env::split_paths));
-            if let Ok(joined) = std::env::join_paths(paths) {
-                c.env("PYTHONPATH", joined);
-            }
-        }
-        match c.status() {
-            Ok(st) => return ExitCode::from(st.code().unwrap_or(1).clamp(0, 255) as u8),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    eprintln!(
-        "gatetrain: `{}` is not ported to the Rust binary yet and Python was not found ({}); install Python 3 to run it",
-        args[0],
-        last_err.map(|e| e.to_string()).unwrap_or_default()
-    );
-    ExitCode::from(127)
 }

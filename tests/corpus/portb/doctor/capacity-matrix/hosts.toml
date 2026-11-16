@@ -1,0 +1,55 @@
+[needs]
+chain_needs_fast = false
+[[hosts]]
+name = "ssd-box"
+os = "linux"
+roles = ["chain"]
+reach = "local"
+[[hosts.disks]]
+path = "/srv/ssd"
+min_free_gb = 50
+fast = true
+use = ["chain"]
+[[hosts]]
+name = "usb-box"
+os = "linux"
+roles = ["chain"]
+reach = "local"
+[[hosts.disks]]
+path = "/mnt/ext"
+min_free_gb = 50
+fast = true
+use = ["chain"]
+removable = true
+[[hosts]]
+name = "hdd-box"
+os = "linux"
+roles = ["chain"]
+reach = "local"
+[[hosts.disks]]
+path = "/srv/hdd"
+min_free_gb = 50
+fast = false
+use = ["chain"]
+[[hosts]]
+name = "small-box"
+os = "linux"
+roles = ["preflight", "lane-gates", "chain"]
+reach = "local"
+[[hosts.disks]]
+path = "/mnt/a"
+min_free_gb = 5
+fast = true
+use = ["preflight", "lane-gates"]
+[[hosts]]
+name = "ports-box"
+os = "linux"
+reach = "local"
+ports = [5500, 6001, 57901, 40000]
+reserved_port_ranges = ["6000-6100"]
+[[hosts]]
+name = "lock-box"
+os = "linux"
+reach = "local"
+lock_file = "/run/chain.lock"
+lock_max_age_hours = 6

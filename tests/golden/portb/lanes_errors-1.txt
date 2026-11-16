@@ -1,0 +1,4 @@
+rc=2
+--- stdout
+--- stderr
+git failed: git rev-parse --verify nope^{commit}: fatal: Needed a single revision

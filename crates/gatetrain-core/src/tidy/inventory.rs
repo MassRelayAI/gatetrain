@@ -64,6 +64,8 @@ pub struct Item {
     /// None = unknown
     pub bytes: Option<i64>,
     pub why: String,
+    /// the named rule that allows the removal (empty: none, and the item is never removed)
+    pub rule: String,
     /// why it is left alone
     pub keep: Option<String>,
     pub attended_only: bool,
@@ -72,7 +74,13 @@ pub struct Item {
 
 impl Item {
     pub fn new(cls: &str, kind: &str, key: &str, bytes: Option<i64>, why: &str) -> Item {
-        Item { cls: cls.into(), kind: kind.into(), key: key.into(), bytes, why: why.into(), keep: None, attended_only: false, extra: Extra::None }
+        Item { cls: cls.into(), kind: kind.into(), key: key.into(), bytes, why: why.into(), rule: String::new(), keep: None, attended_only: false, extra: Extra::None }
+    }
+
+    /// Name the rule that allows this item to be removed.
+    pub fn ruled(mut self, rule: &str) -> Item {
+        self.rule = rule.into();
+        self
     }
 
     /// `asdict(item)`, key order as the dataclass declares it.
@@ -83,6 +91,7 @@ impl Item {
             ("key".into(), J::s(&self.key)),
             ("bytes".into(), J::opt_int(self.bytes)),
             ("why".into(), J::s(&self.why)),
+            ("rule".into(), J::s(&self.rule)),
             ("keep".into(), J::opt_str(&self.keep)),
             ("attended_only".into(), J::Bool(self.attended_only)),
             (
@@ -318,7 +327,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         ));
         if info.keep.is_none() {
             let br = info.branch.clone().unwrap();
-            let mut it = Item::new("worktrees", "remove-worktree", wpath, info.bytes, &format!("branch {} is on {}", br, cfg.main_branch));
+            let mut it = Item::new("worktrees", "remove-worktree", wpath, info.bytes, &format!("branch {} is on {}", br, cfg.main_branch)).ruled("merged-clean-worktree");
             it.extra = Extra::Worktree { branch: br, links: info.links.unwrap_or(0) };
             inv.items.push(it);
         }
@@ -444,7 +453,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 t.keep = Some(over_budget(cfg));
                 t.bytes = None;
             } else if reason.is_none() && size.map(|s| s != 0).unwrap_or(true) {
-                let mut it = Item::new("targets", if cargo { "clean" } else { "move" }, &path, size, &format!("lane {}: {}", lane, if br.is_some() { "branch content is on main" } else { "orphan" }));
+                let mut it = Item::new("targets", if cargo { "clean" } else { "move" }, &path, size, &format!("lane {}: {}", lane, if br.is_some() { "branch content is on main" } else { "orphan" })).ruled(if br.is_some() { "lane-merged-target" } else { "orphan-target" });
                 it.extra = Extra::Target { cargo, tag: t.tag, branch: br.clone() };
                 inv.items.push(it);
             }
@@ -452,7 +461,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             t.keep = Some(over_budget(cfg));
             t.bytes = None;
         } else if t.over && !kept_n.contains(&norm(&path)) && held_by(&path, None).is_none() && (cargo || !names.is_empty()) {
-            let mut it = Item::new("targets", if cargo { "clean" } else { "move" }, &path, size, &format!("over its {} GB budget", fmt_g(budget.unwrap())));
+            let mut it = Item::new("targets", if cargo { "clean" } else { "move" }, &path, size, &format!("over its {} GB budget", fmt_g(budget.unwrap()))).ruled("over-budget-target");
             it.attended_only = true;
             it.extra = Extra::Target { cargo, tag: t.tag, branch: None };
             inv.items.push(it);
@@ -471,7 +480,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             for n in splitlines(&ex.out).iter().map(|l| strip(l).to_string()).filter(|l| l.starts_with(prefix)) {
                 inv.containers.push(n.clone());
                 if !running.contains(&n) {
-                    inv.items.push(Item::new("containers", "rm-container", &n, Some(0), "exited throwaway container"));
+                    inv.items.push(Item::new("containers", "rm-container", &n, Some(0), "exited throwaway container").ruled("exited-container"));
                 }
             }
         }
@@ -494,7 +503,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 let in_use = used.contains(name) || used.iter().any(|u| iid.starts_with(u.as_str()) || u.starts_with(iid));
                 inv.images.push(ImageInfo { name: name.into(), bytes: parse_size(sz), in_use });
                 if !in_use {
-                    inv.items.push(Item::new("images", "rm-image", name, Some(parse_size(sz)), "no container uses it; matches a configured pattern"));
+                    inv.items.push(Item::new("images", "rm-image", name, Some(parse_size(sz)), "no container uses it; matches a configured pattern").ruled("unused-image"));
                 }
             }
         }
@@ -508,7 +517,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 let w = split_ws(p[2]);
                 let rec = if w.is_empty() { 0 } else { parse_size(w[0]) };
                 inv.cache = Some((parse_size(p[1]), rec));
-                inv.items.push(Item::new("cache", "prune-cache", "build cache", Some(rec), &format!("older than {} days (upper bound: all reclaimable)", fmt_g(cfg.cache_days))));
+                inv.items.push(Item::new("cache", "prune-cache", "build cache", Some(rec), &format!("older than {} days (upper bound: all reclaimable)", fmt_g(cfg.cache_days))).ruled("old-build-cache"));
             }
         }
     }
@@ -552,7 +561,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 inv.trash.push(TrashInfo { path: p.clone(), bytes: if cut { None } else { sz }, age_days: age, keep: keep.clone() });
                 if let (Some(a), None) = (age, keep) {
                     if a > cfg.trash_days {
-                        inv.items.push(Item::new("trash", "remove", &p, sz, &format!("in the recycle bin {} days (> {})", crate::pycompat::fmt_f(a, 0), fmt_g(cfg.trash_days))));
+                        inv.items.push(Item::new("trash", "remove", &p, sz, &format!("in the recycle bin {} days (> {})", crate::pycompat::fmt_f(a, 0), fmt_g(cfg.trash_days))).ruled("old-trash-entry"));
                     }
                 }
             }
@@ -591,7 +600,42 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             inv.breaches.push(format!("keep_lanes entry {} matches no worktree or target (worktree_prefix {}); it protects nothing", crate::pycompat::repr_str(kl), crate::pycompat::repr_str(&cfg.worktree_prefix)));
         }
     }
+    refuse_unruled_and_protected(&ops, &mut inv)?;
     Ok(inv)
+}
+
+/// The last word of the inventory: an item with no named rule, or on a protected path, is dropped from the plan and its row says why.
+fn refuse_unruled_and_protected(ops: &Ops, inv: &mut Inventory) -> R<()> {
+    let items = std::mem::take(&mut inv.items);
+    for it in items {
+        let pathy = matches!(it.cls.as_str(), "worktrees" | "targets" | "trash");
+        let why_not = if it.rule.is_empty() {
+            Some("kept: no rule")
+        } else if pathy && ops.protect_hit(&it.key)?.is_some() {
+            Some("kept: protected")
+        } else {
+            None
+        };
+        let Some(why_not) = why_not else {
+            inv.items.push(it);
+            continue;
+        };
+        progress(format!("tidy: {} {}: {why_not}", it.cls, it.key));
+        let same = |p: &str| norm(p) == norm(&it.key);
+        for w in inv.worktrees.iter_mut().filter(|w| same(&w.path)) {
+            w.keep = Some(why_not.into());
+        }
+        for t in inv.targets.iter_mut().filter(|t| same(&t.path)) {
+            t.keep = Some(why_not.into());
+        }
+        for t in inv.trash.iter_mut().filter(|t| same(&t.path)) {
+            t.keep = Some(why_not.into());
+        }
+        if !pathy {
+            inv.breaches.push(format!("{} {}: {why_not}", it.cls, it.key));
+        }
+    }
+    Ok(())
 }
 
 /// The local time in a recycle-bin name `<name>-YYYYMMDDHHMMSS` (what `move` puts there), as epoch seconds.

@@ -40,6 +40,8 @@ pub struct TidyCfg {
     /// tools rewrite these in main while tidy runs; they do not count as a change of main
     pub main_volatile_paths: Vec<String>,
     pub keep_paths: Vec<String>,
+    /// paths or globs that tidy never removes, never removes anything containing, and never reaches through a link (default: none)
+    pub protect: Vec<String>,
     pub keep_lanes: Vec<String>,
     pub keep_branches: Vec<String>,
     pub targets: Vec<Target>,
@@ -83,6 +85,7 @@ impl Default for TidyCfg {
             main_branch: "main".into(),
             main_volatile_paths: vec![".obsidian/".into()],
             keep_paths: vec![],
+            protect: vec![],
             keep_lanes: vec![],
             keep_branches: vec![],
             targets: vec![],
@@ -111,9 +114,9 @@ impl Default for TidyCfg {
     }
 }
 
-const KNOWN: [&str; 29] = [
+const KNOWN: [&str; 30] = [
     "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_patterns", "item_budget_s", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
-    "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "remove_timeout_s", "root_checkout", "scratch_dir",
+    "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "protect", "remove_timeout_s", "root_checkout", "scratch_dir",
     "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_min_idle_days", "worktree_prefix",
 ];
 
@@ -162,6 +165,12 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
     for (k, v) in &d {
         match k.as_str() {
             "keep_paths" => t.keep_paths = str_list(k, v)?,
+            "protect" => {
+                t.protect = str_list(k, v)?;
+                if t.protect.iter().any(|p| p.trim().is_empty()) {
+                    return err("tidy.protect: an entry is empty; an empty path would protect nothing and read as if it protected everything".into());
+                }
+            }
             "main_volatile_paths" => t.main_volatile_paths = str_list(k, v)?,
             "keep_lanes" => t.keep_lanes = str_list(k, v)?,
             "keep_branches" => t.keep_branches = str_list(k, v)?,
@@ -229,7 +238,7 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             repr_str(&t.worktree_prefix)
         ));
     }
-    for k in t.main_checkout.iter().chain(t.root_checkout.iter()).chain(t.keep_paths.iter()) {
+    for k in t.main_checkout.iter().chain(t.root_checkout.iter()).chain(t.keep_paths.iter()).chain(t.protect.iter()) {
         if k.starts_with("\\\\") || k.replace('\\', "/").starts_with("//") {
             return err(format!("tidy: the path {} is a UNC or extended-length (\\\\?\\) spelling; write the drive path (C:/dir) so the keep list compares like the removal guards", repr_str(k)));
         }

@@ -9,8 +9,10 @@ fn gt(d: &Path, args: &[&str]) -> Output {
 fn out(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
+/// The synthetic child process (crates/gatetrain-testchild), built next to the gatetrain binary.
+fn child() -> String {
+    let b = std::path::Path::new(env!("CARGO_BIN_EXE_gatetrain"));
+    b.with_file_name(format!("gt-testchild{}", std::env::consts::EXE_SUFFIX)).to_string_lossy().into_owned()
 }
 
 const HOSTS: &str = "[[hosts]]\nname = \"pc\"\ncores = 16\nreserve_cores = 4\nmax_parallel_steps = 12\nmemory_gb = 31\nmemory_reserve_gb = 12\nmemory_per_step_gb = 4\nmemory_per_cargo_job_gb = 2\n";
@@ -27,7 +29,7 @@ fn hold_refuses_a_chain_that_does_not_fit_and_logs_the_numbers_and_the_cheap_set
     let d = tempfile::tempdir().unwrap();
     std::fs::write(d.path().join("hosts.toml"), HOSTS).unwrap();
     seed(d.path());
-    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--steps", "big,mid,small", "--", python(), "-c", "print('RAN')"]);
+    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--steps", "big,mid,small", "--", child().as_str(), "print", "RAN"]);
     assert_eq!(o.status.code(), Some(76), "{}{}", out(&o), String::from_utf8_lossy(&o.stderr));
     let s = out(&o);
     assert!(s.contains("predicted 26.0 GB") && s.contains("available 19.0 GB"), "{s}");
@@ -38,8 +40,7 @@ fn hold_refuses_a_chain_that_does_not_fit_and_logs_the_numbers_and_the_cheap_set
     assert_eq!(kind, "host.refuse-memory");
     assert!(ev.contains("\"available_mb\":19456") && ev.contains("cheap_set"), "{ev}");
     // the cheap set is admitted and runs, with memory-based parallelism and cargo jobs exported
-    let o = gt(d.path(), &["hold", "r2", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--steps", "small,mid", "--", python(), "-c",
-        "import os; print('P=' + os.environ['GATETRAIN_PARALLEL'] + ' J=' + os.environ['CARGO_BUILD_JOBS'])"]);
+    let o = gt(d.path(), &["hold", "r2", "--lock", "h.lock", "--hosts", "hosts.toml", "--host", "pc", "--steps", "small,mid", "--", child().as_str(), "env", "P=GATETRAIN_PARALLEL", "J=CARGO_BUILD_JOBS"]);
     assert_eq!(o.status.code(), Some(0), "{}{}", out(&o), String::from_utf8_lossy(&o.stderr));
     assert!(out(&o).contains("P=4 J=9"), "{}", out(&o));
 }
@@ -60,7 +61,7 @@ fn memory_admit_prints_the_rule_without_launching() {
 #[test]
 fn the_holder_records_the_chain_peak_memory_in_the_ledger() {
     let d = tempfile::tempdir().unwrap();
-    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--", python(), "-c", "x = bytearray(80 * 1024 * 1024); import time; time.sleep(2.5)"]);
+    let o = gt(d.path(), &["hold", "r1", "--lock", "h.lock", "--", child().as_str(), "alloc", "80", "2.5"]);
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     let h = Ledger::open(&d.path().join("gatetrain.db")).unwrap().step_memory_history().unwrap();
     let mb = h["(chain)"][0];

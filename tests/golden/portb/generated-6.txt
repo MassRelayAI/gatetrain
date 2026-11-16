@@ -1,0 +1,6 @@
+rc=1
+--- stdout
+2 untracked generated file(s) (a later disk-equals-build test will go red; git add them by name):
+  gen/new a.txt
+  gen/new b.txt
+--- stderr

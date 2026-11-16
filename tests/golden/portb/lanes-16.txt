@@ -1,0 +1,98 @@
+rc=0
+--- stdout
+{
+  "main": "main",
+  "lanes": [
+    {
+      "lane": "laneA",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 1,
+      "base": "{SHA}",
+      "contained_in": null
+    },
+    {
+      "lane": "laneA",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 1,
+      "base": "{SHA}",
+      "contained_in": null
+    }
+  ],
+  "contained": [],
+  "carried": [
+    {
+      "tip": "{SHA}",
+      "commits": 1,
+      "lanes": [
+        "laneA"
+      ],
+      "on_main": false
+    }
+  ],
+  "passes": [
+    [
+      {
+        "base": "{SHA}",
+        "lanes": [],
+        "carry_tip": "{SHA}",
+        "carried_by": [
+          "laneA"
+        ]
+      }
+    ],
+    [
+      {
+        "base": "{SHA}",
+        "lanes": [
+          "laneA",
+          "laneA"
+        ],
+        "carried": true
+      }
+    ]
+  ],
+  "hotspots": [
+    {
+      "kind": "SAME-LINES",
+      "file": "a.txt",
+      "lanes": [
+        "carried {SHA}",
+        "main"
+      ],
+      "detail": "lines 2",
+      "action": "certain conflict, merge by hand"
+    }
+  ],
+  "doubled_line_risk": [
+    {
+      "file": "a.txt",
+      "line": 2,
+      "lanes": [
+        "carried {SHA}",
+        "main"
+      ],
+      "action": "likely doubled line after stacking: keep one, check it appears once"
+    }
+  ],
+  "resource_clashes": [],
+  "paired_counts": [],
+  "baseline_warnings": [],
+  "groups": [
+    [
+      "laneA",
+      "laneA"
+    ]
+  ],
+  "conflict_edges": {},
+  "summary": {
+    "lanes": 2,
+    "independent_groups": 1,
+    "certain_conflicts": 1,
+    "shared_hubs": 0,
+    "resource_clashes": 0
+  },
+  "summary_line": "2 lanes: 1 independent groups; 1 certain conflicts; 0 shared hubs; 0 resource clashes"
+}
+--- stderr

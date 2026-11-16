@@ -524,6 +524,36 @@ mod tests {
     }
 
     #[test]
+    fn out_of_memory_lines_are_infra_memory_and_a_rerun_fixes_them() {
+        for lines in [
+            "Killed",
+            "error: process exited with code 137",
+            "FATAL ERROR: JavaScript heap out of memory",
+            "Cannot allocate memory (OOM killer)",
+            "Windows stopped because the system is running low on memory",
+        ] {
+            let t = mklog(&[("a", 0, 10, 0, &[]), ("unit", 10, 20, 137, &[lines])]);
+            let fs = diag(&t);
+            assert_eq!(fs.len(), 1, "{lines}: {fs:?}");
+            assert_eq!(fs[0].cls, "infra-memory", "{lines}");
+            assert!(fs[0].rerun, "{lines}");
+        }
+    }
+
+    #[test]
+    fn the_word_killed_inside_a_sentence_is_not_memory() {
+        let t = mklog(&[("unit", 0, 20, 1, &["the test killed the mock server as designed", "AssertionError: x"])]);
+        assert_eq!(diag(&t)[0].cls, "real");
+    }
+
+    #[test]
+    fn every_rule_row_has_what_diagnose_needs_and_the_table_is_the_one_file() {
+        assert!(builtin_rules().iter().any(|r| r.cls == "infra-memory"));
+        assert!(builtin_rules().iter().all(|r| !r.cls.is_empty() && !r.remedy.is_empty()));
+        assert!(!std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules/red-classes-extra.json").exists());
+    }
+
+    #[test]
     fn rules_file_rejects_a_bad_row() {
         let v: Value = serde_json::json!([{"cls": "x", "pattern": "(", "remedy": "r", "rerun": true}]);
         assert!(rules_from_value(&v).is_err());

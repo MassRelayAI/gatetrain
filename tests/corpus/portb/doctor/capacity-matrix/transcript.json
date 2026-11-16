@@ -1,0 +1,15 @@
+{
+ "ssd-box": {"df -Pk /srv/ssd": [0, "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 9 9 157286400 1% /m\n"]},
+ "usb-box": {"df -Pk /mnt/ext": [1, ""]},
+ "hdd-box": {"df -Pk /srv/hdd": [0, "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 9 9 524288000 1% /m\n"]},
+ "small-box": {"df -Pk /mnt/a": [0, "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 9 9 31457280 1% /m\n"]},
+ "ports-box": {
+  "cat /proc/sys/net/ipv4/ip_local_port_range": [0, "32768\t60999\n"],
+  "cat /proc/sys/net/ipv4/ip_local_reserved_ports": [0, "55400-58399,6000\n"]
+ },
+ "lock-box": {
+  "stat -c %Y /run/chain.lock": [0, "1000\n"],
+  "date +%s": [0, "37000\n"],
+  "grep -c released /run/chain.lock": [1, "0\n"]
+ }
+}

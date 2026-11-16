@@ -51,7 +51,7 @@ fn plan(sim: &Shared, log: &Path, items: Vec<Item>, classes: &[&str]) -> Result<
 }
 
 fn wt_item(path: &str, branch: &str) -> Item {
-    let mut it = Item::new("worktrees", "remove-worktree", path, Some(0), "x");
+    let mut it = Item::new("worktrees", "remove-worktree", path, Some(0), "x").ruled("test-rule");
     it.extra = Extra::Worktree { branch: branch.into(), links: 0 };
     it
 }
@@ -162,10 +162,10 @@ fn windows_git_takes_the_repo_as_an_argument_not_a_command_line() {
 
 #[test]
 fn local_runner_argv_has_no_shell() {
-    let py = if cfg!(windows) { "python" } else { "python3" };
-    let argv: Vec<String> = [py, "-c", "import sys;print(sys.argv[1])", "a&b|c;d$(e)"].iter().map(|s| s.to_string()).collect();
+    // `git rev-parse --sq-quote` prints each argument single-quoted, so what it prints is what git was handed
+    let argv: Vec<String> = ["git", "rev-parse", "--sq-quote", "a&b|c;d$(e)"].iter().map(|s| s.to_string()).collect();
     match gatetrain_core::tidy::LocalRunner.run_argv_to(&argv, Some(30.0)).unwrap() {
-        RunOut::Done { rc, out } => assert_eq!((rc, out.trim()), (0, "a&b|c;d$(e)")),
+        RunOut::Done { rc, out } => assert_eq!((rc, out.trim()), (0, "'a&b|c;d$(e)'")),
         other => panic!("{other:?}"),
     }
 }
@@ -267,7 +267,7 @@ fn remove_dir_refuses_dot_dot() {
 fn trash_remove_of_a_nested_path_is_refused() {
     let sim = linux_sim();
     let d = tempfile::tempdir().unwrap();
-    assert_eq!(plan(&sim, &log_in(&d), vec![Item::new("trash", "remove", "/trash/old/x", Some(0), "x")], &["trash"]).unwrap(), (0, 1));
+    assert_eq!(plan(&sim, &log_in(&d), vec![Item::new("trash", "remove", "/trash/old/x", Some(0), "x").ruled("test-rule")], &["trash"]).unwrap(), (0, 1));
     assert_eq!(records(&log_in(&d))[0]["status"], "refused");
     assert!(sim.s().has("/trash/old/x"));
 }
@@ -281,7 +281,7 @@ fn trash_that_resolves_onto_a_kept_path_is_refused() {
         s.add("/trash", "link", 0, 10 * DAY, Some("/repo/main"));
     }
     let d = tempfile::tempdir().unwrap();
-    is_guard(plan(&sim, &log_in(&d), vec![Item::new("trash", "remove", "/trash/node_modules", Some(0), "x")], &["trash"]));
+    is_guard(plan(&sim, &log_in(&d), vec![Item::new("trash", "remove", "/trash/node_modules", Some(0), "x").ruled("test-rule")], &["trash"]));
     assert!(sim.s().has("/repo/main/node_modules/pkg.js"));
 }
 
@@ -608,7 +608,7 @@ fn cargo_clean_rechecks_the_folder_is_a_cargo_target() {
         s.file("/build/targets/plain/notes.txt", 10, 10 * DAY);
     }
     let d = tempfile::tempdir().unwrap();
-    let mut it = Item::new("targets", "clean", "/build/targets/plain", Some(10), "x");
+    let mut it = Item::new("targets", "clean", "/build/targets/plain", Some(10), "x").ruled("test-rule");
     it.extra = Extra::Target { cargo: true, tag: Some(true), branch: None };
     let (done, failed) = plan(&sim, &log_in(&d), vec![it], &["targets"]).unwrap();
     assert!(!sim.calls().iter().any(|c| c.starts_with("cargo clean")));
@@ -998,7 +998,7 @@ fn a_bad_item_is_reported_and_skipped_and_the_rest_carries_on() {
     let sim = linux_sim();
     let d = tempfile::tempdir().unwrap();
     let (h, t, mut inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
-    inv.items = vec![wt_item("/repo/wt/lane-a", "x;touch pwned"), Item::new("containers", "rm-container", "gate-1", Some(0), "x")];
+    inv.items = vec![wt_item("/repo/wt/lane-a", "x;touch pwned"), Item::new("containers", "rm-container", "gate-1", Some(0), "x").ruled("test-rule")];
     let classes = vec!["worktrees".to_string(), "containers".to_string()];
     assert_eq!(apply_plan(&h, &sim, &t, &inv, &classes, Some(NOW as f64), None, false).unwrap(), (1, 1));
     let st: Vec<String> = records(&log_in(&d)).iter().map(|r| r["status"].as_str().unwrap().to_string()).collect();
@@ -1210,7 +1210,7 @@ fn a_glob_character_in_one_name_refuses_that_item_not_the_run() {
     let sim = linux_sim();
     let d = tempfile::tempdir().unwrap();
     let (h, t, mut inv) = gather_sim(&sim, with_log(json!({}), &log_in(&d)), false, 50.0);
-    inv.items = vec![Item::new("trash", "remove", "/trash/a*b", Some(0), "x"), Item::new("containers", "rm-container", "gate-1", Some(0), "x")];
+    inv.items = vec![Item::new("trash", "remove", "/trash/a*b", Some(0), "x").ruled("test-rule"), Item::new("containers", "rm-container", "gate-1", Some(0), "x").ruled("test-rule")];
     let classes = vec!["trash".to_string(), "containers".to_string()];
     assert_eq!(apply_plan(&h, &sim, &t, &inv, &classes, Some(NOW as f64), None, false).unwrap(), (1, 1));
     let st: Vec<String> = records(&log_in(&d)).iter().map(|r| r["status"].as_str().unwrap().to_string()).collect();

@@ -1,4 +1,4 @@
-//! The holder, end to end: runs the built `gatetrain` binary with synthetic children (python one-liners).
+//! The holder, end to end: runs the built `gatetrain` binary with synthetic children (the gt-testchild program).
 use gatetrain_core::{declog, ledger::Ledger};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -9,15 +9,17 @@ fn gt_cmd(dir: &Path) -> Command {
     c.current_dir(dir).env("GATETRAIN_BOOT_ID", "boot-A").env_remove("GATETRAIN_PARALLEL").env_remove("GATETRAIN_CORES");
     c
 }
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
+/// The synthetic child process (crates/gatetrain-testchild), built next to the gatetrain binary.
+fn child() -> String {
+    let b = std::path::Path::new(env!("CARGO_BIN_EXE_gatetrain"));
+    b.with_file_name(format!("gt-testchild{}", std::env::consts::EXE_SUFFIX)).to_string_lossy().into_owned()
 }
 fn lock(d: &Path) -> PathBuf {
     d.join("host.lock")
 }
 fn hold(d: &Path, run: &str, extra: &[&str], code: &str) -> Command {
     let mut c = gt_cmd(d);
-    c.args(["hold", run, "--lock", lock(d).to_str().unwrap(), "--db", d.join("g.db").to_str().unwrap()]).args(extra).args(["--", python(), "-c", code]);
+    c.args(["hold", run, "--lock", lock(d).to_str().unwrap(), "--db", d.join("g.db").to_str().unwrap()]).args(extra).arg("--").arg(child()).args(code.split(' '));
     c
 }
 fn out(o: &Output) -> String {
@@ -30,7 +32,7 @@ fn kinds(d: &Path) -> Vec<(String, String, String)> {
 }
 /// Start a holder whose child sleeps, and wait until it prints HOLDS.
 fn start_holder(d: &Path, run: &str, secs: u32) -> Child {
-    let mut ch = hold(d, run, &[], &format!("import time; time.sleep({secs})")).stdout(Stdio::piped()).spawn().unwrap();
+    let mut ch = hold(d, run, &[], &format!("sleep {secs}")).stdout(Stdio::piped()).spawn().unwrap();
     let mut r = BufReader::new(ch.stdout.take().unwrap());
     let mut line = String::new();
     r.read_line(&mut line).unwrap();
@@ -42,7 +44,7 @@ fn start_holder(d: &Path, run: &str, secs: u32) -> Child {
 #[test]
 fn the_child_exit_code_passes_through_and_holds_and_released_are_printed() {
     let d = tempfile::tempdir().unwrap();
-    let o = hold(d.path(), "r1", &[], "import sys; sys.exit(7)").output().unwrap();
+    let o = hold(d.path(), "r1", &[], "exit 7").output().unwrap();
     assert_eq!(o.status.code(), Some(7), "{}", String::from_utf8_lossy(&o.stderr));
     let s = out(&o);
     assert!(s.lines().next().unwrap() == "HOLDS r1", "{s}");
@@ -124,7 +126,7 @@ fn parallelism_comes_from_hosts_toml_only() {
     let d = tempfile::tempdir().unwrap();
     let hosts = d.path().join("hosts.toml");
     std::fs::write(&hosts, "[[hosts]]\nname = \"h\"\ncores = 16\nreserve_cores = 4\nmax_parallel_steps = 20\nmemory_check = false\n").unwrap();
-    let code = "import os; print('P=' + os.environ.get('GATETRAIN_PARALLEL', 'unset') + ' C=' + os.environ.get('GATETRAIN_CORES', 'unset'))";
+    let code = "env P=GATETRAIN_PARALLEL C=GATETRAIN_CORES";
     let o = hold(d.path(), "r1", &["--hosts", hosts.to_str().unwrap(), "--host", "h"], code).output().unwrap();
     assert!(out(&o).contains("P=12 C=12"), "{}{}", out(&o), String::from_utf8_lossy(&o.stderr));
     let o = hold(d.path(), "r2", &[], code).output().unwrap();

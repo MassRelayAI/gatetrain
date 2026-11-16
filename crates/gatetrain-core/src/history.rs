@@ -16,6 +16,11 @@ pub fn history_durations(db: &Path, exclude_run: &str) -> Option<History> {
     }
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
     let c = rusqlite::Connection::open_with_flags(db, flags).ok()?;
+    history_from(&c, exclude_run)
+}
+
+/// The same query on an open connection (a ledger in memory, or one just migrated).
+pub fn history_from(c: &rusqlite::Connection, exclude_run: &str) -> Option<History> {
     let mut st = c
         .prepare(
             "SELECT s.name, s.duration_sec FROM steps s JOIN runs r ON r.id=s.run_id \

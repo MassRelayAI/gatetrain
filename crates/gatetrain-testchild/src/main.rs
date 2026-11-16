@@ -1,0 +1,74 @@
+//! A tiny program the tests run as a synthetic child process: `gt-testchild <mode> [args]`.
+//! It stands in for the interpreter one-liners the tests used before: print, exit, sleep, show the environment or the
+//! working directory, write a file of a given size, read a lock sidecar, hold memory. Not installed, not published.
+use std::io::Write;
+use std::process::Command;
+use std::time::Duration;
+
+fn main() {
+    let a: Vec<String> = std::env::args().skip(1).collect();
+    let arg = |i: usize| a.get(i).map(String::as_str).unwrap_or("");
+    match arg(0) {
+        "print" => println!("{}", arg(1)),
+        "exit" => std::process::exit(arg(1).parse().unwrap_or(1)),
+        "pass" => {}
+        "sleep" => std::thread::sleep(Duration::from_secs_f64(arg(1).parse().unwrap_or(0.0))),
+        // a grandchild that holds our stdout for as long as we do
+        "grandchild" => {
+            let me = std::env::current_exe().unwrap();
+            let _ = Command::new(me).args(["sleep", arg(1)]).spawn();
+            std::thread::sleep(Duration::from_secs_f64(arg(1).parse().unwrap_or(0.0)));
+        }
+        // `env P=GATETRAIN_PARALLEL C=GATETRAIN_CORES`: one `LABEL=value` word each, `unset` when the variable is absent
+        "env" => {
+            let words: Vec<String> = a[1..]
+                .iter()
+                .map(|x| {
+                    let (label, var) = x.split_once('=').unwrap_or((x, x));
+                    format!("{label}={}", std::env::var(var).unwrap_or_else(|_| "unset".into()))
+                })
+                .collect();
+            println!("{}", words.join(" "));
+        }
+        "chain" => {
+            println!("CHAIN {} {}", std::env::var("GATETRAIN_RUN_ID").unwrap_or_default(), std::env::var("GATETRAIN_PARALLEL").unwrap_or_else(|_| "unset".into()));
+        }
+        "cwd" => {
+            let p = std::env::current_dir().unwrap().canonicalize().unwrap();
+            println!("CWD={}", p.to_string_lossy().trim_start_matches(r"\\?\"));
+        }
+        // `write FILE MB`: make the folder and write MB mebibytes
+        "write" => {
+            let p = std::path::Path::new(arg(1));
+            if let Some(d) = p.parent() {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            std::fs::write(p, vec![b'x'; arg(2).parse::<usize>().unwrap_or(1) * 1_048_576]).unwrap();
+        }
+        // `sidecar LOCK`: print the lock's `.info` file the way the chain would read it
+        "sidecar" => {
+            let t = std::fs::read_to_string(format!("{}.info", arg(1))).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            println!("SIDECAR={v}");
+        }
+        // `alloc MB SECS`: hold and touch MB of memory for SECS seconds
+        "alloc" => {
+            let mut v = vec![0u8; arg(1).parse::<usize>().unwrap_or(1) * 1_048_576];
+            for i in (0..v.len()).step_by(4096) {
+                v[i] = 1;
+            }
+            std::thread::sleep(Duration::from_secs_f64(arg(2).parse().unwrap_or(0.0)));
+            std::hint::black_box(&v);
+        }
+        // `args A B C`: one argument per line
+        "args" => {
+            for x in &a[1..] {
+                println!("{x}");
+            }
+        }
+        other => {
+            let _ = writeln!(std::io::stderr(), "gt-testchild: unknown mode {other:?}");
+            std::process::exit(64);
+        }
+    }
+}

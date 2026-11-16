@@ -21,3 +21,9 @@ Status: built. See docs/method.md and docs/lessons.md for the rules this module 
 `worktree_prefix` is a prefix of the worktree **folder name**, not a path. `/srv/wt/wt-lane-x` with `worktree_prefix = "wt-"` is the lane
 `lane-x`, which is what `keep_lanes` and the folders under `target_roots` are matched against (case-insensitively). A prefix with a path
 separator is a config error, and `check` reports a `keep_lanes` entry that matches no worktree and no target, because it protects nothing.
+
+## Rules and protected paths
+
+Every removal names the rule that allowed it (`merged-clean-worktree`, `lane-merged-target`, `orphan-target`, `over-budget-target`, `exited-container`, `unused-image`, `old-build-cache`, `old-trash-entry`) and the log line carries it as `rule`, with the facts as `why`. An item with no rule is never removed (`kept: no rule`). The table of what each rule needs is in the README, "What tidy may remove, and why".
+
+`protect = [paths or globs]` in `[tidy]` (default none) keeps out of every class, in a dry run, `--apply` and `--auto`, whatever is inside, equal to, or containing a protected path, and whatever links into one (`kept: protected`). Use it for reference captures and anything else that must never be tidied.

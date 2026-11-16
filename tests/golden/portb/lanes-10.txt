@@ -1,0 +1,355 @@
+rc=0
+--- stdout
+{
+  "main": "main",
+  "lanes": [
+    {
+      "lane": "laneA",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 1,
+      "base": "{SHA}",
+      "contained_in": "laneE"
+    },
+    {
+      "lane": "laneB",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 1,
+      "base": "{SHA}",
+      "contained_in": null
+    },
+    {
+      "lane": "laneC",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 1,
+      "base": "{SHA}",
+      "contained_in": null
+    },
+    {
+      "lane": "laneD",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 1,
+      "base": "{SHA}",
+      "contained_in": null
+    },
+    {
+      "lane": "laneE",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 2,
+      "base": "{SHA}",
+      "contained_in": null
+    },
+    {
+      "lane": "laneF",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 2,
+      "base": "{SHA}",
+      "contained_in": null
+    },
+    {
+      "lane": "laneG",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 2,
+      "base": "{SHA}",
+      "contained_in": null
+    },
+    {
+      "lane": "laneH",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 1,
+      "base": "{SHA}",
+      "contained_in": null
+    },
+    {
+      "lane": "laneI",
+      "tip": "{SHA}",
+      "merge_base": "{SHA}",
+      "own_commits": 0,
+      "base": "{SHA}",
+      "contained_in": null
+    }
+  ],
+  "contained": [
+    {
+      "lane": "laneA",
+      "in": "laneE"
+    }
+  ],
+  "carried": [
+    {
+      "tip": "{SHA}",
+      "commits": 1,
+      "lanes": [
+        "laneF",
+        "laneG"
+      ],
+      "on_main": true
+    }
+  ],
+  "passes": [
+    [
+      {
+        "base": "{SHA}",
+        "lanes": [
+          "laneB",
+          "laneC",
+          "laneD",
+          "laneE",
+          "laneH",
+          "laneI"
+        ]
+      }
+    ],
+    [
+      {
+        "base": "{SHA}",
+        "lanes": [
+          "laneF",
+          "laneG"
+        ],
+        "carried": true
+      }
+    ]
+  ],
+  "hotspots": [
+    {
+      "kind": "SAME-LINES",
+      "file": "a.txt",
+      "lanes": [
+        "laneB",
+        "laneE"
+      ],
+      "detail": "lines 2",
+      "action": "certain conflict, merge by hand"
+    },
+    {
+      "kind": "SAME-LINES",
+      "file": "a.txt",
+      "lanes": [
+        "laneB",
+        "main"
+      ],
+      "detail": "lines 2",
+      "action": "certain conflict, merge by hand"
+    },
+    {
+      "kind": "SAME-LINES",
+      "file": "a.txt",
+      "lanes": [
+        "laneE",
+        "main"
+      ],
+      "detail": "lines 2",
+      "action": "certain conflict, merge by hand"
+    },
+    {
+      "kind": "DELETE-EDIT",
+      "file": "d.txt",
+      "lanes": [
+        "laneC",
+        "laneD"
+      ],
+      "detail": "laneC deletes or renames it",
+      "action": "one lane deletes or renames it, the other edits it: decide which wins, by hand"
+    },
+    {
+      "kind": "SAME-LINES",
+      "file": "src/code.js",
+      "lanes": [
+        "laneF",
+        "laneG"
+      ],
+      "detail": "lines 4",
+      "action": "certain conflict, merge by hand"
+    },
+    {
+      "kind": "CODE-BOTH",
+      "file": "src/code.js",
+      "lanes": [
+        "laneB",
+        "laneE"
+      ],
+      "detail": null,
+      "action": "a person reads both diffs"
+    },
+    {
+      "kind": "CODE-BOTH",
+      "file": "src/code.js",
+      "lanes": [
+        "laneB",
+        "laneF"
+      ],
+      "detail": null,
+      "action": "a person reads both diffs"
+    },
+    {
+      "kind": "CODE-BOTH",
+      "file": "src/code.js",
+      "lanes": [
+        "laneB",
+        "laneG"
+      ],
+      "detail": null,
+      "action": "a person reads both diffs"
+    },
+    {
+      "kind": "CODE-BOTH",
+      "file": "src/code.js",
+      "lanes": [
+        "laneE",
+        "laneF"
+      ],
+      "detail": null,
+      "action": "a person reads both diffs"
+    },
+    {
+      "kind": "CODE-BOTH",
+      "file": "src/code.js",
+      "lanes": [
+        "laneE",
+        "laneG"
+      ],
+      "detail": null,
+      "action": "a person reads both diffs"
+    },
+    {
+      "kind": "SHARED-HUB",
+      "file": "package.json",
+      "lanes": [
+        "laneB",
+        "laneE"
+      ],
+      "detail": null,
+      "action": "rebuild, never text-merge; check entries survive"
+    }
+  ],
+  "doubled_line_risk": [
+    {
+      "file": "a.txt",
+      "line": 2,
+      "lanes": [
+        "laneB",
+        "laneE"
+      ],
+      "action": "likely doubled line after stacking: keep one, check it appears once"
+    },
+    {
+      "file": "src/code.js",
+      "line": 4,
+      "lanes": [
+        "laneF",
+        "laneG"
+      ],
+      "action": "likely doubled line after stacking: keep one, check it appears once"
+    },
+    {
+      "file": "a.txt",
+      "line": 2,
+      "lanes": [
+        "laneB",
+        "main"
+      ],
+      "action": "likely doubled line after stacking: keep one, check it appears once"
+    },
+    {
+      "file": "a.txt",
+      "line": 2,
+      "lanes": [
+        "laneE",
+        "main"
+      ],
+      "action": "likely doubled line after stacking: keep one, check it appears once"
+    }
+  ],
+  "resource_clashes": [
+    {
+      "name": "port",
+      "value": "51234",
+      "lanes": [
+        "laneB",
+        "laneE"
+      ],
+      "files": [
+        "tools/gate-a.sh",
+        "tools/gate-b.sh"
+      ],
+      "action": "give each lane its own value before the gates run in parallel"
+    }
+  ],
+  "paired_counts": [
+    {
+      "lane": "laneB",
+      "name": "MAX_ROUTES",
+      "old": "5",
+      "new": "6",
+      "file": "src/c.js",
+      "stale_in": "tests/c.test.js",
+      "line": 1,
+      "heuristic": true,
+      "action": "count changed here but its check still says 5: update tests/c.test.js:1"
+    }
+  ],
+  "baseline_warnings": [],
+  "groups": [
+    [
+      "laneB",
+      "laneC",
+      "laneH",
+      "laneI"
+    ],
+    [
+      "laneD",
+      "laneE"
+    ],
+    [
+      "laneF"
+    ],
+    [
+      "laneG"
+    ]
+  ],
+  "conflict_edges": {
+    "laneB": [
+      "laneE",
+      "laneF",
+      "laneG"
+    ],
+    "laneC": [
+      "laneD"
+    ],
+    "laneD": [
+      "laneC"
+    ],
+    "laneE": [
+      "laneB",
+      "laneF",
+      "laneG"
+    ],
+    "laneF": [
+      "laneB",
+      "laneE",
+      "laneG"
+    ],
+    "laneG": [
+      "laneB",
+      "laneE",
+      "laneF"
+    ]
+  },
+  "summary": {
+    "lanes": 8,
+    "independent_groups": 4,
+    "certain_conflicts": 5,
+    "shared_hubs": 1,
+    "resource_clashes": 1
+  },
+  "summary_line": "8 lanes: 4 independent groups; 5 certain conflicts; 1 shared hubs; 1 resource clashes"
+}
+--- stderr

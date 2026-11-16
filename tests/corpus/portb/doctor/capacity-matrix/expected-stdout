@@ -1,0 +1,14 @@
+PASS  L18,L30  ssd-box disk: /srv/ssd: 150 GB free >= 50
+PASS  L18,L19  ssd-box capacity: can run now: chain
+WARN  L18      usb-box disk: /mnt/ext: removable disk is not mounted  -> fix: attach and mount /mnt/ext; what it enables is dropped meanwhile
+WARN  L18,L19  usb-box capacity: can run now: nothing; cannot: chain (needs 120 GB free on an allowed disk); /mnt/ext (not mounted) would enable chain  -> fix: add or mount a disk with use including the missing kind, enough free space and fast = true for chains
+PASS  L18,L30  hdd-box disk: /srv/hdd: 500 GB free >= 50
+WARN  L19      hdd-box disk-speed: /srv/hdd: allowed for ['chain'] but not marked fast  -> fix: put build outputs on a fast disk, or limit /srv/hdd to use = ["archive"]
+PASS  L18,L19  hdd-box capacity: can run now: chain
+PASS  L18,L30  small-box disk: /mnt/a: 30 GB free >= 5
+FAIL  L18,L19  small-box capacity: can run now: preflight; cannot: lane-gates (needs 40 GB free on an allowed disk), chain (needs 120 GB free on an allowed disk)  -> fix: add or mount a disk with use including the missing kind, enough free space and fast = true for chains
+PASS  L21      ports-box ports: port 5500 is outside every ephemeral or reserved range
+FAIL  L21      ports-box ports: port 6001 is inside the reserved range 6000-6100  -> fix: move port 6001 outside 6000-6100
+PASS  L21      ports-box ports: port 57901 is inside the ephemeral range but reserved by the kernel (ip_local_reserved_ports)
+FAIL  L21      ports-box ports: port 40000 is inside the ephemeral range 32768-60999  -> fix: move port 40000 outside 32768-60999
+FAIL  L32      lock-box lock: /run/chain.lock: 10.0 h old with no released line (holder died?)  -> fix: find the holder, then remove the lock by hand after checking no chain is running

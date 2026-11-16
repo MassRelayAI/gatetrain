@@ -9,15 +9,11 @@ fn repo() -> PathBuf {
 }
 
 fn gt(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(args).env("GATETRAIN_PYROOT", repo()).env("PYTHONIOENCODING", "utf-8").output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(args).output().unwrap()
 }
 
 fn out(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
-}
-
-fn python() -> &'static str {
-    if cfg!(windows) { "python" } else { "python3" }
 }
 
 fn corpus_cases() -> Vec<PathBuf> {
@@ -28,24 +24,13 @@ fn corpus_cases() -> Vec<PathBuf> {
 }
 
 #[test]
-fn parse_matches_the_committed_python_output_on_every_case() {
+fn parse_matches_the_committed_output_on_every_case() {
     for case in corpus_cases() {
         let o = gt(&["parse", case.join("input.log").to_str().unwrap(), "--json"]);
         assert!(o.status.success(), "{}: {}", case.display(), String::from_utf8_lossy(&o.stderr));
         let want = std::fs::read(case.join("expected-stdout")).unwrap();
         assert_eq!(String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&want), "case {}", case.display());
         assert_eq!(o.stdout, want, "bytes, case {}", case.display());
-    }
-}
-
-#[test]
-fn parse_matches_the_live_python_parser_on_every_case() {
-    for case in corpus_cases() {
-        let log = case.join("input.log");
-        let py = Command::new(python()).arg(repo().join("tests/corpus/parse_dump.py")).arg(&log).output().expect("python is needed for the parity test");
-        assert!(py.status.success(), "{}: {}", case.display(), String::from_utf8_lossy(&py.stderr));
-        let rs = gt(&["parse", log.to_str().unwrap(), "--json"]);
-        assert_eq!(rs.stdout, py.stdout, "python vs rust, case {}", case.display());
     }
 }
 
@@ -103,16 +88,14 @@ fn ledger_migrate_refuses_a_newer_version() {
 }
 
 #[test]
-fn migrated_ledger_is_still_read_and_written_by_python() {
+fn a_migrated_ledger_is_still_read_and_written_by_the_ledger_commands() {
     let d = tempfile::tempdir().unwrap();
     let db = old_ledger(d.path());
     assert!(gt(&["ledger", "migrate", "--db", db.to_str().unwrap()]).status.success());
-    // `flaky` is forwarded to Python and opens the same file
     let o = gt(&["flaky", "--db", db.to_str().unwrap()]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    // Python ingest into the v1 file
     let log = repo().join("tests/corpus/parse/green/input.log");
-    let o = gt(&["ingest", log.to_str().unwrap(), "--db", db.to_str().unwrap(), "--run-id", "py1"]);
+    let o = gt(&["ingest", log.to_str().unwrap(), "--db", db.to_str().unwrap(), "--run-id", "again"]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(Ledger::open(&db).unwrap().runs().unwrap().len(), 2);
 }
@@ -194,21 +177,6 @@ fn log_verify_does_not_create_a_missing_ledger() {
     assert!(!db.exists());
 }
 
-#[test]
-fn unported_commands_forward_to_python_with_the_exit_code() {
-    // `next-tick` with no logs is a Python command; compare against running Python directly.
-    let d = tempfile::tempdir().unwrap();
-    let db = d.path().join("f.db");
-    let ours = gt(&["next-tick", "--db", db.to_str().unwrap()]);
-    let py = Command::new(python()).args(["-m", "gatetrain", "next-tick", "--db", db.to_str().unwrap()]).env("PYTHONPATH", repo()).output().unwrap();
-    assert_eq!(ours.status.code(), py.status.code());
-    assert_eq!(ours.stdout, py.stdout);
-    // a usage error keeps Python's exit code (argparse: 2)
-    let bad = gt(&["ingest"]);
-    assert_eq!(bad.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&bad.stderr).contains("usage"), "{}", String::from_utf8_lossy(&bad.stderr));
-}
-
 // ---- diagnose: the red classifier, parity with gatetrain/diagnose.py on tests/corpus/diagnose ----
 
 fn diag_cases() -> Vec<PathBuf> {
@@ -228,7 +196,7 @@ fn diag_args(case: &Path) -> Vec<String> {
 }
 
 #[test]
-fn diagnose_matches_the_committed_python_output_on_every_case() {
+fn diagnose_matches_the_committed_output_on_every_case() {
     for case in diag_cases() {
         let args = diag_args(&case);
         let o = gt(&args.iter().map(String::as_str).collect::<Vec<_>>());
@@ -236,17 +204,6 @@ fn diagnose_matches_the_committed_python_output_on_every_case() {
         let want = std::fs::read(case.join("expected-stdout")).unwrap();
         assert_eq!(String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&want), "case {}", case.display());
         assert_eq!(o.stdout, want, "bytes, case {}", case.display());
-    }
-}
-
-#[test]
-fn diagnose_matches_the_live_python_classifier_on_every_case() {
-    for case in diag_cases() {
-        let py = Command::new(python()).arg(repo().join("tests/corpus/diagnose_dump.py")).arg(&case).output().expect("python is needed for the parity test");
-        assert!(py.status.success(), "{}: {}", case.display(), String::from_utf8_lossy(&py.stderr));
-        let args = diag_args(&case);
-        let rs = gt(&args.iter().map(String::as_str).collect::<Vec<_>>());
-        assert_eq!(rs.stdout, py.stdout, "python vs rust, case {}", case.display());
     }
 }
 
@@ -350,7 +307,7 @@ fn rust_kind(case: &Path, kind: &str, db: &Path) -> Vec<u8> {
 }
 
 #[test]
-fn analysis_matches_the_committed_python_output_on_every_case() {
+fn analysis_matches_the_committed_output_on_every_case() {
     let tmp = tempfile::tempdir().unwrap();
     let hist = history_db(tmp.path());
     let none = tmp.path().join("none.db");
@@ -368,41 +325,6 @@ fn analysis_matches_the_committed_python_output_on_every_case() {
     assert!(n >= 52, "compared {n}");
 }
 
-#[test]
-fn analysis_matches_the_live_python_output_on_every_case() {
-    let tmp = tempfile::tempdir().unwrap();
-    let hist = history_db(tmp.path());
-    let none = tmp.path().join("none.db");
-    for case in analysis_cases() {
-        for kind in ["report", "trace", "eta", "eta-history"] {
-            let py = Command::new(python()).arg(repo().join("tests/corpus/analysis_dump.py")).arg(&case).arg(kind).output().expect("python is needed for the parity test");
-            assert!(py.status.success(), "{}: {}", case.display(), String::from_utf8_lossy(&py.stderr));
-            let db = if kind == "eta-history" { &hist } else { &none };
-            assert_eq!(rust_kind(&case, kind, db), py.stdout, "python vs rust, {kind} {}", case.display());
-        }
-    }
-}
-
-/// Proof the parity above is not the Python fallback answering: with forwarding switched off the ported paths still answer.
-#[test]
-fn ported_report_trace_eta_never_forward_to_python() {
-    let run = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(args).env("GATETRAIN_PYROOT", repo()).env("GATETRAIN_NO_FORWARD", "1").output().unwrap();
-    let case = repo().join("tests/corpus/analysis/green/input.log");
-    let log = case.to_str().unwrap();
-    let tmp = tempfile::tempdir().unwrap();
-    let db = tmp.path().join("none.db");
-    let r = run(&["report", log, "--now", NOW]);
-    assert!(r.status.success(), "report: {}", String::from_utf8_lossy(&r.stderr));
-    assert!(out(&r).starts_with("run input: "));
-    for case in analysis_cases() {
-        let t = run(&["trace", case.join("input.log").to_str().unwrap(), "--now", NOW]);
-        assert!(t.status.success(), "trace {}: {}", case.display(), String::from_utf8_lossy(&t.stderr));
-    }
-    let e = run(&["eta", log, "--db", db.to_str().unwrap(), "--now", NOW]);
-    assert!(e.status.success(), "eta: {}", String::from_utf8_lossy(&e.stderr));
-    assert!(!db.exists(), "eta must not create a ledger as a side effect of reading history");
-}
-
 // ---- config parity: hosts.toml (slice port-a) ---------------------------------------------------------------------
 
 fn config_cases() -> Vec<PathBuf> {
@@ -413,70 +335,30 @@ fn config_cases() -> Vec<PathBuf> {
 }
 
 #[test]
-fn config_dump_matches_the_committed_python_output_on_every_case() {
+fn config_dump_matches_the_committed_output_on_every_case() {
     for case in config_cases() {
-        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["config", "dump", case.join("hosts.toml").to_str().unwrap()]).env("GATETRAIN_NO_FORWARD", "1").output().unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["config", "dump", case.join("hosts.toml").to_str().unwrap()]).output().unwrap();
         let want = std::fs::read(case.join("expected-stdout")).unwrap();
         assert_eq!(String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&want), "case {}: {}", case.display(), String::from_utf8_lossy(&o.stderr));
         assert_eq!(o.stdout, want, "bytes, case {}", case.display());
     }
 }
 
-#[test]
-fn config_dump_matches_the_live_python_loader_on_every_case() {
-    for case in config_cases() {
-        let hosts = case.join("hosts.toml");
-        let py = Command::new(python()).arg(repo().join("tests/corpus/config_dump.py")).arg(&hosts).output().expect("python is needed for the parity test");
-        assert!(py.status.success(), "{}: {}", case.display(), String::from_utf8_lossy(&py.stderr));
-        let rs = gt(&["config", "dump", hosts.to_str().unwrap()]);
-        assert_eq!(rs.stdout, py.stdout, "python vs rust, case {}", case.display());
-    }
-}
-
 // ---- check and tidy (every mode) are answered by the Rust binary and match Python ----
 
 #[test]
-fn check_and_tidy_every_mode_run_in_rust_and_match_python() {
+fn check_and_tidy_every_mode_run_in_rust() {
+    // the byte-exact comparisons are tidy_parity.rs (simulated hosts, committed transcript) and tidy_real_parity.rs (a real disk)
     let d = tempfile::tempdir().unwrap();
     let cfg = d.path().join("hosts.toml");
-    std::fs::write(&cfg, "[[hosts]]
-name = \"h\"
-reach = \"local\"
-").unwrap();
+    std::fs::write(&cfg, "[[hosts]]\nname = \"h\"\nreach = \"local\"\n").unwrap();
     let c = cfg.to_str().unwrap();
     for args in [vec!["tidy"], vec!["tidy", "--class", "targets"], vec!["tidy", "--apply"], vec!["tidy", "--auto"], vec!["check"], vec!["check", "--json"]] {
         let mut a = args.clone();
         a.extend(["--config", c]);
-        // forwarding switched off: the Rust binary must answer on its own (a forward would exit 126)
-        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(&a).env("GATETRAIN_NO_FORWARD", "1").output().unwrap();
-        assert_ne!(o.status.code(), Some(126), "{args:?} was forwarded: {}", String::from_utf8_lossy(&o.stderr));
-        // and the exit code and the text are Python's
-        let mut pa = vec!["-m", "gatetrain"];
-        pa.extend(a.iter().copied());
-        let py = Command::new(python()).args(&pa).env("PYTHONPATH", repo()).env("PYTHONUTF8", "1").output().unwrap();
-        let lf = |b: &[u8]| String::from_utf8_lossy(b).replace('\r', "");
-        assert_eq!(o.status.code(), py.status.code(), "{args:?}");
-        assert_eq!(lf(&o.stdout), lf(&py.stdout), "{args:?}");
+        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(&a).output().unwrap();
+        assert!(matches!(o.status.code(), Some(0) | Some(1)), "{args:?}: {:?} {}", o.status.code(), String::from_utf8_lossy(&o.stderr));
+        assert!(!String::from_utf8_lossy(&o.stdout).trim().is_empty(), "{args:?} printed nothing");
     }
 }
 
-#[test]
-fn every_clap_subcommand_is_in_ported_and_nothing_else_is() {
-    let run = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(args).env("GATETRAIN_NO_FORWARD", "1").output().unwrap();
-    let help = String::from_utf8_lossy(&run(&["--help"]).stdout).into_owned();
-    let cmds: Vec<String> = help
-        .lines()
-        .skip_while(|l| !l.starts_with("Commands:"))
-        .skip(1)
-        .take_while(|l| l.starts_with("  "))
-        .filter_map(|l| l.split_whitespace().next().map(String::from))
-        .filter(|c| c != "help")
-        .collect();
-    assert!(cmds.len() >= 15, "{cmds:?}");
-    for c in &cmds {
-        let o = run(&[c, "--help"]);
-        assert_eq!(o.status.code(), Some(0), "`{c}` is a clap subcommand but not in PORTED (it would forward to Python): {}", String::from_utf8_lossy(&o.stderr));
-    }
-    // and a name that is not a subcommand forwards
-    assert_eq!(run(&["ingest", "--help"]).status.code(), Some(126));
-}

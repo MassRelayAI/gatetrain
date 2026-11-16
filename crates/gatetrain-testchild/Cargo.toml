@@ -1,0 +1,15 @@
+[package]
+name = "gatetrain-testchild"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "a tiny program the tests run as a synthetic child process (not installed, not published)"
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+
+[[bin]]
+name = "gt-testchild"
+path = "src/main.rs"

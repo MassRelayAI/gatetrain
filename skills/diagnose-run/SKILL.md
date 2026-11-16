@@ -8,7 +8,7 @@ description: Use when a chain, a batch, a lane gate or an agent hand-back went w
 1. **Collect the evidence first.** The run's own log and per-step logs, its exit codes, the commit it tested, the host, the time; for an
    agent, its brief and its hand-back. Quote lines, never paraphrase them.
 2. **Classify the red - run `gatetrain diagnose <run-log>` first.** It prints, for every red step, the class, the evidence line, the
-   remedy and whether a full rerun is needed. The rules are a data table (`gatetrain/diagnose.py`, `RULES`; extra rules with `--rules`):
+   remedy and whether a full rerun is needed. The rules are a data table (`rules/red-classes.toml`; extra rules with `--rules`):
    `flake-load` (a timeout, zero failed tests, a step far above its median; still needs a full green rerun under a zero-red merge rule),
    `infra-port` (failed to bind, address in use), `generated-uncommitted` (a NEW generated file never committed; run `gatetrain generated`),
    `baseline-shrink` (a lane fixed something: delete the entry and lower the count in the same commit), `baseline-missing` (a new route
