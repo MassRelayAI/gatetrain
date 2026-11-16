@@ -221,6 +221,12 @@ worktrees with branch, merged, dirty and links inside, exited containers, images
 wrong place) and a "would tidy" plan with bytes per item. Exit code 1 means a threshold is crossed: a disk below its minimum, a target over
 its budget, a profile inside an evidence folder.
 
+It ends in bounded time and is never silent (L76): each worktree, target and recycle-bin entry is reported on stderr as soon as it is
+judged (`tidy: worktree 3/54 <path>: not merged`; ` [12s]` when an item was slow; `GATETRAIN_PROGRESS=0` turns it off). The cheap checks
+decide first (keep lists, merge proof, `git status`): only a worktree that would be removed has its links listed, its size measured
+and its idle time walked, and only a recycle-bin entry old enough to go is sized (a kept worktree shows `-` for links). All probes of
+one item share `item_budget_s`; an item that runs out is `skipped`, its size unknown, and it is never planned.
+
 Sizes are best effort (L51). A size probe that times out or fails gives an unknown size, printed as `?`, never a fake 0: a
 recycle-bin entry is still removed by age; a target with a budget and an unknown size is reported as `size unknown` and is never
 cleaned on budget grounds; totals read "X + N item(s) of unknown size"; when `cargo clean` cannot be measured by size, the tool compares the
@@ -246,6 +252,7 @@ min_idle_min  = 60                      # a folder used more recently is kept (t
 worktree_min_idle_days = 2              # a worktree with a file changed in the last N days is kept, even when merged and clean (0 = off)
 main_volatile_paths = [".obsidian/"]    # tools rewrite these inside main while tidy runs; they do not count as a change of main (tracked content and untracked-but-not-ignored files elsewhere do)
 link_list_timeout_s = 300               # the link listing walks a whole worktree and gets this long; a timeout refuses that ONE item, it does not stop the run
+item_budget_s = 600                     # every probe of ONE item (worktree, target, recycle-bin entry) shares this; an item that runs out is skipped and reported (0 = none)
 idle_walk_depth = 12                    # how deep "the newest file inside" is looked for (bounded by size_timeout_s; a timeout means not idle)
 # NOTE: `check` writes one small file: .gatetrain-seen.json inside trash_dir (when tidy first saw each entry); nothing else is written
 trash_dir     = "/srv/trash"
@@ -282,8 +289,8 @@ Safety rules (lessons L43-L51, L60-L65):
 
 A batch went red three times, a run is slower than it should be, an agent claimed green and was not, the bill jumped. Ask your agent to
 "diagnose this run": the **diagnose-run** skill collects the evidence lines, classifies the red (stacking artefact, flaky, real defect,
-environment, process), names the fix, and turns anything seen twice into a lesson. Of the 66 lessons today, 46 are checked by code (`doctor`, `check`, `diagnose`,
-`tidy`, `stop`, `lanes`, the ledger); 20 are written rules in a module page that an agent follows, marked as such in
+environment, process), names the fix, and turns anything seen twice into a lesson. Of the 76 lessons today, 57 are checked by code (`doctor`, `check`, `diagnose`,
+`tidy`, `stop`, `lanes`, `watch`, the ledger); 19 are written rules in a module page that an agent follows, marked as such in
 [the lessons](docs/lessons.md) until a check exists.
 
 ## What's inside
@@ -300,7 +307,7 @@ environment, process), names the fix, and turns anything seen twice into a lesso
 | [`plan`](modules/plan.md) | detect independent work (owned files, shared hubs, hidden coupling, resources); schedule it across hosts, critical path first |
 | [`hosts`](modules/hosts.md) | the machines (local, server, cloud), their roles, limits and cost |
 | [`tick`](modules/tick.md) | the recurring check; acts only on written rules |
-| [`watch`](modules/watch.md) | watchers on remote logs that cannot go quietly wrong |
+| [`watch`](modules/watch.md) | one read-only look at a repository's lanes: live, merged awaiting tidy, stale, ready to stack, blocked, what to assign next |
 | [`chain`](modules/chain.md) | lock holder, per-step results, step cache, a stop that also cancels queued follow-ups |
 | [`stack`](modules/stack.md) | combine lanes by base, repair known artefacts, pre-flight before the expensive run |
 | [`review`](modules/review.md) | briefs, independent review for risky lanes, citation checks, persona juries |
@@ -334,7 +341,7 @@ gatetrain is not a CI service or a workflow engine; it sits on top of whatever r
 
 ## Lessons it is built on
 
-Sixty-six so far, each with the rule and what enforces it ([`docs/lessons.md`](docs/lessons.md)). Three of them:
+Seventy-six so far, each with the rule and what enforces it ([`docs/lessons.md`](docs/lessons.md)). Three of them:
 
 - A stop that kills the run but not the merger scheduled five minutes later lets that merger attach to the next run. **A stop cancels queued follow-ups too.**
 - Database tests that run as a superuser pass while the real application role is denied. **Every database lane runs one step as the application role.**
@@ -355,7 +362,8 @@ Sixty-six so far, each with the rule and what enforces it ([`docs/lessons.md`](d
 - [x] Agent skills: using-gatetrain, plan-lanes, review-lane, preflight-and-chain, tick, diagnose-run, tidy
 - [x] Claude Code plugin manifest and marketplace
 - [x] `gatetrain doctor` (pre-run checks per host, disks as resources) and `gatetrain stop` (chain plus queued followers)
-- [ ] `gatetrain tick` and `gatetrain watch` (generic, host-aware); `status` and multi-log `next-tick` are built
+- [x] `gatetrain watch`: a repository's lanes and the next assignments, read-only (log watchers are still `status` / `next-tick`)
+- [ ] `gatetrain tick` (generic, host-aware); `status` and multi-log `next-tick` are built
 - [ ] `gatetrain chain` (holder, step runner, stop)
 - [x] Ledger writer: `gatetrain ingest` (chain logs into runs and steps), `report`, `trace` (Perfetto timeline)
 - [x] `gatetrain eta` (prediction from the ledger) and `gatetrain next-tick` (adaptive cadence)
