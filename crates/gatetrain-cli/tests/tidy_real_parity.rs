@@ -171,6 +171,23 @@ fn run_rust(cwd: &Path, args: &[&str]) -> Ran {
     Ran { out, err, rc: o.status.code() }
 }
 
+/// stderr with the ` [12s]` suffix of slow progress lines removed.
+fn untimed(err: &[u8]) -> String {
+    String::from_utf8_lossy(err)
+        .lines()
+        .map(|l| match l.rfind(" [") {
+            Some(i) if l.starts_with("tidy: ") && l.ends_with("s]") && l[i + 2..l.len() - 2].chars().all(|c| c.is_ascii_digit()) && l.len() > i + 4 => &l[..i],
+            _ => l,
+        })
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+#[test]
+fn untimed_drops_only_the_timing_suffix() {
+    assert_eq!(untimed(b"tidy: target 2/6 /x: tidy (3.0 KB) [5s]\nguard [5s]\ntidy: a [x5s]\n"), "tidy: target 2/6 /x: tidy (3.0 KB)\nguard [5s]\ntidy: a [x5s]\n");
+}
+
 #[test]
 fn check_json_and_tidy_dry_run_match_live_python_on_a_real_corpus() {
     let d = tempfile::Builder::new().prefix("gt-parity-").tempdir().unwrap();
@@ -193,7 +210,10 @@ fn check_json_and_tidy_dry_run_match_live_python_on_a_real_corpus() {
         let text = String::from_utf8_lossy(&py.out).into_owned();
         assert!(text.contains("lane-a") && (text.contains("would tidy") || text.contains("\"plan\"")), "python printed nothing useful: {text}\n{}", String::from_utf8_lossy(&py.err));
         compared += py.out.len();
-        if py.out != rs.out || py.err != rs.err || py.rc != rs.rc {
+        // a progress line says ` [12s]` when its item was slow: wall time, not behaviour (both run at once here, under load)
+        let (py_err, rs_err) = (untimed(&py.err), untimed(&rs.err));
+        assert!(py_err.contains("tidy: worktree 1/"), "the CLI streams progress: {py_err}");
+        if py.out != rs.out || py_err != rs_err || py.rc != rs.rc {
             bad.push(format!(
                 "args {args:?}\n--- python rc={:?}\n{}{}\n--- rust rc={:?}\n{}{}",
                 py.rc,
