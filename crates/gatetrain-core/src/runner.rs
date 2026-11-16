@@ -33,6 +33,10 @@ impl RunOut {
 /// The ONE command door (doctor, lanes, generated, check, tidy). An implementor supplies [`Runner::run_for`]; the doctor's
 /// two-field view [`Runner::run`] (a timeout is an `Err`, as Python raises) is derived from it.
 pub trait Runner {
+    /// True when commands run on this machine (so a probe can be answered in-process instead of through a shell).
+    fn is_local(&self) -> bool {
+        false
+    }
     /// Run one command line through the host's shell. `timeout` is seconds; `None` means the runner's default (60 s).
     fn run_for(&self, cmd: &str, timeout: Option<f64>) -> Result<RunOut, String>;
     /// A shell command line: `(returncode, stdout)`; a timeout is an `Err`.
@@ -175,6 +179,9 @@ impl Runner for LocalRunner {
         run_out(c, None, timeout)
     }
     fn shell_free(&self) -> bool {
+        true
+    }
+    fn is_local(&self) -> bool {
         true
     }
     fn put_file(&self, path: &str, text: &str) -> Result<(), String> {

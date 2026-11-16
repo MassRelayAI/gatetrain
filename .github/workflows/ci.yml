@@ -22,17 +22,11 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4.2.2
-      # The product is Rust only. Python runs one repository gate: the privacy check and its own test.
-      - uses: actions/setup-python@v5.3.0
-        with:
-          python-version: "3.12"
       - name: Rust toolchain (stable, with clippy)
         run: rustup toolchain install stable --profile minimal --component clippy --no-self-update && rustup default stable
         shell: bash
       - name: privacy (no deny-listed word in any file)
-        run: python tools/privacy_check.py
-      - name: privacy gate goes red when it should
-        run: python -m unittest discover -s tests -p test_privacy.py
+        run: cargo run -q -p gatetrain-cli -- privacy-check
       - name: cargo test
         run: cargo test --workspace
       - name: cargo clippy

@@ -419,8 +419,16 @@ impl<'a> Ops<'a> {
         if let Some(v) = self.rp_cache.borrow().get(p) {
             return Ok(v.clone());
         }
+        if self.win && self.runner.is_local() {
+            // this machine: answered in-process, no shell
+            let v = crate::winprobe::local_realpath(p).map(|s| norm(&s));
+            self.rp_cache.borrow_mut().insert(p.to_string(), v.clone());
+            return Ok(v);
+        }
         let argv: Vec<String> = if self.win {
-            ["python", "-c", "import os,sys;print(os.path.realpath(sys.argv[1]))", p].iter().map(|s| s.to_string()).collect()
+            {
+                ["powershell", "-NoProfile", "-Command", crate::winprobe::realpath_script(p).as_str()].iter().map(|s| s.to_string()).collect()
+            }
         } else {
             ["realpath", "-m", "--", p].iter().map(|s| s.to_string()).collect()
         };
@@ -966,7 +974,7 @@ pub fn free_gb(h: &Host, runner: &dyn Runner, path: &str) -> R<Option<f64>> {
         })
     };
     if host_os(h) == "windows" {
-        let (rc, out) = get(&format!("python -c \"import shutil,sys;print(shutil.disk_usage(sys.argv[1]).free)\" \"{path}\""))?;
+        let (rc, out) = get(&crate::winprobe::free_bytes_cmd(path))?;
         let s = strip(&out);
         return Ok(if rc == Some(0) && is_digits(s) { s.parse::<f64>().ok().map(|v| v / (1024.0 * 1024.0 * 1024.0)) } else { None });
     }

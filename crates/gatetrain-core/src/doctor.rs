@@ -75,7 +75,7 @@ fn split_none(s: &str, maxsplit: usize) -> Vec<String> {
 /// Free space in GB at `path`, or None when the path cannot be read (missing, not mounted).
 pub fn free_gb(h: &Host, runner: &dyn Runner, path: &str) -> Result<Option<f64>, String> {
     if win(h) {
-        let (rc, out) = runner.run(&format!("python -c \"import shutil,sys;print(shutil.disk_usage(sys.argv[1]).free)\" {}", q(path, "windows")))?;
+        let (rc, out) = runner.run(&crate::winprobe::free_bytes_cmd(path))?;
         let s = out.trim();
         return Ok(if rc == 0 && is_digits(s) { s.parse::<f64>().ok().map(|v| v / 1024f64.powi(3)) } else { None });
     }

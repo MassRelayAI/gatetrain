@@ -17,6 +17,7 @@ pub mod logfmt;
 pub mod memory;
 pub mod portscan;
 pub mod predict;
+pub mod privacy;
 pub mod pycompat;
 pub mod runner;
 pub mod runs;
@@ -25,6 +26,7 @@ pub mod stop;
 pub mod stats;
 pub mod tidy;
 pub mod trace;
+pub mod winprobe;
 pub mod watch;
 
 /// Errors of the core. A caller matches on the variant, not on a string.

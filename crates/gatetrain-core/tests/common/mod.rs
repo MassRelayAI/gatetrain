@@ -305,7 +305,7 @@ impl Sim {
         if c.starts_with("df -Pk") {
             return ok(format!("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 9 9 {} 1% /m\n", (st.free * 1024.0 * 1024.0) as i64));
         }
-        if c.starts_with("python -c") && c.contains("shutil") {
+        if c.starts_with("powershell") && c.contains("AvailableFreeSpace") {
             return ok(format!("{}\n", (st.free * GB as f64) as i64));
         }
         if st.rm_timeout && re(r"^(rm -r --|rmdir /S /Q) ").is_match(&c) {
@@ -363,7 +363,7 @@ impl Sim {
                 None => RunOut::done(1, ""),
             };
         }
-        let m = re(r"^realpath -m -- (.+)$").captures(&c).or_else(|| re(r"^python -c .*os\.path\.realpath.*? (\S+)$").captures(&c));
+        let m = re(r"^realpath -m -- (.+)$").captures(&c).or_else(|| re(r"^powershell .*GetFullPath.*;GtReal (.+)$").captures(&c));
         if let Some(m) = m {
             let p = n(&m[1]);
             let mut ks: Vec<&(String, Entry)> = st.fs.iter().collect();

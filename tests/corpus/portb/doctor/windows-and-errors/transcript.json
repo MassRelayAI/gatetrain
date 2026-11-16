@@ -1,6 +1,6 @@
 {
  "pc": {
-  "python -c \"import shutil,sys;print(shutil.disk_usage(sys.argv[1]).free)\" \"D:\\\"": [
+  "powershell -NoProfile -Command \"(New-Object System.IO.DriveInfo ([System.IO.Path]::GetPathRoot((Resolve-Path -LiteralPath 'D:\\' -ErrorAction Stop).ProviderPath))).AvailableFreeSpace\"": [
    0,
    "5368709120\n"
   ],

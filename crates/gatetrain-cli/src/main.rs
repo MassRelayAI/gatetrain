@@ -87,6 +87,15 @@ enum Cmd {
     Check(tidycmd::CheckArgs),
     /// Clean the leftovers `check` finds (dry run unless --apply or --auto)
     Tidy(tidycmd::TidyArgs),
+    /// Fail when any file of a repository holds a word on its hashed deny-list `.privacy-denylist` (a hit names the file and line, never the word)
+    PrivacyCheck {
+        /// the repository to check (default: the current folder)
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// print the deny-list line (sha256) for this word instead of checking
+        #[arg(long, value_name = "WORD")]
+        hash: Option<String>,
+    },
     /// Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, stackable, blocked, next assignments
     Watch {
         /// a TOML file with a [watch] table (repo = "...", lanes_csv, plans_index, ...); it may be hosts.toml
@@ -450,6 +459,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Batch { db, config, lock, hosts, host, cmd } => run_batch(&db, &config, lock, hosts.zip(host), cmd),
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
+        Cmd::PrivacyCheck { root, hash } => Ok(ExitCode::from(gatetrain_core::privacy::run(&root, hash.as_deref()) as u8)),
         Cmd::Watch { config, now } => {
             let cfg = match gatetrain_core::watch::load_cfg(&config) {
                 Ok(c) => c,
