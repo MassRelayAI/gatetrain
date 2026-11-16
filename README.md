@@ -39,7 +39,7 @@ line moving without lying to yourself.
 
 ## Installation
 
-gatetrain is one Rust binary, plus skills written as plain Markdown. There is no server and no database service to run: the ledger is one SQLite file that is compiled in. There is one small Python exception on Windows hosts, below.
+gatetrain is one Rust binary, plus skills written as plain Markdown. There is no server and no database service to run: the ledger is one SQLite file that is compiled in. No Python is needed anywhere.
 
 ### The binary
 
@@ -54,7 +54,7 @@ gatetrain --version
 
 To skip the install, run `cargo build --release` and use `target/release/gatetrain`.
 
-One limit to know about: on a Windows host, `doctor` and `tidy` still call `python` for two small probes (the real path of a folder, and free disk space). Everything else is Rust. Linux and macOS hosts need nothing.
+On a Windows host, `doctor` and `tidy` answer two small probes (the real path of a folder, and free disk space) with PowerShell, which every Windows host has; on the machine itself the real path is read in-process. Linux and macOS hosts need nothing.
 
 ### Claude Code (plugin)
 
@@ -99,7 +99,7 @@ Commands:
   ledger     The ledger file
   check      Find leftovers: build targets, worktrees, containers, images, cache, recycle bin (read-only)
   tidy       Clean the leftovers `check` finds (dry run unless --apply or --auto)
-  watch      Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, blocked, next assignments
+  watch      Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, stackable, blocked, next assignments
   ingest     Parse a chain log into the ledger (a run id already there is refused; --replace only for a running or stopped run)
   status     One table for every chain log given: state, eta and when to look next
   next-tick  When to look at a running chain next
@@ -240,10 +240,10 @@ It is advice (exit 0 unless git fails); the same data with `--json`. Heuristics 
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-python tools/privacy_check.py        # the one Python script left: a repository gate, not the product
+gatetrain privacy-check             # no deny-listed word in any file (hashed list `.privacy-denylist`; `--hash W` prints a line to add)
 ```
 
-Real run on Windows, from `cargo test --workspace`: 361 tests, 0 failed (gatetrain-core 290, gatetrain-cli 70, the test child program 1). Clippy with `-D warnings` is clean. The privacy gate has 7 tests of its own (`python -m unittest discover -s tests -p test_privacy.py`). CI repeats all of it on Linux, macOS and Windows. The tests that once compared against the Python version now read what it printed: `tests/golden/` and `tests/corpus/`.
+Real run on Windows (2026-11-17), from `cargo test --workspace`: 378 tests, 0 failed (gatetrain-core 304, gatetrain-cli 73, the test child program 1). Clippy with `-D warnings` is clean. The privacy check has 8 of the core tests. CI repeats all of it on Linux, macOS and Windows. The tests that once compared against the Python version now read what it printed: `tests/golden/` and `tests/corpus/`.
 
 Works alongside single-branch development skill sets (brainstorming, plans, test-driven development, code review, such as
 [Superpowers](https://github.com/obra/superpowers)): those make one lane good; gatetrain runs many lanes on many machines and proves the batch.
@@ -424,7 +424,7 @@ environment, process), names the fix, and turns anything seen twice into a lesso
 | [`plan`](modules/plan.md) | detect independent work (owned files, shared hubs, hidden coupling, resources); schedule it across hosts, critical path first |
 | [`hosts`](modules/hosts.md) | the machines (local, server, cloud), their roles, limits and cost |
 | [`tick`](modules/tick.md) | the recurring check; acts only on written rules |
-| [`watch`](modules/watch.md) | one read-only look at a repository's lanes: live, merged awaiting tidy, stale, ready to stack, blocked, what to assign next |
+| [`watch`](modules/watch.md) | one read-only look at a repository's lanes: live, merged awaiting tidy, stale, ready to stack, stackable (conflicts only in files the stacker rebuilds), blocked, what to assign next |
 | [`chain`](modules/chain.md) | lock holder, per-step results, step cache, a stop that also cancels queued follow-ups |
 | [`stack`](modules/stack.md) | combine lanes by base, repair known artefacts, pre-flight before the expensive run |
 | [`review`](modules/review.md) | briefs, independent review for risky lanes, citation checks, persona juries |

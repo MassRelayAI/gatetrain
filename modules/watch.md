@@ -22,6 +22,7 @@ suggest_status = ["open"]               # plan statuses that make a plan a candi
 merged_plan_status = ["merged"]         # plan statuses that mean the plan's lane is merged
 max_suggestions = 8
 git_timeout_s = 60
+regenerable = []                        # globs of files the stacker rebuilds (`*` also matches "/"): a lane that conflicts only there is "stackable"
 ```
 
 It prints a summary line, a numbered `next:` list (stack the ready lanes; unblock; rebase the lanes that conflict with main; check by
@@ -32,6 +33,8 @@ assign the open plans no lane carries, written plans first, newest first; review
 - **merged, awaiting tidy**: merged as an ancestor, by patch (`git cherry`), or by content (every path the lane changed is the same on
   main), with the worktree still on disk;
 - **ledger rows whose branch does not exist** (a `stacked` row is carried by its batch and is not listed).
+
+A live lane is `stackable` when it conflicts with main only in files that match `regenerable` (the stacker takes them whole and rebuilds them); the next list says "ready for the stacker", not "rebase". With `regenerable` set, a lane that also conflicts in other files stays `blocked` and its why names up to 3 of them.
 
 A live lane is `blocked` when it conflicts with main (three-way `git merge-tree <base> <main> <lane>`, conflict markers), when the
 ledger says so, or when the ledger says it is ready while its worktree has uncommitted work; `ready` when the ledger says ready, the
