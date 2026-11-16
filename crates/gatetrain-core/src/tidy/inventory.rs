@@ -11,6 +11,41 @@ use regex::Regex;
 
 pub const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
+/// A sink for one progress line.
+pub type ProgressFn = Box<dyn Fn(&str)>;
+
+thread_local! {
+    static PROGRESS: std::cell::RefCell<Option<ProgressFn>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Where `gather` reports each item as it finishes (the CLI streams it to stderr). Off unless set: a library call stays quiet.
+pub fn set_progress(f: Option<ProgressFn>) {
+    PROGRESS.with(|p| *p.borrow_mut() = f);
+}
+
+fn progress(line: String) {
+    PROGRESS.with(|p| {
+        if let Some(f) = p.borrow().as_ref() {
+            f(&line)
+        }
+    });
+}
+
+/// ` [12s]` when an item took 5 s or more, else nothing (fast items print the same text on every run).
+fn slow(t: std::time::Instant) -> String {
+    let s = t.elapsed().as_secs_f64();
+    if s >= 5.0 {
+        format!(" [{}s]", crate::pycompat::fmt_f(s, 0))
+    } else {
+        String::new()
+    }
+}
+
+/// The note for an item whose probes ran out of `item_budget_s`.
+pub fn over_budget(cfg: &TidyCfg) -> String {
+    format!("skipped: its probes ran past item_budget_s ({}s); left alone, size unknown", fmt_g(cfg.item_budget_s))
+}
+
 /// What an item adds to its JSON form beyond the common fields.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Extra {
@@ -68,7 +103,8 @@ pub struct WtInfo {
     pub branch: Option<String>,
     pub merged: Option<bool>,
     pub dirty: Option<bool>,
-    pub links: usize,
+    /// None = not listed (the worktree was kept before its links mattered)
+    pub links: Option<usize>,
     pub bytes: Option<i64>,
     pub keep: Option<String>,
 }
@@ -212,12 +248,15 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         Some(w) => ops.rp(&w.path)?,
         None => None,
     };
-    // worktrees
+    // worktrees: the cheap checks (keep lists, merge proof, git status) decide first; only a worktree that would be removed has its links
+    // listed, its size measured and its idle time walked - those walk the whole tree (node_modules, build targets) and are slow
     for (idx, w) in wts.iter().enumerate() {
         let (wpath, wbranch) = (&w.path, &w.branch);
+        let t0 = std::time::Instant::now();
+        ops.start_item();
         let n = norm(wpath);
         let wr = ops.rp(wpath)?;
-        let mut info = WtInfo { path: wpath.clone(), branch: wbranch.clone(), merged: None, dirty: None, links: 0, bytes: None, keep: None };
+        let mut info = WtInfo { path: wpath.clone(), branch: wbranch.clone(), merged: None, dirty: None, links: None, bytes: None, keep: None };
         if kept_n.contains(&n) || wr.as_ref().map(|r| kept_r.contains(r)).unwrap_or(false) {
             info.keep = Some("main/root/keep list".into());
         } else if idx == 0 || Some(&n) == first_n.as_ref() || (wr.is_some() && wr == first_r) {
@@ -243,16 +282,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             let br = wbranch.clone().unwrap();
             info.merged = if br != cfg.main_branch { ops.merged(&br)? } else { None };
             info.dirty = ops.dirty(wpath)?;
-            match ops.list_links(wpath) {
-                Ok(l) => info.links = l.len(),
-                // a listing that timed out, or a name it cannot be trusted with: this one item is kept
-                Err(Fatal::Item(e)) => info.keep = Some(format!("cannot list its links ({e})")),
-                Err(e) => return Err(e),
-            }
-            info.bytes = ops.size(wpath)?;
-            if info.keep.is_some() {
-                // kept above
-            } else if br == cfg.main_branch {
+            if br == cfg.main_branch {
                 info.keep = Some("main branch".into());
             } else if cfg.keep_branches.contains(&br) || keep_lanes_l.contains(&lane_of(wpath, cfg).to_lowercase()) {
                 info.keep = Some("keep list".into());
@@ -260,14 +290,36 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 info.keep = Some(if info.dirty == Some(true) { "uncommitted work" } else { "status unreadable" }.into());
             } else if info.merged != Some(true) {
                 info.keep = Some(if info.merged == Some(false) { "not merged" } else { "merge state unknown" }.into());
-            } else if cfg.worktree_min_idle_days > 0.0 && ops.recent(wpath, cfg.worktree_min_idle_days * 1440.0)? != Some(false) {
-                info.keep = Some(format!("used in the last {} days", fmt_g(cfg.worktree_min_idle_days)));
+            } else {
+                match ops.list_links(wpath) {
+                    Ok(l) => info.links = Some(l.len()),
+                    // a listing that timed out, or a name it cannot be trusted with: this one item is kept
+                    Err(Fatal::Item(e)) => info.keep = Some(format!("cannot list its links ({e})")),
+                    Err(e) => return Err(e),
+                }
+                info.bytes = ops.size(wpath)?;
+                if info.keep.is_none() && cfg.worktree_min_idle_days > 0.0 && ops.recent(wpath, cfg.worktree_min_idle_days * 1440.0)? != Some(false) {
+                    info.keep = Some(format!("used in the last {} days", fmt_g(cfg.worktree_min_idle_days)));
+                }
             }
         }
+        if ops.end_item() {
+            info.keep = Some(over_budget(cfg));
+            info.bytes = None;
+        }
+        progress(format!(
+            "tidy: worktree {}/{} {}: {}{}{}",
+            idx + 1,
+            wts.len(),
+            wpath,
+            info.keep.clone().unwrap_or_else(|| "tidy".into()),
+            info.bytes.map(|b| format!(" ({})", human(Some(b)))).unwrap_or_default(),
+            slow(t0)
+        ));
         if info.keep.is_none() {
             let br = info.branch.clone().unwrap();
             let mut it = Item::new("worktrees", "remove-worktree", wpath, info.bytes, &format!("branch {} is on {}", br, cfg.main_branch));
-            it.extra = Extra::Worktree { branch: br, links: info.links };
+            it.extra = Extra::Worktree { branch: br, links: info.links.unwrap_or(0) };
             inv.items.push(it);
         }
         inv.worktrees.push(info);
@@ -307,10 +359,13 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         }
     }
     let mut seen = std::collections::HashSet::new();
-    for (path, lane, budget) in entries {
+    let n_entries = entries.len();
+    for (ti, (path, lane, budget)) in entries.into_iter().enumerate() {
         if seen.contains(&norm(&path)) {
             continue;
         }
+        let t0 = std::time::Instant::now();
+        ops.start_item();
         match ops.exists(&path)? {
             None => {
                 inv.breaches.push(format!("cannot tell whether {path} exists; left alone"));
@@ -385,20 +440,28 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 None
             };
             t.keep = reason.clone();
-            if reason.is_none() && size.map(|s| s != 0).unwrap_or(true) {
+            if ops.end_item() {
+                t.keep = Some(over_budget(cfg));
+                t.bytes = None;
+            } else if reason.is_none() && size.map(|s| s != 0).unwrap_or(true) {
                 let mut it = Item::new("targets", if cargo { "clean" } else { "move" }, &path, size, &format!("lane {}: {}", lane, if br.is_some() { "branch content is on main" } else { "orphan" }));
                 it.extra = Extra::Target { cargo, tag: t.tag, branch: br.clone() };
                 inv.items.push(it);
             }
+        } else if ops.end_item() {
+            t.keep = Some(over_budget(cfg));
+            t.bytes = None;
         } else if t.over && !kept_n.contains(&norm(&path)) && held_by(&path, None).is_none() && (cargo || !names.is_empty()) {
             let mut it = Item::new("targets", if cargo { "clean" } else { "move" }, &path, size, &format!("over its {} GB budget", fmt_g(budget.unwrap())));
             it.attended_only = true;
             it.extra = Extra::Target { cargo, tag: t.tag, branch: None };
             inv.items.push(it);
         }
+        progress(format!("tidy: target {}/{} {}: {}{}{}", ti + 1, n_entries, t.path, t.keep.clone().unwrap_or_else(|| "tidy".into()), t.bytes.map(|b| format!(" ({})", human(Some(b)))).unwrap_or_default(), slow(t0)));
         inv.targets.push(t);
         // Python appends the target before judging it; the order inside `inv.targets` is the order of `entries`.
     }
+    ops.end_item(); // a target that was skipped early leaves no budget running into the host-wide probes below
     // containers
     if let Some(prefix) = truthy_s(&cfg.container_prefix) {
         let ex = ops.run0(r#"docker ps -a --filter status=exited --format "{{.Names}}""#)?;
@@ -458,15 +521,16 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         if te == Some(true) {
             let seen = ops.read_seen(td)?;
             let mut new_seen: std::collections::BTreeMap<String, super::ops::SeenRec> = std::collections::BTreeMap::new();
-            for nm in ops.listdir(td)? {
-                if nm == super::ops::SEEN {
-                    continue;
-                }
+            let names: Vec<String> = ops.listdir(td)?.into_iter().filter(|n| n != super::ops::SEEN).collect();
+            for (bi, nm) in names.iter().enumerate() {
+                let nm = nm.clone();
                 let p = ops.join(td, &nm);
                 if ops.win && ops.win_unsafe(&nm) {
                     inv.trash.push(TrashInfo { path: p, bytes: None, age_days: None, keep: Some("unsafe name".into()) });
                     continue;
                 }
+                let t0 = std::time::Instant::now();
+                ops.start_item();
                 let mt = ops.mtime(&p)?;
                 let rec = match seen.get(&nm) {
                     Some(r) if !(r.m.is_some() && mt.is_some() && r.m != mt) => r.clone(),
@@ -480,9 +544,13 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                     a = a.min(((now - secs) / 86400.0).max(0.0));
                 }
                 let age = Some(a);
-                let sz = ops.size(&p)?;
-                inv.trash.push(TrashInfo { path: p.clone(), bytes: sz, age_days: age, keep: None });
-                if let Some(a) = age {
+                // only an entry old enough to go is sized: a young one is listed with its age, its size unknown ("?")
+                let sz = if a > cfg.trash_days { ops.size(&p)? } else { None };
+                let cut = ops.end_item();
+                let keep = cut.then(|| over_budget(cfg));
+                progress(format!("tidy: recycle bin {}/{} {}: {}d{}{}{}", bi + 1, names.len(), p, crate::pycompat::fmt_f(a, 0), if cut { String::new() } else { sz.map(|b| format!(" ({})", human(Some(b)))).unwrap_or_default() }, keep.as_ref().map(|k| format!(", {k}")).unwrap_or_default(), slow(t0)));
+                inv.trash.push(TrashInfo { path: p.clone(), bytes: if cut { None } else { sz }, age_days: age, keep: keep.clone() });
+                if let (Some(a), None) = (age, keep) {
                     if a > cfg.trash_days {
                         inv.items.push(Item::new("trash", "remove", &p, sz, &format!("in the recycle bin {} days (> {})", crate::pycompat::fmt_f(a, 0), fmt_g(cfg.trash_days))));
                     }

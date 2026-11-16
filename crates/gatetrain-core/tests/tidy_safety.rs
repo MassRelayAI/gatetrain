@@ -179,7 +179,7 @@ fn worktrees_containers_images_trash() {
     let sim = linux_sim();
     let (_h, _t, inv) = gather_sim(&sim, json!({}), false, 50.0);
     let wt = |p: &str| inv.worktrees.iter().find(|w| w.path == p).unwrap();
-    assert_eq!(wt("/repo/wt/lane-a").links, 1);
+    assert_eq!(wt("/repo/wt/lane-a").links, Some(1));
     assert_eq!(wt("/repo/wt/lane-d").keep.as_deref(), Some("uncommitted work"));
     assert_eq!(wt("/repo/wt/lane-b").keep.as_deref(), Some("not merged"));
     assert_eq!(wt("/repo/wt/lane-c").keep.as_deref(), Some("keep list"));

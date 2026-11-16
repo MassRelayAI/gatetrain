@@ -32,6 +32,18 @@ pub struct TidyArgs {
     auto: bool,
 }
 
+/// Each item is reported on stderr as soon as it is judged (`GATETRAIN_PROGRESS=0` turns it off): a long inventory is never silent.
+fn stream_progress() {
+    if std::env::var("GATETRAIN_PROGRESS").map(|v| v == "0").unwrap_or(false) {
+        return;
+    }
+    gatetrain_core::tidy::inventory::set_progress(Some(Box::new(|l: &str| {
+        let mut e = std::io::stderr().lock();
+        let _ = writeln!(e, "{l}");
+        let _ = e.flush();
+    })));
+}
+
 fn emit(o: CliOut) -> ExitCode {
     let _ = std::io::stdout().write_all(o.stdout.as_bytes());
     let _ = std::io::stderr().write_all(o.stderr.as_bytes());
@@ -39,9 +51,11 @@ fn emit(o: CliOut) -> ExitCode {
 }
 
 pub fn run_check(a: CheckArgs) -> ExitCode {
+    stream_progress();
     emit(cmd_check(&a.config, a.host.as_deref(), a.json, &make_runner, None))
 }
 
 pub fn run_tidy(a: TidyArgs) -> ExitCode {
+    stream_progress();
     emit(cmd_tidy(&a.config, a.host.as_deref(), a.apply, a.cls.as_deref(), a.auto, &make_runner, None))
 }

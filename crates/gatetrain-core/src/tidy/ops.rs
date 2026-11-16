@@ -9,6 +9,7 @@ use crate::runner::{RunOut, Runner};
 use regex::Regex;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::time::Instant;
 
 pub const END: &str = "__GT_END__";
 
@@ -179,6 +180,10 @@ pub struct Ops<'a> {
     pub win: bool,
     canary_ok: Cell<bool>,
     rp_cache: RefCell<HashMap<String, Option<String>>>,
+    /// the end of the current item's time budget (`item_budget_s`); `None` outside an item
+    deadline: Cell<Option<Instant>>,
+    /// a probe of the current item was cut short or not run because the budget ran out
+    over: Cell<bool>,
 }
 
 /// `(tracked file count, status text)` of the main checkout.
@@ -199,7 +204,39 @@ fn yes_no(c: &Cmd) -> Option<bool> {
 
 impl<'a> Ops<'a> {
     pub fn new(host: &'a Host, runner: &'a dyn Runner, cfg: &'a TidyCfg) -> Ops<'a> {
-        Ops { host, runner, cfg, win: host_os(host) == "windows", canary_ok: Cell::new(false), rp_cache: RefCell::new(HashMap::new()) }
+        Ops { host, runner, cfg, win: host_os(host) == "windows", canary_ok: Cell::new(false), rp_cache: RefCell::new(HashMap::new()), deadline: Cell::new(None), over: Cell::new(false) }
+    }
+
+    // -- the per-item time budget
+    /// Start one item: its probes share `item_budget_s` from now.
+    pub fn start_item(&self) {
+        self.over.set(false);
+        self.deadline.set((self.cfg.item_budget_s > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64(self.cfg.item_budget_s)));
+    }
+
+    /// End the item; true when a probe of it was cut short or skipped by the budget (its findings are then not trusted).
+    pub fn end_item(&self) -> bool {
+        self.deadline.set(None);
+        self.over.replace(false)
+    }
+
+    /// The time limit a probe gets inside the budget: `Some(t)` (the caller's own, or what is left when that is less), `None` when
+    /// nothing is left (the probe is not run and reads as a timeout).
+    fn budgeted(&self, timeout: Option<f64>) -> Option<Option<f64>> {
+        let Some(d) = self.deadline.get() else { return Some(timeout) };
+        let left = d.saturating_duration_since(Instant::now()).as_secs_f64();
+        if left <= 0.0 {
+            self.over.set(true);
+            return None;
+        }
+        Some(if left < timeout.unwrap_or(60.0) { Some(left) } else { timeout })
+    }
+
+    fn timed(&self, r: RunOut, cut: bool) -> Cmd {
+        if cut && r == RunOut::TimedOut {
+            self.over.set(true);
+        }
+        self.cmd_of(r)
     }
 
     // -- primitives
@@ -249,9 +286,11 @@ impl<'a> Ops<'a> {
                 self.win_ok(a)?;
             }
             let cmd = argv.iter().map(|a| if a.chars().any(|c| c.is_whitespace()) { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ");
-            return Ok(self.cmd_of(self.runner.run_for(&cmd, timeout)?));
+            let Some(t) = self.budgeted(timeout) else { return Ok(Cmd { rc: None, out: String::new() }) };
+            return Ok(self.timed(self.runner.run_for(&cmd, t)?, t != timeout));
         }
-        Ok(self.cmd_of(self.runner.run_argv_to(argv, timeout)?))
+        let Some(t) = self.budgeted(timeout) else { return Ok(Cmd { rc: None, out: String::new() }) };
+        Ok(self.timed(self.runner.run_argv_to(argv, t)?, t != timeout))
     }
 
     /// (rc, out). A command that times out returns rc None instead of failing; callers treat it as a failure.
@@ -263,7 +302,8 @@ impl<'a> Ops<'a> {
         if bulk_rm().is_match(&low) {
             return refuse(format!("refusing a command with a glob in it: {cmd}"));
         }
-        Ok(self.cmd_of(self.runner.run_for(cmd, timeout)?))
+        let Some(t) = self.budgeted(timeout) else { return Ok(Cmd { rc: None, out: String::new() }) };
+        Ok(self.timed(self.runner.run_for(cmd, t)?, t != timeout))
     }
 
     pub fn run0(&self, cmd: &str) -> R<Cmd> {
@@ -648,6 +688,14 @@ impl<'a> Ops<'a> {
         if !self.win {
             return Ok(());
         }
+        // a host-wide proof, not a probe of the item that happens to call it first: never cut by that item's budget
+        let d = self.deadline.take();
+        let r = self.check_canary_now();
+        self.deadline.set(d);
+        r
+    }
+
+    fn check_canary_now(&self) -> R<()> {
         let c = self.cfg;
         let (Some(canary), Some(want)) = (&c.link_canary, c.link_canary_count) else {
             return guard("a Windows host needs link_canary and link_canary_count: without a listing that is known to find links, an empty result means nothing".into());

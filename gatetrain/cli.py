@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -267,13 +268,21 @@ def cmd_lanes(a):
     return lanes.cmd_lanes(a)
 
 
+def _stream_progress(tidy):
+    """Each item is reported on stderr as soon as it is judged (GATETRAIN_PROGRESS=0 turns it off): a long inventory is never silent."""
+    if os.environ.get("GATETRAIN_PROGRESS") != "0":
+        tidy.PROGRESS = lambda line: print(line, file=sys.stderr, flush=True)
+
+
 def cmd_check(a):
     from . import tidy
+    _stream_progress(tidy)
     return tidy.cmd_check(a)
 
 
 def cmd_tidy(a):
     from . import tidy
+    _stream_progress(tidy)
     return tidy.cmd_tidy(a)
 
 

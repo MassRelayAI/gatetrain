@@ -75,12 +75,13 @@ class TidyCfg:
     worktree_min_idle_days: float = 2                       # a worktree with a file changed more recently than this is kept (0 = off)
     idle_walk_depth: float = 12                             # how deep the "newest file inside" walk goes
     link_list_timeout_s: float = 300                        # the link listing (`dir /AL /S /B`, `find -type l`) walks a whole worktree: it gets this long
+    item_budget_s: float = 600                              # every probe of ONE item shares this many seconds; an item that runs out is skipped and reported (0 = none)
 
 
 _LISTS = ("main_volatile_paths", "keep_paths", "keep_lanes", "keep_branches", "target_roots", "image_patterns", "evidence_dirs", "unattended")
 _STRS = ("main_checkout", "root_checkout", "main_branch", "worktree_prefix", "orphan_targets", "trash_dir",
          "container_prefix", "log", "scratch_dir", "link_canary")
-_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s", "worktree_min_idle_days", "idle_walk_depth", "link_list_timeout_s")
+_NUMS = ("min_idle_min", "trash_days", "cache_days", "size_timeout_s", "remove_timeout_s", "worktree_min_idle_days", "idle_walk_depth", "link_list_timeout_s", "item_budget_s")
 
 
 def build_cfg(cfg, host) -> TidyCfg:
@@ -170,6 +171,24 @@ def safe_path(p, under=None):
 
 # ---------------------------------------------------------------- host operations
 
+PROGRESS = None   # where gather reports each item as it finishes (the CLI streams it to stderr); None = quiet
+
+
+def _progress(line):
+    if PROGRESS is not None:
+        PROGRESS(line)
+
+
+def _slow(t0):
+    """` [12s]` when an item took 5 s or more, else nothing (fast items print the same text on every run)."""
+    s = time.monotonic() - t0
+    return f" [{s:.0f}s]" if s >= 5 else ""
+
+
+def over_budget(cfg):
+    return f"skipped: its probes ran past item_budget_s ({cfg.item_budget_s:g}s); left alone, size unknown"
+
+
 def human(n):
     if n is None:
         return "?"
@@ -193,6 +212,28 @@ class Ops:
         self.os = dr.host_os(host)
         self.win = self.os == "windows"
         self._canary_ok = False
+        self._deadline = None     # the end of the current item's time budget (item_budget_s); None outside an item
+        self._over = False        # a probe of the current item was cut short or not run because the budget ran out
+
+    # -- the per-item time budget
+    def start_item(self):
+        self._over = False
+        self._deadline = time.monotonic() + self.cfg.item_budget_s if self.cfg.item_budget_s > 0 else None
+
+    def end_item(self):
+        """End the item; True when a probe of it was cut short or skipped by the budget (its findings are then not trusted)."""
+        over, self._deadline, self._over = self._over, None, False
+        return over
+
+    def _budgeted(self, timeout):
+        """(run it?, timeout): the caller's own limit, or what is left of the item's budget when that is less."""
+        if self._deadline is None:
+            return True, timeout
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            self._over = True
+            return False, timeout
+        return True, (left if left < (60 if timeout is None else timeout) else timeout)
 
     # -- primitives
     def win_unsafe(self, v):
@@ -218,6 +259,10 @@ class Ops:
         """Run a program with an argument list. A local runner uses no shell at all; ssh gets POSIX single-quote escaping."""
         if "system prune" in " ".join(argv).lower():
             raise GuardViolation(f"refusing a bulk command: {argv}")
+        go, t = self._budgeted(timeout)
+        if not go:
+            return TIMEOUT, ""
+        cut, timeout = t != timeout, t
         try:
             if self.win and not getattr(self.runner, "shell_free", False):
                 for a in argv:
@@ -226,6 +271,7 @@ class Ops:
                 return self.runner.run(cmd) if timeout is None else self.runner.run(cmd, timeout=timeout)
             return self.runner.run_argv(argv) if timeout is None else self.runner.run_argv(argv, timeout=timeout)
         except subprocess.TimeoutExpired:
+            self._over = self._over or cut
             return TIMEOUT, ""
 
     def run(self, cmd, timeout=None):
@@ -235,9 +281,14 @@ class Ops:
             raise GuardViolation(f"refusing a bulk command: {cmd}")
         if re.search(r"rm\s+-\w*r\w*f?\s.*[*?]", low):
             raise ItemRefused(f"refusing a command with a glob in it: {cmd}")
+        go, t = self._budgeted(timeout)
+        if not go:
+            return TIMEOUT, ""
+        cut, timeout = t != timeout, t
         try:
             return self.runner.run(cmd) if timeout is None else self.runner.run(cmd, timeout=timeout)
         except subprocess.TimeoutExpired:
+            self._over = self._over or cut
             return TIMEOUT, ""
 
     def age_only(self, p):
@@ -499,6 +550,14 @@ class Ops:
         return [l for l, nl in zip(res, ns) if not any(nl.startswith(o + "/") for o in ns)]      # removing a link removes what hangs below it
 
     def check_canary(self):
+        """A host-wide proof, not a probe of the item that happens to call it first: never cut by that item's budget."""
+        d, self._deadline = self._deadline, None
+        try:
+            return self._check_canary_now()
+        finally:
+            self._deadline = d
+
+    def _check_canary_now(self):
         c = self.cfg
         if not self.win:
             return
@@ -697,10 +756,14 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
     first_n = norm(wts[0]["path"]) if wts else None
     first_r = ops.rp(wts[0]["path"]) if wts else None
     # worktrees
+    # the cheap checks (keep lists, merge proof, git status) decide first; only a worktree that would be removed has its links listed, its
+    # size measured and its idle time walked - those walk the whole tree (node_modules, build targets) and are slow
     for idx, w in enumerate(wts):
+        t0 = time.monotonic()
+        ops.start_item()
         n = norm(w["path"])
         wr = ops.rp(w["path"])
-        info = {"path": w["path"], "branch": w["branch"], "merged": None, "dirty": None, "links": 0, "bytes": None, "keep": None}
+        info = {"path": w["path"], "branch": w["branch"], "merged": None, "dirty": None, "links": None, "bytes": None, "keep": None}
         if n in kept_n or (wr is not None and wr in kept_r):
             info["keep"] = "main/root/keep list"
         elif idx == 0 or n == first_n or (wr is not None and wr == first_r):
@@ -718,14 +781,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
         else:
             info["merged"] = ops.merged(w["branch"]) if w["branch"] != cfg.main_branch else None
             info["dirty"] = ops.dirty(w["path"])
-            try:
-                info["links"] = len(ops.list_links(w["path"]))
-            except ItemRefused as e:                      # a listing that timed out, or a name it cannot be trusted with: this one item is kept
-                info["keep"] = f"cannot list its links ({e})"
-            info["bytes"] = ops.size(w["path"])
-            if info["keep"]:
-                pass
-            elif w["branch"] == cfg.main_branch:
+            if w["branch"] == cfg.main_branch:
                 info["keep"] = "main branch"
             elif w["branch"] in cfg.keep_branches or lane_of(w["path"], cfg).lower() in {x.lower() for x in cfg.keep_lanes}:
                 info["keep"] = "keep list"
@@ -733,12 +789,22 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                 info["keep"] = "uncommitted work" if info["dirty"] else "status unreadable"
             elif info["merged"] is not True:
                 info["keep"] = "not merged" if info["merged"] is False else "merge state unknown"
-            elif cfg.worktree_min_idle_days > 0 and ops.recent(w["path"], cfg.worktree_min_idle_days * 1440) is not False:
-                info["keep"] = "used in the last %g days" % cfg.worktree_min_idle_days
+            else:
+                try:
+                    info["links"] = len(ops.list_links(w["path"]))
+                except ItemRefused as e:                  # a listing that timed out, or a name it cannot be trusted with: this one item is kept
+                    info["keep"] = f"cannot list its links ({e})"
+                info["bytes"] = ops.size(w["path"])
+                if not info["keep"] and cfg.worktree_min_idle_days > 0 and ops.recent(w["path"], cfg.worktree_min_idle_days * 1440) is not False:
+                    info["keep"] = "used in the last %g days" % cfg.worktree_min_idle_days
+        if ops.end_item():
+            info["keep"], info["bytes"] = over_budget(cfg), None
+        _progress(f"tidy: worktree {idx + 1}/{len(wts)} {w['path']}: {info['keep'] or 'tidy'}"
+                  + (f" ({human(info['bytes'])})" if info["bytes"] is not None else "") + _slow(t0))
         inv.worktrees.append(info)
         if not info["keep"]:
             inv.items.append(Item("worktrees", "remove-worktree", w["path"], info["bytes"], f"branch {w['branch']} is on {cfg.main_branch}",
-                                  extra={"branch": w["branch"], "links": info["links"]}))
+                                  extra={"branch": w["branch"], "links": info["links"] or 0}))
     # targets
     held = ops.hold_named()
     def held_by(path, lane):
@@ -756,7 +822,7 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                 continue
             entries.append((ops.join(root, nm), nm, None))
     seen = set()
-    for path, lane, budget in entries:
+    for ti, (path, lane, budget) in enumerate(entries):
         if norm(path) in seen:
             continue
         e = ops.exists(path)
@@ -766,6 +832,8 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
         if not e:
             continue
         seen.add(norm(path))
+        t0 = time.monotonic()
+        ops.start_item()
         lk = ops.is_link(path)
         if lk is not False:
             inv.targets.append({"path": path, "lane": lane, "bytes": None, "idle_min": None, "cargo": False, "tag": None, "merged": None, "branch": None,
@@ -801,13 +869,19 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
             elif ops.recent(path, cfg.min_idle_min) is not False:
                 reason = "a file inside changed in the last %g min (or its activity cannot be read)" % cfg.min_idle_min
             t["keep"] = reason
-            if not reason and (size or size is None):
+            if ops.end_item():
+                t["keep"], t["bytes"] = over_budget(cfg), None
+            elif not reason and (size or size is None):
                 inv.items.append(Item("targets", "clean" if cargo else "move", path, size,
                                       f"lane {lane}: " + ("branch content is on main" if br else "orphan"), extra={"cargo": cargo, "tag": t["tag"], "branch": br}))
+        elif ops.end_item():
+            t["keep"], t["bytes"] = over_budget(cfg), None
         elif t["over"] and norm(path) not in kept_n and not held_by(path, None):
             if cargo or names:
                 inv.items.append(Item("targets", "clean" if cargo else "move", path, size, f"over its {budget:g} GB budget",
                                       attended_only=True, extra={"cargo": cargo, "tag": t["tag"], "branch": None}))
+        _progress(f"tidy: target {ti + 1}/{len(entries)} {path}: {t['keep'] or 'tidy'}" + (f" ({human(t['bytes'])})" if t["bytes"] is not None else "") + _slow(t0))
+    ops.end_item()   # a target that was skipped early leaves no budget running into the host-wide probes below
     # containers
     if cfg.container_prefix:
         rc, out = ops.run('docker ps -a --filter status=exited --format "{{.Names}}"')
@@ -851,13 +925,14 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
     if te:
         seen = ops.read_seen(cfg.trash_dir)
         new_seen = {}
-        for nm in ops.listdir(cfg.trash_dir):
-            if nm == SEEN:
-                continue
+        bin_names = [x for x in ops.listdir(cfg.trash_dir) if x != SEEN]
+        for bi, nm in enumerate(bin_names):
             p = ops.join(cfg.trash_dir, nm)
             if ops.win and ops.win_unsafe(nm):
                 inv.trash.append({"path": p, "bytes": None, "age_days": None, "keep": "unsafe name"})
                 continue
+            t0 = time.monotonic()
+            ops.start_item()
             mt = ops.mtime(p)
             rec = seen.get(nm)
             if rec is None or (rec.get("m") is not None and mt is not None and rec["m"] != mt):
@@ -870,9 +945,13 @@ def gather(host, runner, cfg: TidyCfg, now=None) -> Inventory:
                     age = min(age, max(0.0, (now - time.mktime(time.strptime(st.group(1), "%Y%m%d%H%M%S"))) / 86400))
                 except (ValueError, OverflowError):
                     pass
-            sz = ops.size(p)
-            inv.trash.append({"path": p, "bytes": sz, "age_days": age})
-            if age is not None and age > cfg.trash_days:
+            sz = ops.size(p) if age > cfg.trash_days else None   # only an entry old enough to go is sized; a young one shows "?"
+            cut = ops.end_item()
+            keep = over_budget(cfg) if cut else None
+            _progress(f"tidy: recycle bin {bi + 1}/{len(bin_names)} {p}: {age:.0f}d" + ("" if cut or sz is None else f" ({human(sz)})")
+                      + (f", {keep}" if keep else "") + _slow(t0))
+            inv.trash.append({"path": p, "bytes": None if cut else sz, "age_days": age, **({"keep": keep} if keep else {})})
+            if not keep and age is not None and age > cfg.trash_days:
                 inv.items.append(Item("trash", "remove", p, sz, f"in the recycle bin {age:.0f} days (> {cfg.trash_days:g})"))
         if new_seen != seen:                         # also drops the records of entries that are gone
             try:
@@ -942,7 +1021,7 @@ def format_check(inv: Inventory) -> str:
                                        yn(t["merged"]), yn(t["tag"]), "OVER" if t["over"] else "size unknown" if t["budget_gb"] and t["bytes"] is None else "-", t["keep"] or "tidy")
                                       for t in inv.targets], ("path", "size", "idle", "lane", "merged", "tag", "budget", "plan"))]
     if inv.worktrees:
-        L += ["worktrees", table([(w["path"], w["branch"] or "-", yn(w["merged"]), yn(w["dirty"]), w["links"], w["keep"] or "tidy") for w in inv.worktrees],
+        L += ["worktrees", table([(w["path"], w["branch"] or "-", yn(w["merged"]), yn(w["dirty"]), "-" if w["links"] is None else w["links"], w["keep"] or "tidy") for w in inv.worktrees],
                                  ("path", "branch", "merged", "dirty", "links", "plan"))]
     if inv.containers:
         L += [f"exited containers: {', '.join(inv.containers)}"]

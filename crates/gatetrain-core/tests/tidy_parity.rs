@@ -73,6 +73,7 @@ fn run_python(dir: &Path) -> String {
     let o = Command::new(python())
         .current_dir(repo())
         .env("PYTHONUTF8", "1")
+        .env("GATETRAIN_PROGRESS", "0") // the library side is quiet; progress parity is the CLI-to-CLI test (tidy_real_parity.rs)
         .arg("tests/tidy_parity_driver.py")
         .arg(dir)
         .output()

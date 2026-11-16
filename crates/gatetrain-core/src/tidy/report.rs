@@ -35,10 +35,6 @@ pub fn yn(v: Option<bool>) -> String {
     }
 }
 
-fn s(x: impl ToString) -> String {
-    x.to_string()
-}
-
 pub fn format_check(inv: &Inventory) -> String {
     let mut l: Vec<String> = vec![format!("== {}", inv.host)];
     if !inv.disks.is_empty() {
@@ -97,7 +93,7 @@ pub fn format_check(inv: &Inventory) -> String {
             inv.worktrees
                 .iter()
                 .map(|w| {
-                    vec![w.path.clone(), w.branch.clone().filter(|x| !x.is_empty()).unwrap_or_else(|| "-".into()), yn(w.merged), yn(w.dirty), s(w.links), w.keep.clone().unwrap_or_else(|| "tidy".into())]
+                    vec![w.path.clone(), w.branch.clone().filter(|x| !x.is_empty()).unwrap_or_else(|| "-".into()), yn(w.merged), yn(w.dirty), w.links.map(|l| l.to_string()).unwrap_or_else(|| "-".into()), w.keep.clone().unwrap_or_else(|| "tidy".into())]
                 })
                 .collect(),
             &["path", "branch", "merged", "dirty", "links", "plan"],

@@ -70,6 +70,9 @@ pub struct TidyCfg {
     pub idle_walk_depth: f64,
     /// the link listing walks a whole worktree: it gets this long (seconds)
     pub link_list_timeout_s: f64,
+    /// every probe of ONE item (a worktree, a target, a recycle-bin entry) shares this many seconds; an item that runs out is skipped
+    /// and reported, never sized by guess (0 = no budget)
+    pub item_budget_s: f64,
 }
 
 impl Default for TidyCfg {
@@ -103,12 +106,13 @@ impl Default for TidyCfg {
             worktree_min_idle_days: 2.0,
             idle_walk_depth: 12.0,
             link_list_timeout_s: 300.0,
+            item_budget_s: 600.0,
         }
     }
 }
 
-const KNOWN: [&str; 28] = [
-    "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_patterns", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
+const KNOWN: [&str; 29] = [
+    "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_patterns", "item_budget_s", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
     "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "remove_timeout_s", "root_checkout", "scratch_dir",
     "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_min_idle_days", "worktree_prefix",
 ];
@@ -183,6 +187,7 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             "worktree_min_idle_days" => t.worktree_min_idle_days = number(k, v)?,
             "idle_walk_depth" => t.idle_walk_depth = number(k, v)?,
             "link_list_timeout_s" => t.link_list_timeout_s = number(k, v)?,
+            "item_budget_s" => t.item_budget_s = number(k, v)?,
             "link_canary_count" => match v {
                 Value::Integer(i) => t.link_canary_count = Some(*i),
                 other => return err(format!("tidy.link_canary_count: must be an integer, got {}", repr(other))),
