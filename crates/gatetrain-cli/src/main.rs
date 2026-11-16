@@ -87,7 +87,7 @@ enum Cmd {
     Check(tidycmd::CheckArgs),
     /// Clean the leftovers `check` finds (dry run unless --apply or --auto)
     Tidy(tidycmd::TidyArgs),
-    /// Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, blocked, next assignments
+    /// Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, stackable, blocked, next assignments
     Watch {
         /// a TOML file with a [watch] table (repo = "...", lanes_csv, plans_index, ...); it may be hosts.toml
         #[arg(long, default_value = "hosts.toml")]

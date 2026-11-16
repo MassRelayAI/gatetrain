@@ -131,7 +131,7 @@ fn every_lane_is_judged_and_the_next_steps_follow() {
     let f = fixture();
     let (rc, out, err) = watch(&f.conf);
     assert_eq!(rc, 0, "{err}\n{out}");
-    assert!(out.contains("lanes: 5 live (1 ready to stack, 2 blocked, 0 stacked, 1 stale, 0 idle, 1 merged by the ledger only), 2 merged awaiting tidy, 1 ledger row(s) without a branch"), "{out}");
+    assert!(out.contains("lanes: 5 live (1 ready to stack, 0 stackable, 2 blocked, 0 stacked, 1 stale, 0 idle, 1 merged by the ledger only), 2 merged awaiting tidy, 1 ledger row(s) without a branch"), "{out}");
     // the next steps, in order: stack, unblock, tidy, assign
     assert!(out.contains("  1. stack the ready lanes: line/live-ready\n"), "{out}");
     assert!(out.contains("rebase 1 lane(s) that conflict with main: line/clash\n"), "{out}");
@@ -191,4 +191,61 @@ fn a_config_without_a_watch_table_or_with_an_unknown_key_is_an_error() {
     let (rc, _, err) = watch(&c);
     assert_eq!(rc, 1);
     assert!(err.contains("unknown key(s) [\"stale_dayz\"]"), "{err}");
+}
+
+/// A repository whose main edited `gen/census.json` and `src/real.txt`; lane `only-gen` edits only the census, lane `mixed` edits
+/// both, lane `clean` edits neither. Returns the config path with `extra` added to its `[watch]` table.
+fn conflict_fixture(extra: &str) -> (tempfile::TempDir, PathBuf) {
+    let d = tempfile::Builder::new().prefix("gt-stackable-").tempdir().unwrap();
+    let m = d.path().join("main");
+    std::fs::create_dir_all(&m).unwrap();
+    git(&m, &["init", "-q", "-b", "main"], None);
+    commit(&m, "gen/census.json", "{\"n\":0}\n", "base census", Some(NOW - 30 * 86400));
+    commit(&m, "src/real.txt", "one\n", "base real", Some(NOW - 30 * 86400));
+    for (b, files) in [("line/only-gen", vec![("gen/census.json", "{\"n\":1}\n")]), ("line/mixed", vec![("gen/census.json", "{\"n\":2}\n"), ("src/real.txt", "lane\n")]), ("line/clean", vec![("c.txt", "c\n")])] {
+        git(&m, &["checkout", "-q", "-b", b, "main"], None);
+        for (f, t) in files {
+            commit(&m, f, t, "lane", None);
+        }
+    }
+    git(&m, &["checkout", "-q", "main"], None);
+    commit(&m, "gen/census.json", "{\"n\":9}\n", "main census", Some(NOW - 3 * 86400));
+    commit(&m, "src/real.txt", "main\n", "main real", Some(NOW - 3 * 86400));
+    let conf = d.path().join("watch.toml");
+    write(&conf, &format!("[watch]\nrepo = {:?}\n{extra}\n", m.to_string_lossy().replace('\\', "/")));
+    (d, conf)
+}
+
+#[test]
+fn a_lane_that_conflicts_only_in_generated_files_is_stackable() {
+    let (_d, conf) = conflict_fixture("regenerable = [\"gen/*.json\"]");
+    let (rc, out, err) = watch(&conf);
+    assert_eq!(rc, 0, "{err}\n{out}");
+    assert!(out.contains("3 live (0 ready to stack, 1 stackable, 1 blocked,"), "{out}");
+    let r = row(&out, "line/only-gen");
+    assert!(r.contains(" stackable ") && r.contains("conflicts only in generated files (1): the stacker rebuilds them"), "{r}");
+    assert!(out.contains("ready for the stacker (conflicts only in generated files, which it rebuilds) 1 lane(s): line/only-gen\n"), "{out}");
+    assert!(!out.contains("rebase 1 lane(s) that conflict with main: line/only-gen"), "{out}");
+}
+
+#[test]
+fn a_mixed_conflict_stays_blocked_and_names_the_real_path() {
+    let (_d, conf) = conflict_fixture("regenerable = [\"gen/*.json\"]");
+    let (_, out, _) = watch(&conf);
+    let r = row(&out, "line/mixed");
+    assert!(r.contains(" blocked ") && r.contains("conflicts with main in src/real.txt: rebase it"), "{r}");
+    assert!(!r.contains("census"), "the generated path is not named: {r}");
+    assert!(out.contains("rebase 1 lane(s) that conflict with main: line/mixed\n"), "{out}");
+}
+
+#[test]
+fn an_empty_config_keeps_every_conflict_blocked() {
+    let (_d, conf) = conflict_fixture("");
+    let (_, out, _) = watch(&conf);
+    assert!(out.contains("3 live (0 ready to stack, 0 stackable, 2 blocked,"), "{out}");
+    for b in ["line/only-gen", "line/mixed"] {
+        let r = row(&out, b);
+        assert!(r.contains(" blocked ") && r.contains("conflicts with main: rebase it"), "{r}");
+    }
+    assert!(out.contains("rebase 2 lane(s) that conflict with main: "), "{out}");
 }

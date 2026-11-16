@@ -37,6 +37,9 @@ pub struct WatchCfg {
     pub merged_plan_status: Vec<String>,
     pub max_suggestions: usize,
     pub git_timeout_s: f64,
+    /// paths the stacker rebuilds (globs: `*` matches any run of characters, `/` included; `?` one character). A lane whose
+    /// merge into main conflicts only in such paths is "stackable", not "blocked".
+    pub regenerable: Vec<String>,
 }
 
 impl Default for WatchCfg {
@@ -56,13 +59,14 @@ impl Default for WatchCfg {
             merged_plan_status: vec!["merged".into()],
             max_suggestions: 8,
             git_timeout_s: 60.0,
+            regenerable: vec![],
         }
     }
 }
 
-const KEYS: [&str; 14] = [
+const KEYS: [&str; 15] = [
     "blocked_status", "done_status", "git_timeout_s", "idle_hours", "lane_prefix", "lanes_csv", "main_branch", "max_suggestions", "merged_plan_status", "plans_index",
-    "ready_status", "repo", "stale_days", "suggest_status",
+    "ready_status", "regenerable", "repo", "stale_days", "suggest_status",
 ];
 
 /// The `[watch]` table of a TOML file (other tables are ignored, so it can live in hosts.toml). Unknown keys are an error.
@@ -117,6 +121,11 @@ pub fn load_cfg(path: &Path) -> Result<WatchCfg, String> {
     c.done_status = l("done_status", &c.done_status)?;
     c.suggest_status = l("suggest_status", &c.suggest_status)?;
     c.merged_plan_status = l("merged_plan_status", &c.merged_plan_status)?;
+    c.regenerable = match w.get("regenerable") {
+        None => vec![],
+        Some(toml::Value::Array(a)) => a.iter().map(|x| x.as_str().map(str::to_string).ok_or("watch.regenerable: must be a list of strings".to_string())).collect::<Result<_, _>>()?,
+        Some(_) => return Err("watch.regenerable: must be a list of strings".into()),
+    };
     for b in [&c.main_branch, &c.lane_prefix] {
         if b.starts_with('-') || b.chars().any(|ch| ch.is_whitespace() || ch.is_control() || "~^:?*[\\".contains(ch)) {
             return Err(format!("watch: {b:?} is not a plain branch name"));
@@ -236,6 +245,8 @@ pub struct Lane {
     pub merged: Option<Merged>,
     /// merging into main would conflict (None = not probed or unknown)
     pub conflicts: Option<bool>,
+    /// the paths that conflict (empty when none, or not probed)
+    pub conflict_paths: Vec<String>,
     pub ahead: Option<usize>,
     pub ledger: Option<String>,
     pub batch: Option<String>,
@@ -325,6 +336,7 @@ fn gather_with(cfg: &WatchCfg, git: &Git, now: i64) -> Result<Report, String> {
             dirty: None,
             merged: None,
             conflicts: None,
+            conflict_paths: vec![],
             ahead: None,
             ledger: r.and_then(|r| r.get("status")).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
             batch: r.and_then(|r| r.get("batch")).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
@@ -377,7 +389,10 @@ fn gather_with(cfg: &WatchCfg, git: &Git, now: i64) -> Result<Report, String> {
                 // conflicts: the three-way merge-tree prints the merge (conflict markers included) and stores nothing
                 if lane.merged.is_none() {
                     match git.run(&["merge-tree", &base, &main_ref, &br]) {
-                        Ok((0, out)) => lane.conflicts = Some(out.lines().any(|l| l.starts_with("+<<<<<<< "))),
+                        Ok((0, out)) => {
+                            lane.conflict_paths = conflict_paths(&out);
+                            lane.conflicts = Some(out.lines().any(|l| l.starts_with("+<<<<<<< ")));
+                        }
                         Ok((rc, _)) => rep.notes.push(format!("{}: merge-tree failed (rc {rc})", lane.branch)),
                         Err(e) => rep.notes.push(format!("{}: {e}", lane.branch)),
                     }
@@ -461,7 +476,60 @@ pub fn age(s: Option<i64>) -> String {
     }
 }
 
-/// What one live lane needs: ("unproven" | "blocked" | "ready" | "stale" | "idle" | "active" | "stacked", why).
+/// The paths that conflict in the output of the three-way `git merge-tree <base> <main> <lane>`: a section ("changed in both",
+/// "added in both", ...) names its path on its `  our`/`  their`/`  base` lines and conflicts when a hunk holds `+<<<<<<< `.
+pub fn conflict_paths(out: &str) -> Vec<String> {
+    let mut paths: Vec<String> = vec![];
+    let (mut cur, mut hit): (Option<String>, bool) = (None, false);
+    let mut flush = |cur: &mut Option<String>, hit: &mut bool| {
+        if let (Some(p), true) = (cur.take(), *hit) {
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+        *hit = false;
+    };
+    for l in out.lines() {
+        if !l.starts_with([' ', '@', '+', '-']) {
+            flush(&mut cur, &mut hit);
+        } else if cur.is_none() && (l.starts_with("  our ") || l.starts_with("  their ") || l.starts_with("  base ")) {
+            // `  our    100644 <sha> <path>`
+            cur = l.split_whitespace().nth(3).map(str::to_string);
+        } else if l.starts_with("+<<<<<<< ") {
+            hit = true;
+        }
+    }
+    flush(&mut cur, &mut hit);
+    paths
+}
+
+/// `*` matches any run of characters (`/` included, as in a shell `case`), `?` one character; everything else is literal.
+pub fn glob_match(pat: &str, s: &str) -> bool {
+    let (p, s): (Vec<char>, Vec<char>) = (pat.chars().collect(), s.chars().collect());
+    let (mut pi, mut si, mut star, mut mark) = (0, 0, None, 0);
+    while si < s.len() {
+        if pi < p.len() && p[pi] != '*' && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = si;
+            pi += 1;
+        } else if let Some(st) = star {
+            pi = st + 1;
+            mark += 1;
+            si = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// What one live lane needs:("unproven" | "blocked" | "ready" | "stale" | "idle" | "active" | "stacked", why).
 pub fn judge(l: &Lane, cfg: &WatchCfg) -> (&'static str, String) {
     let st = l.ledger.clone().unwrap_or_default().to_lowercase();
     // the ledger or the plan index calls it merged, git cannot show it: rebased, squashed with changes, or resolved inside a batch
@@ -472,6 +540,17 @@ pub fn judge(l: &Lane, cfg: &WatchCfg) -> (&'static str, String) {
         return ("unproven", format!("plan {id} is {ps}; git cannot prove it: check by hand, then drop the branch"));
     }
     if l.conflicts == Some(true) {
+        if !cfg.regenerable.is_empty() {
+            let (gen, real): (Vec<&String>, Vec<&String>) = l.conflict_paths.iter().partition(|p| cfg.regenerable.iter().any(|g| glob_match(g, p)));
+            if real.is_empty() && !gen.is_empty() {
+                return ("stackable", format!("conflicts only in generated files ({}): the stacker rebuilds them", gen.len()));
+            }
+            if !real.is_empty() {
+                let shown: Vec<&str> = real.iter().take(3).map(|s| s.as_str()).collect();
+                let more = if real.len() > 3 { format!(" (+{} more)", real.len() - 3) } else { String::new() };
+                return ("blocked", format!("conflicts with main in {}{}: rebase it", shown.join(", "), more));
+            }
+        }
         return ("blocked", "conflicts with main: rebase it".into());
     }
     if cfg.blocked_status.contains(&st) {
@@ -523,7 +602,7 @@ pub fn format(rep: &Report, cfg: &WatchCfg) -> String {
         (*l, k, w)
     }).collect();
     let of = |k: &str| judged.iter().filter(|j| j.1 == k).collect::<Vec<_>>();
-    let (ready, blocked, stale, idle, stacked, unproven) = (of("ready"), of("blocked"), of("stale"), of("idle"), of("stacked"), of("unproven"));
+    let (ready, stackable, blocked, stale, idle, stacked, unproven) = (of("ready"), of("stackable"), of("blocked"), of("stale"), of("idle"), of("stacked"), of("unproven"));
     let list = |v: &[&str], n: usize| -> String {
         let mut s = v.iter().take(n).copied().collect::<Vec<_>>().join(" ");
         if v.len() > n {
@@ -535,9 +614,10 @@ pub fn format(rep: &Report, cfg: &WatchCfg) -> String {
     let mut o: Vec<String> = vec![];
     o.push(format!("== watch {} ({} at {})", rep.repo, rep.main, rep.main_sha.chars().take(10).collect::<String>()));
     o.push(format!(
-        "lanes: {} live ({} ready to stack, {} blocked, {} stacked, {} stale, {} idle, {} merged by the ledger only), {} merged awaiting tidy, {} ledger row(s) without a branch",
+        "lanes: {} live ({} ready to stack, {} stackable, {} blocked, {} stacked, {} stale, {} idle, {} merged by the ledger only), {} merged awaiting tidy, {} ledger row(s) without a branch",
         live.len(),
         ready.len(),
+        stackable.len(),
         blocked.len(),
         stacked.len(),
         stale.len(),
@@ -550,6 +630,9 @@ pub fn format(rep: &Report, cfg: &WatchCfg) -> String {
     let mut next: Vec<String> = vec![];
     if !ready.is_empty() {
         next.push(format!("stack the ready lanes: {}", ready.iter().map(|j| j.0.branch.as_str()).collect::<Vec<_>>().join(" ")));
+    }
+    if !stackable.is_empty() {
+        next.push(format!("ready for the stacker (conflicts only in generated files, which it rebuilds) {} lane(s): {}", stackable.len(), list(&branches(&stackable), 6)));
     }
     let (clash, other): (Vec<&(&Lane, &'static str, String)>, Vec<_>) = blocked.iter().copied().partition(|j| j.0.conflicts == Some(true));
     for j in &other {
@@ -641,4 +724,25 @@ pub fn format(rep: &Report, cfg: &WatchCfg) -> String {
     }
     o.extend(rep.notes.iter().map(|n| format!("note: {n}")));
     o.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn globs_match_like_a_shell_case() {
+        assert!(glob_match("tools/db/statement-census.json", "tools/db/statement-census.json"));
+        assert!(glob_match("*.xlsx", "docs/a/b.xlsx"));
+        assert!(glob_match("apps/web/src/i18n/locales/*.json", "apps/web/src/i18n/locales/en.json"));
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("tools/db/*.json", "tools/db/x.txt"));
+        assert!(!glob_match("a", "ab"));
+    }
+
+    #[test]
+    fn conflict_paths_reads_the_sections_that_hold_a_marker() {
+        let out = "changed in both\n  base   100644 aaa gen/a.json\n  our    100644 bbb gen/a.json\n  their  100644 ccc gen/a.json\n@@ -1 +1,5 @@\n+<<<<<<< .our\n+x\n@@ -3 +3 @@\n+<<<<<<< .our\nadded in remote\n  their  100644 ddd b.txt\n@@ -0,0 +1 @@\n+fine\nchanged in both\n  base   100644 aaa src/c.rs\n  our    100644 bbb src/c.rs\n  their  100644 ccc src/c.rs\n@@ -1 +1,2 @@\n+<<<<<<< .our\n";
+        assert_eq!(conflict_paths(out), vec!["gen/a.json".to_string(), "src/c.rs".to_string()]);
+    }
 }
