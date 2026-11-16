@@ -23,6 +23,7 @@ pub mod stackcheck;
 pub mod stats;
 pub mod tidy;
 pub mod trace;
+pub mod watch;
 
 /// Errors of the core. A caller matches on the variant, not on a string.
 #[derive(Debug, thiserror::Error)]

@@ -1,4 +1,4 @@
-//! The `gatetrain` binary. Ported here: `parse --json`, `log verify`, `ledger migrate`, `diagnose`, `hold`, `running`, `memory`, `batch`, `report`, `trace`, `eta`, `config dump`, `doctor`, `lanes`, `generated`, `tidy` (dry run, `--apply` and `--auto`) and `check`, hardened as Python at c46717c (spec tests/test_tidy_harden.py).
+//! The `gatetrain` binary. Ported here: `parse --json`, `log verify`, `ledger migrate`, `diagnose`, `hold`, `running`, `memory`, `batch`, `report`, `trace`, `eta`, `config dump`, `doctor`, `lanes`, `generated`, `tidy` (dry run, `--apply` and `--auto`) and `check`, hardened as Python at c46717c (spec tests/test_tidy_harden.py); `watch` is Rust only.
 //! Every other subcommand is forwarded to `python -m gatetrain` with the same arguments and exit code (design 9.3).
 mod cmd_portb;
 use anyhow::{Context, Result};
@@ -87,6 +87,15 @@ enum Cmd {
     Check(tidycmd::CheckArgs),
     /// Clean the leftovers `check` finds (dry run unless --apply or --auto)
     Tidy(tidycmd::TidyArgs),
+    /// Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, blocked, next assignments
+    Watch {
+        /// a TOML file with a [watch] table (repo = "...", lanes_csv, plans_index, ...); it may be hosts.toml
+        #[arg(long, default_value = "hosts.toml")]
+        config: PathBuf,
+        /// the time to judge ages against, epoch seconds (default: now)
+        #[arg(long)]
+        now: Option<i64>,
+    },
     /// Pre-run checks per host
     Doctor {
         #[arg(long, default_value = "hosts.toml")]
@@ -287,7 +296,7 @@ enum LedgerCmd {
     },
 }
 
-const PORTED: [&str; 17] = ["parse", "log", "ledger", "diagnose", "hold", "running", "memory", "batch", "report", "trace", "eta", "config", "doctor", "lanes", "generated", "check", "tidy"];
+const PORTED: [&str; 18] = ["parse", "log", "ledger", "diagnose", "hold", "running", "memory", "batch", "report", "trace", "eta", "config", "doctor", "lanes", "generated", "check", "tidy", "watch"];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -386,6 +395,26 @@ fn run(cli: Cli, raw: &[String]) -> Result<ExitCode> {
         Cmd::Batch { db, config, lock, hosts, host, cmd } => run_batch(&db, &config, lock, hosts.zip(host), cmd),
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
+        Cmd::Watch { config, now } => {
+            let cfg = match gatetrain_core::watch::load_cfg(&config) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("config error: {e}");
+                    return Ok(ExitCode::from(1));
+                }
+            };
+            let now = now.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0));
+            match gatetrain_core::watch::gather(&cfg, now) {
+                Ok(r) => {
+                    println!("{}", gatetrain_core::watch::format(&r, &cfg));
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("gatetrain watch: {e}");
+                    Ok(ExitCode::from(2))
+                }
+            }
+        }
         Cmd::Ledger { cmd: LedgerCmd::Migrate { db } } => {
             let mut l = Ledger::open(&db).with_context(|| format!("opening {}", db.display()))?;
             let (from, to) = l.migrate()?;
