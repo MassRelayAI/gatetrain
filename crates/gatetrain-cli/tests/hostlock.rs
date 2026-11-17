@@ -53,6 +53,7 @@ fn launch_starts_the_real_holder_which_holds_runs_the_chain_and_releases() {
         log: log.clone(),
         workdir: d.path().to_path_buf(),
         env: vec![],
+        role: "proof".into(),
     };
     l.launch(&req).unwrap();
     let t = Instant::now();

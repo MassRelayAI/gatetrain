@@ -6,6 +6,7 @@
 //! fakes for tests. The holder lane (rs2) implements them against the real lock file and `hosts.toml`.
 use crate::batchcfg::BatchConfig;
 use crate::declog::{self, NewEntry};
+use crate::evidence;
 use crate::ledger::Ledger;
 use crate::logfmt::parse_log;
 use crate::{Error, Result};
@@ -33,6 +34,8 @@ pub struct LaunchRequest {
     pub log: PathBuf,
     pub workdir: PathBuf,
     pub env: Vec<(String, String)>,
+    /// `proof` (T4, T6a) or `light` (the launched pre-flight, T3): which host and lock the run belongs on.
+    pub role: String,
 }
 
 /// The host lock and holder as the state machine sees them. rs2 implements this over the real lock file.
@@ -377,7 +380,7 @@ fn protected_checkout(dir: &Path, protected: &str) -> Result<Option<String>> {
 }
 
 /// `YYYY-MM-DDTHH:MM:SS[.fff](Z|+HH:MM|-HH:MM)` as seconds since the epoch.
-fn parse_iso(s: &str) -> Option<i64> {
+pub(crate) fn parse_iso(s: &str) -> Option<i64> {
     let n = |a: usize, b: usize| s.get(a..b)?.parse::<i64>().ok();
     let (y, mo, d, h, mi, se) = (n(0, 4)?, n(5, 7)?, n(8, 10)?, n(11, 13)?, n(14, 16)?, n(17, 19)?);
     let y2 = if mo <= 2 { y - 1 } else { y };
@@ -667,6 +670,10 @@ impl<'a> Engine<'a> {
             return Ok(Outcome::Idle(format!("batch {id} is {}, not red", f.state)));
         }
         self.go(id, &f, "T6a")
+    }
+
+    pub fn restack(&mut self, id: &str) -> Result<Outcome> {
+        Ok(Outcome::Idle(format!("batch {id}: restack not built")))
     }
 
     /// A person records that the cause of the last red run is a `flake` or `infra`, with a reason. It is a decision-log override
@@ -1042,6 +1049,19 @@ impl<'a> Engine<'a> {
         ]
     }
 
+    /// `<state>/evidence/<run>.json`: the results for `sha` that pass every condition of 7.2 but the key (the chain compares keys).
+    fn write_evidence(&self, wd: &Path, sha: &str, run: &str) -> Result<PathBuf> {
+        let dirs: Vec<PathBuf> = self.cfg.evidence_stamp_dirs.iter().map(|d| self.abs(wd, d)).collect();
+        let plan = self.cfg.steps_file.as_deref().and_then(|s| evidence::file_digest(&self.abs(wd, s)));
+        let host = self.cfg.proof_host.clone().unwrap_or_default();
+        let ctx = evidence::Ctx { sha, host: &host, host_class: self.cfg.proof_host_class.as_deref(), plan_digest: plan.as_deref(), now: parse_iso(&(self.now)()), cfg: self.cfg, state_dir: &self.state_dir };
+        let rows = evidence::select_for_launch(&evidence::load_results(&dirs), &ctx, &parse_iso);
+        let file = self.state_dir.join("evidence").join(format!("{run}.json"));
+        std::fs::create_dir_all(file.parent().unwrap())?;
+        std::fs::write(&file, serde_json::to_string_pretty(&evidence::evidence_file(sha, &rows))?)?;
+        Ok(file)
+    }
+
     fn effect(&mut self, id: &str, f: &Folded, plan: &Plan) -> Result<std::result::Result<Done, String>> {
         let wd = PathBuf::from(f.need("workdir")?);
         match plan.tr.as_str() {
@@ -1157,16 +1177,15 @@ impl<'a> Engine<'a> {
                 let log = PathBuf::from(plan.detail["log"].as_str().unwrap_or_default());
                 std::fs::create_dir_all(log.parent().unwrap())?;
                 let sha = plan.input_sha.clone().unwrap_or_default();
-                let req = LaunchRequest {
-                    run_id: run.clone(),
-                    batch: id.into(),
-                    sha: sha.clone(),
-                    base: f.s("base_sha").unwrap_or_default(),
-                    command: self.cfg.chain_command.clone(),
-                    log: log.clone(),
-                    workdir: wd,
-                    env: self.env(id, f, &sha, &run, &log.to_string_lossy()),
-                };
+                let mut env = self.env(id, f, &sha, &run, &log.to_string_lossy());
+                let mut command = self.cfg.chain_command.clone();
+                // the evidence the chain may use (engine-v2 7.3): written by the engine from its own stamps, offered, never trusted at T5
+                if !self.cfg.evidence_stamp_dirs.is_empty() || command.iter().any(|a| a.contains("{evidence}")) {
+                    let file = self.write_evidence(&wd, &sha, &run)?;
+                    command = command.iter().map(|a| a.replace("{evidence}", &file.to_string_lossy())).collect();
+                    env.push(("GATETRAIN_EVIDENCE".into(), file.to_string_lossy().into_owned()));
+                }
+                let req = LaunchRequest { run_id: run.clone(), batch: id.into(), sha: sha.clone(), base: f.s("base_sha").unwrap_or_default(), command, log: log.clone(), workdir: wd, env, role: "proof".into() };
                 self.lock.launch(&req)?;
                 Ok(Ok(Done { output: None, extra: json!({}) }))
             }
@@ -1266,6 +1285,65 @@ impl<'a> Engine<'a> {
         Ok(Outcome::Advanced { from, to: to.into(), note })
     }
 
+    /// The one evidence rule (engine-v2 7.2) for the cached steps of a proof log. `Err(because)` = refuse with `proof.cached-unverified`;
+    /// `Ok(rows)` = every cached step is accepted, with the evidence rows to record in the proof.
+    ///
+    /// A line `STEP_CACHED <step> <key> from <run>` is judged by [`evidence::verify`] against the engine's own stamps; the proof host is
+    /// never trusted to vouch for itself. A bare `STEP_CACHED <step>` carries no key (no `inputs`, condition 7): it counts only when the
+    /// repository's own `[chain] cache_verify_command` vouches for it, as before.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_cached(&self, id: &str, f: &Folded, text: &str, p: &crate::logfmt::ParsedLog, cached: &[&str], tested: &str, run: &str, log: &Path) -> Result<std::result::Result<Vec<Value>, String>> {
+        let refuse = |why: &str, b: String| Ok(Err(format!("{b} (why: {why})")));
+        if self.cfg.allow_cached_steps == "never" {
+            return refuse("policy-never", format!("step(s) {} came from a step cache and [merge] allow_cached_steps is never", cached.join(", ")));
+        }
+        let wd = PathBuf::from(f.need("workdir")?);
+        let lines = evidence::cached_lines(text);
+        let keyed = |s: &str| lines.iter().find(|l| l.0 == s).and_then(|l| l.1.clone());
+        let dirs: Vec<PathBuf> = self.cfg.evidence_stamp_dirs.iter().map(|d| self.abs(&wd, d)).collect();
+        let results = evidence::load_results(&dirs);
+        let plan = self.cfg.steps_file.as_deref().and_then(|s| evidence::file_digest(&self.abs(&wd, s)));
+        let host = p.host.clone().or_else(|| self.cfg.proof_host.clone()).unwrap_or_default();
+        let ctx = evidence::Ctx { sha: tested, host: &host, host_class: self.cfg.proof_host_class.as_deref(), plan_digest: plan.as_deref(), now: parse_iso(&(self.now)()), cfg: self.cfg, state_dir: &self.state_dir };
+        let mut ok = vec![];
+        let mut keyless: Vec<&str> = vec![];
+        for s in cached {
+            match keyed(s) {
+                Some(key) => match evidence::verify(s, &key, &results, &ctx, &parse_iso) {
+                    evidence::Verdict::Accepted(a) => ok.push(json!({"step": s, "source_run": a.source_run, "input_key": a.input_key, "source_host": a.source_host, "stamp_digest": a.stamp_digest, "verified_by": a.verified_by})),
+                    evidence::Verdict::Refused { why, detail } => return refuse(why, format!("cached step {s} is not accepted for {}: {detail}", short(tested))),
+                },
+                None => keyless.push(s),
+            }
+        }
+        if !keyless.is_empty() {
+            // a cached step counts only when its entry is verified for this sha on this host (another host's cache is not this host's)
+            if self.cfg.cache_verify_command.is_empty() {
+                return refuse("evidence-undeclared", format!("step(s) {} came from a step cache and no [chain] cache_verify_command proves the entries for {}", keyless.join(", "), short(tested)));
+            }
+            for s in keyless {
+                let mut env = self.env(id, f, tested, run, &log.to_string_lossy());
+                env.push(("GATETRAIN_STEP".into(), s.to_string()));
+                let (rc, _) = run_plugin(&substitute(&self.cfg.cache_verify_command, tested), &wd, &env)?;
+                if rc != 0 {
+                    return refuse("evidence-missing", format!("cached step {s} is not verified for {} (the verify command exited {rc})", short(tested)));
+                }
+                ok.push(json!({"step": s, "verified_by": "command"}));
+            }
+        }
+        Ok(Ok(ok))
+    }
+
+    /// A configured path: absolute as it is, else relative to the batch checkout.
+    fn abs(&self, wd: &Path, p: &str) -> PathBuf {
+        let p = Path::new(p);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            wd.join(p)
+        }
+    }
+
     /// T5: a pure read of the chain log and the lock.
     fn observe(&mut self, id: &str, f: &Folded) -> Result<Outcome> {
         let run = f.need("run_id")?;
@@ -1281,6 +1359,7 @@ impl<'a> Engine<'a> {
             let note = format!("run {run} stopped without GATES_DONE");
             return self.plain(id, f, "T5s", "preflighted", Some(tested), Some(run.clone()), json!({"stopped_run": run}), "recorded", note);
         }
+        evidence::record_shadow(&self.state_dir, &run, &text)?;
         if p.mode.as_deref() != Some("full") {
             return self.refuse(id, "floor.full-mode", format!("the run's mode is {:?}, only a full run is a proof", p.mode.unwrap_or_default()));
         }
@@ -1307,22 +1386,14 @@ impl<'a> Engine<'a> {
             return self.refuse(id, "chain.tree-differs", format!("after the chain the tree holds changes outside the generated directories ({}), so the tested tree is not the settled tip {}", shown.join(", "), short(&tested)));
         }
         let cached: Vec<&str> = p.steps.iter().filter(|s| s.cached).map(|s| s.name.as_str()).collect();
+        let mut accepted: Vec<Value> = vec![];
         if !cached.is_empty() {
-            // a cached step counts only when its entry is verified for this sha on this host (another host's cache is not this host's)
-            if self.cfg.cache_verify_command.is_empty() {
-                return self.refuse(id, "proof.cached-unverified", format!("step(s) {} came from a step cache and no [chain] cache_verify_command proves the entries for {}", cached.join(", "), short(&tested)));
-            }
-            let wd = PathBuf::from(f.need("workdir")?);
-            for s in &cached {
-                let mut env = self.env(id, f, &tested, &run, &log.to_string_lossy());
-                env.push(("GATETRAIN_STEP".into(), s.to_string()));
-                let (rc, _) = run_plugin(&substitute(&self.cfg.cache_verify_command, &tested), &wd, &env)?;
-                if rc != 0 {
-                    return self.refuse(id, "proof.cached-unverified", format!("cached step {s} is not verified for {} (the verify command exited {rc})", short(&tested)));
-                }
+            match self.verify_cached(id, f, &text, &p, &cached, &tested, &run, &log)? {
+                Err(because) => return self.refuse(id, "proof.cached-unverified", because),
+                Ok(ok) => accepted = ok,
             }
         }
-        let detail = json!({"proof": {"run_ids": [run.clone()], "tested_sha": tested.clone(), "cached_steps": cached, "steps": p.steps.len(), "generated_delta": generated}});
+        let detail = json!({"proof": {"run_ids": [run.clone()], "tested_sha": tested.clone(), "cached_steps": cached, "evidence": accepted, "steps": p.steps.len(), "generated_delta": generated}});
         self.plain(id, f, "T5", "proven", Some(tested), Some(run), detail, "allowed", "GATES_DONE, full mode, zero red, log commit equals the tested sha".into())
     }
 

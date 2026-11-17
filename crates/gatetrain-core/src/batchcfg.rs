@@ -59,6 +59,32 @@ pub struct BatchConfig {
     pub lane_stamp_dir: Option<String>,
     /// `[chain] max_full_runs_per_batch` (default: unlimited): the most full proof runs one batch may start (`budget.full-runs`).
     pub max_full_runs_per_batch: Option<usize>,
+    /// `[merge] allow_cached_steps` (`verified` default | `never`): `never` refuses every proof that holds a cached step (`policy-never`).
+    pub allow_cached_steps: String,
+    /// `[proof] accept_roles` (default `["proof"]`): host roles whose portable results may count for a proof on another host.
+    pub accept_roles: Vec<String>,
+    /// `[proof.host_roles]`: host name to role, so a result's host can be judged by its role.
+    pub host_roles: BTreeMap<String, String>,
+    /// `[proof] max_age_hours`: a result older than this is refused (`evidence-stale`); unset = no limit.
+    pub max_age_hours: Option<f64>,
+    /// `[proof] shadow_min` (default 3): would-hits with no defect a key must show before its results count for a proof.
+    pub shadow_min: usize,
+    /// `[proof] host` and `host_class`: the proof host's name and class, for selecting evidence at launch (T5 re-verifies from the log).
+    pub proof_host: Option<String>,
+    pub proof_host_class: Option<String>,
+    /// `[chain] steps_file`: the chain's steps file; its sha-256 is the plan digest a source stamp must equal (`evidence-stamp`).
+    pub steps_file: Option<String>,
+    /// `[evidence] stamp_dirs`: folders of `stamp-*.json` the engine reads step results from (the stamp is the fact, design 7.2).
+    pub evidence_stamp_dirs: Vec<String>,
+    /// `[preflight] chain_command`: launches the pre-flight as a run under the holder on a light host (state `preflighting`, E5).
+    /// `{sha}`, `{run}`, `{log}` are substituted. Without it `[preflight] command` runs and blocks as before.
+    pub preflight_chain_command: Vec<String>,
+    /// `[preflight] steps_file` / `stamp_dir`: the pre-flight's steps file (its digest must be the stamp's) and where its stamp is written.
+    pub preflight_steps_file: Option<String>,
+    pub preflight_stamp_dir: Option<String>,
+    /// `[pipeline] max_ahead` (default 1): unmerged batches a new batch may be stacked on. `prove_ahead` (default false): prove before the base is proven.
+    pub max_ahead: usize,
+    pub prove_ahead: bool,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -84,6 +110,20 @@ impl Default for BatchConfig {
             require_lane_stamp: false,
             lane_stamp_dir: None,
             max_full_runs_per_batch: None,
+            allow_cached_steps: "verified".into(),
+            accept_roles: vec!["proof".into()],
+            host_roles: BTreeMap::new(),
+            max_age_hours: None,
+            shadow_min: 3,
+            proof_host: None,
+            proof_host_class: None,
+            steps_file: None,
+            evidence_stamp_dirs: vec![],
+            preflight_chain_command: vec![],
+            preflight_steps_file: None,
+            preflight_stamp_dir: None,
+            max_ahead: 1,
+            prove_ahead: false,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -137,6 +177,47 @@ impl BatchConfig {
             if c.require_lane_stamp && c.lane_stamp_dir.is_none() {
                 return Err(Error::Batch("gatetrain.toml: [lanes] require_stamp = true needs a stamp_dir".into()));
             }
+        }
+        let strv = |t: Option<&toml::Value>, k: &str| t.and_then(|t| t.get(k)).and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(String::from);
+        if let Some(m) = v.get("merge") {
+            if let Some(a) = m.get("allow_cached_steps").and_then(|a| a.as_str()) {
+                if !matches!(a, "never" | "verified") {
+                    return Err(Error::Batch(format!("gatetrain.toml: [merge] allow_cached_steps is `never` or `verified`, not `{a}`")));
+                }
+                c.allow_cached_steps = a.to_string();
+            }
+        }
+        if let Some(p) = v.get("proof") {
+            if p.get("accept_roles").is_some() {
+                c.accept_roles = argv(p.get("accept_roles"));
+            }
+            for (h, r) in p.get("host_roles").and_then(|t| t.as_table()).into_iter().flatten() {
+                if let Some(r) = r.as_str() {
+                    c.host_roles.insert(h.clone(), r.to_string());
+                }
+            }
+            c.max_age_hours = p.get("max_age_hours").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64)));
+            if let Some(n) = p.get("shadow_min").and_then(|n| n.as_integer()) {
+                c.shadow_min = n.max(0) as usize;
+            }
+            c.proof_host = strv(Some(p), "host");
+            c.proof_host_class = strv(Some(p), "host_class");
+        }
+        c.steps_file = strv(v.get("chain"), "steps_file");
+        c.evidence_stamp_dirs = argv(v.get("evidence").and_then(|e| e.get("stamp_dirs")));
+        if let Some(p) = v.get("preflight") {
+            c.preflight_chain_command = argv(p.get("chain_command"));
+            c.preflight_steps_file = strv(Some(p), "steps_file");
+            c.preflight_stamp_dir = strv(Some(p), "stamp_dir");
+            if !c.preflight_chain_command.is_empty() && c.preflight_stamp_dir.is_none() {
+                return Err(Error::Batch("gatetrain.toml: [preflight] chain_command needs a stamp_dir (where the chain writes its stamp)".into()));
+            }
+        }
+        if let Some(p) = v.get("pipeline") {
+            if let Some(n) = p.get("max_ahead").and_then(|n| n.as_integer()) {
+                c.max_ahead = n.max(0) as usize;
+            }
+            c.prove_ahead = p.get("prove_ahead").and_then(|b| b.as_bool()).unwrap_or(false);
         }
         if let Some(p) = v.get("postmerge") {
             c.postmerge_command = argv(p.get("command"));

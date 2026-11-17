@@ -1069,3 +1069,357 @@ fn a_green_retry_proves_and_merges_like_any_proof() {
     fx.step("b1", "proven");
     fx.step("b1", "merged");
 }
+
+// ============================================================ E3: one evidence rule (engine-v2 section 7)
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+const KEYED: &str = "STEP_START a 2026-11-11T09:00:00Z\nSTEP_CACHED a K1 from pre-1\nSTEP_TIME a 0s\nSTEP_EXIT a 0\nGATES_DONE\n";
+
+impl Fx {
+    fn root(&self) -> PathBuf {
+        self.state.parent().unwrap().to_path_buf()
+    }
+
+    /// Stamp folder, steps file and proof host of the evidence rule; three would-hits of key K1 already seen in shadow.
+    fn evidence(&mut self) {
+        let stamps = self.root().join("stamps");
+        std::fs::create_dir_all(&stamps).unwrap();
+        let steps = self.root().join("steps.toml");
+        std::fs::write(&steps, "[[step]]\nname = \"a\"\n").unwrap();
+        self.cfg.steps_file = Some(fwd(&steps));
+        self.cfg.evidence_stamp_dirs = vec![fwd(&stamps)];
+        self.cfg.proof_host = Some("h".into());
+        self.seed_shadow("K1", 3);
+    }
+
+    fn seed_shadow(&self, key: &str, n: usize) {
+        for i in 0..n {
+            let run = format!("shadow-{key}-{i}");
+            let line = format!("STEP_CACHE_SHADOW a would-hit {key} rc=0\n");
+            assert_eq!(gatetrain_core::evidence::record_shadow(&self.state, &run, &line).unwrap(), 1);
+        }
+    }
+
+    fn plan_digest(&self) -> String {
+        sha256_hex(&std::fs::read(self.cfg.steps_file.as_ref().unwrap()).unwrap())
+    }
+
+    fn good_stamp(&self, sha: &str) -> serde_json::Value {
+        serde_json::json!({"v": 1, "kind": "preflight", "sha": sha, "host": "h", "host_class": "c1", "at": "2026-11-15T09:00:00+00:00",
+            "digest": self.plan_digest(), "run_id": "pre-1", "steps": [{"name": "a", "rc": 0, "key": "K1"}]})
+    }
+
+    fn put_stamp(&self, file: &str, v: &serde_json::Value) {
+        std::fs::write(self.root().join("stamps").join(file), serde_json::to_string(v).unwrap()).unwrap();
+    }
+
+    fn tip_now(&self, id: &str) -> String {
+        g(&self.repo, &["rev-parse", &format!("batch/{id}/s1")])
+    }
+
+    /// proving, with the stamp `stamp` builds (given the tip) written first and the proof log `log` ready.
+    fn proving_with(&mut self, id: &str, stamp: impl Fn(&Fx, &str) -> serde_json::Value, log: &str) {
+        self.evidence();
+        self.open(id);
+        self.step(id, "stacked");
+        self.step(id, "settled");
+        let tip = self.tip_now(id);
+        let v = stamp(self, &tip);
+        self.put_stamp("stamp-pre-1.json", &v);
+        self.step(id, "preflighted");
+        self.step(id, "proving");
+        self.write_log(log);
+    }
+
+    fn why(&mut self, id: &str) -> String {
+        let (rule, because) = self.refused(id);
+        assert_eq!(rule, "proof.cached-unverified", "{because}");
+        assert_eq!(self.state(id), "proving");
+        because
+    }
+}
+
+#[test]
+fn a_cached_step_with_a_matching_stamp_key_sha_host_and_plan_is_accepted_and_the_evidence_is_recorded() {
+    let mut fx = Fx::new("");
+    fx.proving_with("b1", |f, t| f.good_stamp(t), KEYED);
+    fx.step("b1", "proven");
+    let ev = status_fact(&mut fx, "b1", &["proof", "evidence"]);
+    assert_eq!(ev[0]["step"], "a");
+    assert_eq!(ev[0]["source_run"], "pre-1");
+    assert_eq!(ev[0]["input_key"], "K1");
+    assert_eq!(ev[0]["source_host"], "h");
+    assert_eq!(ev[0]["verified_by"], "stamp");
+}
+
+#[test]
+fn evidence_sha_a_result_from_another_commit_is_refused() {
+    let mut fx = Fx::new("");
+    fx.proving_with("b1", |f, _| f.good_stamp(&"0".repeat(40)), KEYED);
+    let why = fx.why("b1");
+    assert!(why.contains("evidence-sha"), "{why}");
+}
+
+#[test]
+fn evidence_key_a_result_with_another_key_is_refused() {
+    let mut fx = Fx::new("");
+    fx.proving_with(
+        "b1",
+        |f, t| {
+            let mut v = f.good_stamp(t);
+            v["steps"][0]["key"] = "K2".into();
+            v
+        },
+        KEYED,
+    );
+    let why = fx.why("b1");
+    assert!(why.contains("evidence-key"), "{why}");
+}
+
+#[test]
+fn evidence_class_another_host_counts_only_for_a_portable_step_of_the_same_class_and_an_accepted_role() {
+    let other = |f: &Fx, t: &str, portable: bool, class: &str| {
+        let mut v = f.good_stamp(t);
+        v["host"] = "ws".into();
+        v["host_class"] = class.into();
+        v["steps"][0]["portable"] = portable.into();
+        v
+    };
+    let setup = |fx: &mut Fx| {
+        fx.cfg.proof_host_class = Some("c1".into());
+        fx.cfg.accept_roles = vec!["proof".into(), "scout".into()];
+        fx.cfg.host_roles.insert("ws".into(), "scout".into());
+    };
+    // not portable
+    let mut fx = Fx::new("");
+    setup(&mut fx);
+    fx.proving_with("b1", |f, t| other(f, t, false, "c1"), KEYED);
+    assert!(fx.why("b1").contains("evidence-class"));
+    // another class
+    let mut fx = Fx::new("");
+    setup(&mut fx);
+    fx.proving_with("b1", |f, t| other(f, t, true, "c2"), KEYED);
+    assert!(fx.why("b1").contains("evidence-class"));
+    // a role the policy does not list
+    let mut fx = Fx::new("");
+    setup(&mut fx);
+    fx.cfg.accept_roles = vec!["proof".into()];
+    fx.proving_with("b1", |f, t| other(f, t, true, "c1"), KEYED);
+    assert!(fx.why("b1").contains("evidence-class"));
+    // portable, same class, listed role: the same fixture without the violation passes
+    let mut fx = Fx::new("");
+    setup(&mut fx);
+    fx.proving_with("b1", |f, t| other(f, t, true, "c1"), KEYED);
+    fx.step("b1", "proven");
+    assert_eq!(status_fact(&mut fx, "b1", &["proof", "evidence"])[0]["source_host"], "ws");
+}
+
+#[test]
+fn evidence_stamp_a_source_run_of_another_steps_file_is_refused() {
+    let mut fx = Fx::new("");
+    fx.proving_with(
+        "b1",
+        |f, t| {
+            let mut v = f.good_stamp(t);
+            v["digest"] = "0".repeat(64).into();
+            v
+        },
+        KEYED,
+    );
+    assert!(fx.why("b1").contains("evidence-stamp"));
+}
+
+#[test]
+fn evidence_stamp_is_unknown_without_a_configured_steps_file_and_unknown_is_a_refusal() {
+    let mut fx = Fx::new("");
+    fx.proving_with("b1", |f, t| f.good_stamp(t), KEYED);
+    fx.cfg.steps_file = None;
+    assert!(fx.why("b1").contains("evidence-stamp"));
+}
+
+#[test]
+fn evidence_partial_a_result_whose_need_the_source_run_never_ran_is_refused() {
+    let mut fx = Fx::new("");
+    fx.proving_with(
+        "b1",
+        |f, t| {
+            let mut v = f.good_stamp(t);
+            v["steps"][0]["needs"] = serde_json::json!(["pre"]);
+            v
+        },
+        KEYED,
+    );
+    assert!(fx.why("b1").contains("evidence-partial"));
+    // the same need green in the source run passes
+    let mut fx = Fx::new("");
+    fx.proving_with(
+        "b1",
+        |f, t| {
+            let mut v = f.good_stamp(t);
+            v["steps"][0]["needs"] = serde_json::json!(["pre"]);
+            v["steps"].as_array_mut().unwrap().push(serde_json::json!({"name": "pre", "rc": 0, "key": "P"}));
+            v
+        },
+        KEYED,
+    );
+    fx.step("b1", "proven");
+}
+
+#[test]
+fn a_stamp_marked_partial_is_never_evidence() {
+    let mut fx = Fx::new("");
+    fx.proving_with(
+        "b1",
+        |f, t| {
+            let mut v = f.good_stamp(t);
+            v["partial"] = true.into();
+            v
+        },
+        KEYED,
+    );
+    assert!(fx.why("b1").contains("evidence-partial"));
+}
+
+#[test]
+fn evidence_stale_a_result_older_than_max_age_hours_is_refused() {
+    let mut fx = Fx::new("");
+    fx.cfg.max_age_hours = Some(24.0);
+    fx.proving_with(
+        "b1",
+        |f, t| {
+            let mut v = f.good_stamp(t);
+            v["at"] = "2026-11-13T09:00:00+00:00".into();
+            v
+        },
+        KEYED,
+    );
+    assert!(fx.why("b1").contains("evidence-stale"));
+}
+
+#[test]
+fn evidence_undeclared_a_cached_step_with_no_key_is_refused_without_a_verifier() {
+    let mut fx = Fx::new("");
+    fx.proving_with("b1", |f, t| f.good_stamp(t), CACHED);
+    let why = fx.why("b1");
+    assert!(why.contains("evidence-undeclared") && why.contains("step(s) a came from a step cache"), "{why}");
+}
+
+#[test]
+fn evidence_unproven_a_key_needs_shadow_would_hits_and_no_defect() {
+    // three would-hits are not enough when four are asked for
+    let mut fx = Fx::new("");
+    fx.proving_with("b1", |f, t| f.good_stamp(t), KEYED);
+    fx.cfg.shadow_min = 4;
+    assert!(fx.why("b1").contains("evidence-unproven"));
+    // a would-hit whose real run was red is a key-model defect: the key is off
+    let mut fx = Fx::new("");
+    fx.proving_with("b1", |f, t| f.good_stamp(t), KEYED);
+    assert_eq!(gatetrain_core::evidence::record_shadow(&fx.state, "shadow-bad", "STEP_CACHE_SHADOW a would-hit K1 rc=1\n").unwrap(), 1);
+    let why = fx.why("b1");
+    assert!(why.contains("evidence-unproven") && why.contains("defect"), "{why}");
+}
+
+#[test]
+fn shadow_lines_are_recorded_once_per_run_and_step() {
+    let fx = Fx::new("");
+    let text = "STEP_CACHE_SHADOW a would-hit K9 rc=0\nSTEP_CACHE_SHADOW b miss K8 rc=0\nSTEP_START x 2026-11-11T09:00:00Z\n";
+    assert_eq!(gatetrain_core::evidence::record_shadow(&fx.state, "r1", text).unwrap(), 2);
+    assert_eq!(gatetrain_core::evidence::record_shadow(&fx.state, "r1", text).unwrap(), 0);
+}
+
+#[test]
+fn a_shadow_miss_counts_for_nothing() {
+    let mut fx = Fx::new("");
+    fx.proving_with("b1", |f, t| f.good_stamp(t), KEYED);
+    fx.cfg.shadow_min = 4;
+    gatetrain_core::evidence::record_shadow(&fx.state, "shadow-miss", "STEP_CACHE_SHADOW a miss K1 rc=0\n").unwrap();
+    assert!(fx.why("b1").contains("evidence-unproven"));
+}
+
+#[test]
+fn evidence_missing_a_keyed_hit_with_no_result_anywhere_is_refused() {
+    let mut fx = Fx::new("");
+    fx.proving_with(
+        "b1",
+        |f, t| {
+            let mut v = f.good_stamp(t);
+            v["steps"][0]["name"] = "other".into();
+            v
+        },
+        KEYED,
+    );
+    assert!(fx.why("b1").contains("evidence-missing"));
+}
+
+#[test]
+fn the_policy_never_refuses_every_cached_step_even_a_verified_one() {
+    let mut fx = Fx::new("");
+    fx.cfg.allow_cached_steps = "never".into();
+    fx.proving_with("b1", |f, t| f.good_stamp(t), KEYED);
+    assert!(fx.why("b1").contains("policy-never"));
+}
+
+#[test]
+fn a_keyless_cached_step_is_still_vouched_for_by_the_verify_command() {
+    // the adopter's own cache plug-in keeps working (the earlier tests pin its messages)
+    let mut fx = Fx::new("cache_verify_command = [\"sh\", \"-c\", \"exit 0\"]\n");
+    fx.proving_with("b1", |f, t| f.good_stamp(t), CACHED);
+    fx.step("b1", "proven");
+}
+
+#[test]
+fn the_proof_launch_writes_the_evidence_file_the_chain_is_given() {
+    let mut fx = Fx::new("");
+    fx.cfg.chain_command = vec!["fake-chain".into(), "--evidence".into(), "{evidence}".into()];
+    fx.evidence();
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let tip = fx.tip_now("b1");
+    fx.put_stamp("stamp-pre-1.json", &fx.good_stamp(&tip));
+    fx.put_stamp("stamp-old.json", &fx.good_stamp(&"1".repeat(40)));
+    fx.step("b1", "preflighted");
+    fx.step("b1", "proving");
+    let req = fx.lock.launches.lock().unwrap()[0].clone();
+    assert_eq!(req.command[1], "--evidence");
+    let path = PathBuf::from(&req.command[2]);
+    assert!(path.is_file(), "{path:?}");
+    assert!(req.env.iter().any(|(k, v)| k == "GATETRAIN_EVIDENCE" && fwd(&PathBuf::from(v)) == fwd(&path)));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["sha"], tip.as_str());
+    let rows = v["results"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "only the result for the tip: {v}");
+    assert_eq!(rows[0]["step"], "a");
+    assert_eq!(rows[0]["key"], "K1");
+    assert_eq!(rows[0]["run_id"], "pre-1");
+}
+
+#[test]
+fn the_evidence_file_leaves_out_results_the_proof_could_not_accept() {
+    let mut fx = Fx::new("");
+    fx.cfg.chain_command = vec!["fake-chain".into(), "--evidence".into(), "{evidence}".into()];
+    fx.evidence();
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let tip = fx.tip_now("b1");
+    // another host that is not portable, another steps file, a red row: none may be offered
+    let mut a = fx.good_stamp(&tip);
+    a["host"] = "ws".into();
+    fx.put_stamp("stamp-1.json", &a);
+    let mut b = fx.good_stamp(&tip);
+    b["digest"] = "0".repeat(64).into();
+    fx.put_stamp("stamp-2.json", &b);
+    let mut c = fx.good_stamp(&tip);
+    c["steps"][0]["rc"] = 1.into();
+    fx.put_stamp("stamp-3.json", &c);
+    fx.step("b1", "preflighted");
+    fx.step("b1", "proving");
+    let req = fx.lock.launches.lock().unwrap()[0].clone();
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&req.command[2]).unwrap()).unwrap();
+    assert_eq!(v["results"].as_array().unwrap().len(), 0, "{v}");
+}
