@@ -1784,11 +1784,12 @@ struct CloseAdm {
     script: RefCell<VecDeque<Option<(String, String)>>>,
     tidies: Cell<usize>,
     can_tidy: bool,
+    tidy_fails: bool,
 }
 
 impl CloseAdm {
     fn new(env: FakeCloseEnv) -> CloseAdm {
-        CloseAdm { env, script: RefCell::new(VecDeque::new()), tidies: Cell::new(0), can_tidy: true }
+        CloseAdm { env, script: RefCell::new(VecDeque::new()), tidies: Cell::new(0), can_tidy: true, tidy_fails: false }
     }
     fn floor(script: Vec<Option<(&str, &str)>>) -> CloseAdm {
         let a = CloseAdm::new(FakeCloseEnv::default());
@@ -1807,6 +1808,9 @@ impl Admission for CloseAdm {
     fn tidy_auto(&self, _: &str) -> gatetrain_core::Result<Option<String>> {
         if !self.can_tidy {
             return Ok(None);
+        }
+        if self.tidy_fails {
+            return Err(gatetrain_core::Error::Batch("tidy --auto failed".into()));
         }
         self.tidies.set(self.tidies.get() + 1);
         Ok(Some("tidy --auto reclaimed 3 GB".into()))
@@ -1830,18 +1834,27 @@ impl Fx {
 
 const TGT: &str = "/build/tgt-b1";
 const TMP: &str = "/tmp/gt-b1-step";
-const BR: &str = "line/batch-b1";
+const BR: &str = "line/l1";
+const OWN: &str = "batch/b1/s1";
 
 /// A batch that is `live`, with the tidy rule on and the run's target folder recorded; its run named a container and a temp folder.
 fn live_fx() -> Fx {
     let mut fx = Fx::new("[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n");
-    fx.cfg.chain_target_dirs = vec![TGT.into()];
     fx.cfg.close_tidy = true;
-    fx.drive_to_proving("b1");
+    fx.cfg.close_roots = vec!["/build".into(), "/tmp".into(), "/wt".into()];
+    // lanes the way the adopter names them
+    g(&fx.repo, &["branch", "line/l1", "lane1"]);
+    g(&fx.repo, &["branch", "line/l2", "lane2"]);
+    fx.open_on("b1", "main", &fx.repo.clone(), &["line/l1", "line/l2"]).unwrap();
+    for s in ["stacked", "settled", "preflighted", "proving"] {
+        fx.step("b1", s);
+    }
     fx.write_log(GREEN);
     for s in ["proven", "merged", "deploying", "live"] {
         fx.step("b1", s);
     }
+    std::fs::create_dir_all(fx.state.join("targets")).unwrap();
+    std::fs::write(fx.state.join("targets").join("b1-p1.txt"), format!("{TGT}\n")).unwrap();
     std::fs::create_dir_all(fx.state.join("containers")).unwrap();
     std::fs::write(fx.state.join("containers").join("b1-p1.txt"), "mr-gate-b1-pg\n").unwrap();
     std::fs::create_dir_all(fx.state.join("tmpdirs")).unwrap();
@@ -1852,10 +1865,10 @@ fn live_fx() -> Fx {
 /// The full owned set of `live_fx` present in a fake environment: a lane worktree on lane1, the target, a container, a temp folder,
 /// the archived `line/batch-b1` branch.
 fn full_env() -> FakeCloseEnv {
-    let mut e = FakeCloseEnv::with(&[("worktree", "/wt/lane1"), ("target", TGT), ("container", "mr-gate-b1-pg"), ("tmp", TMP), ("branch", BR)]);
-    e.lane_worktrees = vec!["/wt/lane1".into()];
-    e.wt_branch.insert("/wt/lane1".into(), "lane1".into());
+    let mut e = FakeCloseEnv::with(&[("worktree", "/wt/lane1"), ("target", TGT), ("container", "mr-gate-b1-pg"), ("tmp", TMP), ("branch", BR), ("branch", OWN)]);
+    e.wt_branch.insert("/wt/lane1".into(), "line/l1".into());
     e.tags.insert(BR.into());
+    e.tags.insert(OWN.into());
     e
 }
 
@@ -1888,7 +1901,7 @@ fn a_clean_owned_set_is_tidied_and_the_batch_closes_and_check_shows_nothing() {
     for k in ["worktree", "target", "container", "tmp", "branch"] {
         assert!(kinds.iter().any(|x| x == k), "{k} in {kinds:?}");
     }
-    assert_eq!(fx.rows("tidy.moved").len(), 5);
+    assert_eq!(fx.rows("tidy.moved").len(), 6);
 }
 
 #[test]
@@ -1920,7 +1933,7 @@ fn a_worktree_with_uncommitted_work_is_refused() {
 
 #[test]
 fn a_worktree_whose_lane_is_not_proven_on_main_is_a_live_lane() {
-    closes_with("tidy.live-lane", |e| { e.unmerged.insert("lane1".into()); }, "/wt/lane1");
+    closes_with("tidy.live-lane", |e| { e.unmerged.insert("line/l1".into()); }, "/wt/lane1");
 }
 
 #[test]
@@ -1959,11 +1972,7 @@ fn a_failed_move_leaves_the_batch_live_with_check_not_clean() {
     let adm = CloseAdm::new(env);
     assert!(matches!(fx.adv_with("b1", &adm), Outcome::Refused { rule, .. } if rule == "tidy.check-not-clean"));
     assert_eq!(fx.state("b1"), "live");
-    let healed = CloseAdm::new({
-        let mut e = FakeCloseEnv::with(&[("tmp", TMP)]);
-        e.lane_worktrees = vec![];
-        e
-    });
+    let healed = CloseAdm::new(FakeCloseEnv::with(&[("tmp", TMP)]));
     assert!(matches!(fx.adv_with("b1", &healed), Outcome::Advanced { to, .. } if to == "closed"));
 }
 
@@ -2104,4 +2113,208 @@ fn a_failing_legacy_stamp_command_keeps_the_batch_preflighting_and_is_tried_agai
     assert_eq!(fx.state("b1"), "preflighting");
     fx.cfg.legacy_stamp_command = vec!["sh".into(), "-c".into(), "exit 0".into()];
     fx.step("b1", "preflighted");
+}
+
+// ============================================================ review fixes (B1-B4, M1-M5): every one red first
+
+const SHARED: &str = "/build/shared-chain";
+
+fn run_closed(fx: &mut Fx, env: FakeCloseEnv) -> (Outcome, CloseAdm) {
+    let adm = CloseAdm::new(env);
+    let o = fx.adv_with("b1", &adm);
+    (o, adm)
+}
+
+fn touched(adm: &CloseAdm, key: &str) -> bool {
+    adm.env.disposed.borrow().iter().any(|(_, k)| k == key)
+}
+
+#[test]
+fn b2_a_branch_is_never_deleted_while_a_worktree_is_on_it() {
+    // the lane worktree is refused as dirty: the branch under it must stay, or git's own guard is bypassed
+    closes_with("tidy.uncommitted", |e| { e.dirty.insert("/wt/lane1".into()); }, BR);
+}
+
+#[test]
+fn b3_a_path_inside_the_main_checkout_is_refused() {
+    closes_with("tidy.main-checkout", |e| e.main_checkout = Some("/build".into()), TGT);
+}
+
+#[test]
+fn b3_a_folder_that_contains_a_registered_worktree_is_refused() {
+    closes_with(
+        "tidy.not-owned",
+        |e| {
+            e.present.borrow_mut().insert(("worktree".into(), "/tmp/gt-b1-step/inner".into()));
+            e.wt_branch.insert("/tmp/gt-b1-step/inner".into(), "someone-elses".into());
+        },
+        TMP,
+    );
+}
+
+#[test]
+fn b3_roots_are_mandatory_when_close_tidy_is_on() {
+    assert!(BatchConfig::parse("[close]\ntidy = true\n").is_err());
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = []\n").is_err());
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"/build\"]\n").is_ok());
+    assert!(BatchConfig::parse("[close]\ntidy = false\n").is_ok());
+}
+
+#[test]
+fn b3_a_path_outside_every_root_is_not_owned() {
+    let mut fx = live_fx();
+    fx.cfg.close_roots = vec!["/elsewhere".into()];
+    let (o, adm) = run_closed(&mut fx, full_env());
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "tidy.not-owned"), "{o:?}");
+    assert!(!touched(&adm, TGT) && !touched(&adm, TMP), "{:?}", adm.env.disposed.borrow());
+    assert_eq!(fx.state("b1"), "live");
+}
+
+#[test]
+fn b4a_the_shared_chain_target_is_never_moved_only_the_runs_own_recorded_folder() {
+    let mut fx = live_fx();
+    let mut env = full_env();
+    env.present.borrow_mut().insert(("target".into(), SHARED.into()));
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
+    assert!(!touched(&adm, SHARED), "the shared [chain] target_dirs folder is not the batch's: {:?}", adm.env.disposed.borrow());
+    assert!(touched(&adm, TGT), "the run's own recorded target folder is");
+}
+
+#[test]
+fn b4b_a_line_batch_branch_is_not_derived_by_name_and_the_recorded_stack_branch_is_owned() {
+    let mut fx = live_fx();
+    let env = full_env();
+    env.present.borrow_mut().insert(("branch".into(), "line/batch-b1".into()));
+    let mut env = env;
+    env.tags.insert("line/batch-b1".into());
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
+    assert!(!touched(&adm, "line/batch-b1"), "never derived by name");
+    assert!(touched(&adm, OWN), "the branch the engine recorded (batch/b1/s1) is the batch's");
+}
+
+#[test]
+fn b4c_the_batch_checkout_is_left_alone_unless_own_workdir_is_set() {
+    let mut fx = live_fx();
+    let wd = fwd(&fx.repo);
+    let mut env = full_env();
+    env.present.borrow_mut().insert(("worktree".into(), wd.clone()));
+    env.wt_branch.insert(wd.clone(), OWN.into());
+    let (_, adm) = run_closed(&mut fx, env);
+    assert!(!touched(&adm, &wd), "own_workdir = false: {:?}", adm.env.disposed.borrow());
+    // with the setting the checkout is part of the owned set (and its branch may then go)
+    let mut fx = live_fx();
+    fx.cfg.close_own_workdir = true;
+    let wd = fwd(&fx.repo);
+    fx.cfg.close_roots.push(wd.clone());
+    let mut env = full_env();
+    env.present.borrow_mut().insert(("worktree".into(), wd.clone()));
+    env.wt_branch.insert(wd.clone(), OWN.into());
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(touched(&adm, &wd), "{:?}", adm.env.disposed.borrow());
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
+}
+
+#[test]
+fn m1_a_reference_stack_container_is_protected_even_with_no_prefix_configured() {
+    let mut fx = live_fx();
+    std::fs::write(fx.state.join("containers").join("b1-p1.txt"), "mr-ref-keep\n").unwrap();
+    let env = FakeCloseEnv::with(&[("container", "mr-ref-keep")]);
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "tidy.reference-stack"), "{o:?}");
+    assert!(!touched(&adm, "mr-ref-keep"));
+}
+
+#[test]
+fn m2_the_checks_are_made_again_at_the_moment_of_action() {
+    // clean at plan time, dirty a moment later: the second look refuses
+    closes_with("tidy.uncommitted", |e| { e.dirty_on_call.insert("/wt/lane1".into(), 2); }, "/wt/lane1");
+}
+
+#[test]
+fn m3_a_locked_worktree_is_refused() {
+    closes_with("tidy.in-use", |e| { e.locked.insert("/wt/lane1".into()); }, "/wt/lane1");
+}
+
+// ---- guards that survived mutation: one dedicated test each
+
+#[test]
+fn an_unknown_dirty_state_is_unreadable_not_clean() {
+    closes_with("tidy.unreadable", |e| { e.dirty_unknown.insert("/wt/lane1".into()); }, "/wt/lane1");
+}
+
+#[test]
+fn a_branch_that_is_not_proven_on_main_is_a_live_lane() {
+    closes_with("tidy.live-lane", |e| { e.unmerged.insert(OWN.into()); }, OWN);
+}
+
+#[test]
+fn a_branch_whose_merge_state_is_unknown_is_unreadable() {
+    closes_with("tidy.unreadable", |e| { e.merge_unknown.insert(OWN.into()); }, OWN);
+}
+
+#[test]
+fn an_item_that_is_still_there_after_a_successful_dispose_is_check_not_clean() {
+    closes_with("tidy.check-not-clean", |e| { e.ghost.insert(TMP.into()); }, "never-matches");
+}
+
+#[test]
+fn a_failed_dispose_is_residue_and_a_check_not_clean_row() {
+    let mut fx = live_fx();
+    let mut env = full_env();
+    env.fail_dispose.insert(TGT.into());
+    let (o, _) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Refused { rule, because, .. } if rule == "tidy.check-not-clean" && because.contains("left over")), "{o:?}");
+    assert!(!fx.rows("tidy.check-not-clean").is_empty());
+    assert_eq!(fx.state("b1"), "live");
+}
+
+// ---- tidy:auto, once per batch (M4), and an escalation row only once
+
+#[test]
+fn m4_tidy_auto_runs_at_most_once_per_batch() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let adm = CloseAdm::floor(vec![Some(("host.refuse-disk", "low")), Some(("host.refuse-disk", "still low")), Some(("host.refuse-disk", "low again"))]);
+    assert!(matches!(fx.adv_with("b1", &adm), Outcome::Refused { .. }));
+    assert!(matches!(fx.adv_with("b1", &adm), Outcome::Refused { rule, .. } if rule == "host.refuse-disk"));
+    assert_eq!(adm.tidies.get(), 1, "the second attempt of the same batch does not tidy again");
+    assert_eq!(fx.rows("tidy.auto-disk").len(), 1);
+}
+
+#[test]
+fn m4_a_failing_tidy_is_a_refusal_row_not_an_engine_error() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let mut adm = CloseAdm::floor(vec![Some(("host.refuse-disk", "low"))]);
+    adm.tidy_fails = true;
+    let o = fx.adv_with("b1", &adm);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "host.refuse-disk"), "{o:?}");
+    assert_eq!(fx.rows("tidy.auto-disk"), vec![("tidy".to_string(), "failed".to_string())]);
+    assert_eq!(fx.state("b1"), "settled");
+}
+
+#[test]
+fn the_escalation_row_is_written_once_per_batch() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    for id in ["b1", "b2"] {
+        fx.open(id);
+        fx.step(id, "stacked");
+        fx.step(id, "settled");
+    }
+    let mk = || CloseAdm::floor(vec![Some(("host.refuse-disk", "low")), Some(("host.refuse-disk", "still low")), Some(("host.refuse-disk", "low")), Some(("host.refuse-disk", "still low"))]);
+    fx.adv_with("b1", &mk());
+    let adm = mk();
+    fx.adv_with("b2", &adm);
+    fx.adv_with("b2", &adm);
+    let esc = fx.ledger.conn.query_row("SELECT COUNT(*) FROM decisions WHERE rule='host.disk-escalation' AND batch='b2'", [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(esc, 1);
 }

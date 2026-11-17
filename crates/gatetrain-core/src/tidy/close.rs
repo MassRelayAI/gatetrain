@@ -335,13 +335,26 @@ pub struct FakeCloseEnv {
     pub in_use: std::collections::HashMap<String, String>,
     pub tags: std::collections::HashSet<String>,
     pub fail_dispose: std::collections::HashSet<String>,
-    /// Lane worktrees `worktrees_on` reports.
-    pub lane_worktrees: Vec<String>,
+    /// The sha a branch is at (default `sha-<branch>`) and the sha `archive/<branch>` points at (a branch absent here has no tag sha).
+    pub branch_sha: std::collections::HashMap<String, String>,
+    pub tag_sha: std::collections::HashMap<String, String>,
+    /// `dirty(path)` turns true from this call number on (1 = the first probe): a worktree written to between plan and action.
+    pub dirty_on_call: std::collections::HashMap<String, usize>,
+    pub dirty_calls: std::cell::RefCell<std::collections::HashMap<String, usize>>,
+    pub dirty_unknown: std::collections::HashSet<String>,
+    pub merge_unknown: std::collections::HashSet<String>,
+    /// `dispose` says ok and removes nothing.
+    pub ghost: std::collections::HashSet<String>,
+    pub locked: std::collections::HashSet<String>,
     pub disposed: std::cell::RefCell<Vec<(String, String)>>,
 }
 
 #[cfg(any(test, feature = "test-fakes"))]
 impl FakeCloseEnv {
+    fn is_main(&self, p: &str) -> bool {
+        self.main_checkout.as_deref().is_some_and(|m| norm(m) == norm(p))
+    }
+
     pub fn with(items: &[(&str, &str)]) -> FakeCloseEnv {
         let f = FakeCloseEnv::default();
         for (k, v) in items {
@@ -372,9 +385,21 @@ impl CloseEnv for FakeCloseEnv {
         Ok(self.wt_branch.get(path).cloned())
     }
     fn dirty(&self, path: &str) -> Result<Option<bool>> {
-        Ok(Some(self.dirty.contains(path)))
+        if self.dirty_unknown.contains(path) {
+            return Ok(None);
+        }
+        let n = {
+            let mut c = self.dirty_calls.borrow_mut();
+            let n = c.entry(path.to_string()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        Ok(Some(self.dirty.contains(path) || self.dirty_on_call.get(path).is_some_and(|from| n >= *from)))
     }
     fn merged_on_main(&self, branch: &str) -> Result<Option<bool>> {
+        if self.merge_unknown.contains(branch) {
+            return Ok(None);
+        }
         Ok(Some(!self.unmerged.contains(branch)))
     }
     fn in_use(&self, _kind: &str, key: &str) -> Result<Option<String>> {
@@ -383,13 +408,18 @@ impl CloseEnv for FakeCloseEnv {
     fn archive_tag(&self, branch: &str) -> Result<bool> {
         Ok(self.tags.contains(branch))
     }
-    fn worktrees_on(&self, _branches: &[String]) -> Result<Vec<String>> {
-        Ok(self.lane_worktrees.clone())
+    fn worktrees_on(&self, branches: &[String]) -> Result<Vec<String>> {
+        let mut v: Vec<String> = self.wt_branch.iter().filter(|(p, b)| branches.contains(b) && !self.is_main(p) && self.present.borrow().contains(&("worktree".to_string(), p.to_string()))).map(|(p, _)| p.clone()).collect();
+        v.sort();
+        Ok(v)
     }
     fn dispose(&self, kind: &str, key: &str) -> Result<std::result::Result<(), String>> {
         self.disposed.borrow_mut().push((kind.to_string(), key.to_string()));
         if self.fail_dispose.contains(key) {
             return Ok(Err("the move failed".into()));
+        }
+        if self.ghost.contains(key) {
+            return Ok(Ok(()));
         }
         self.present.borrow_mut().remove(&(kind.to_string(), key.to_string()));
         Ok(Ok(()))

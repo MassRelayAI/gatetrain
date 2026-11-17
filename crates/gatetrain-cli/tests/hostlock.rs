@@ -174,3 +174,50 @@ fn light_while_proving_is_a_known_host_key_and_is_read_from_the_file() {
     assert!(gatetrain_core::hostlock::host_flag(text, "h", "light_while_proving"));
     assert!(!gatetrain_core::hostlock::host_flag(text, "g", "light_while_proving"));
 }
+
+#[test]
+fn a_host_missing_from_the_hosts_file_is_refused_not_skipped() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "chain", "0");
+    a.hosts = Some((d.path().join("hosts-floor.toml"), "nobody".into()));
+    a.needs_chain_gb = Some(0.001);
+    let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
+    assert_eq!(rule, "host.refuse-disk");
+    assert!(why.contains("nobody"), "{why}");
+}
+
+#[test]
+fn a_hosts_file_that_failed_to_load_refuses_every_run() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "chain", "0");
+    a.needs_chain_gb = Some(0.001);
+    assert_eq!(a.admit_rule("proof", "b").unwrap(), None);
+    a.floor_error = Some("hosts.toml: bad".into());
+    let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
+    assert_eq!(rule, "host.refuse-disk");
+    assert!(why.contains("hosts.toml: bad"), "{why}");
+}
+
+#[test]
+fn an_ssh_host_free_space_is_not_measured_here_and_is_refused_as_unknown() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "chain", "0");
+    a.needs_chain_gb = Some(0.001);
+    let text = std::fs::read_to_string(d.path().join("hosts-floor.toml")).unwrap().replace("name = \"host-a\"", "name = \"host-a\"\nreach = \"ssh builder\"");
+    std::fs::write(d.path().join("hosts-floor.toml"), text).unwrap();
+    let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
+    assert_eq!(rule, "host.refuse-disk");
+    assert!(why.contains("ssh") && why.contains("unknown"), "{why}");
+}
+
+#[test]
+fn free_space_that_cannot_be_read_refuses() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "chain", "0");
+    a.needs_chain_gb = Some(0.001);
+    let text = std::fs::read_to_string(d.path().join("hosts-floor.toml")).unwrap().replace(&d.path().to_string_lossy().replace('\\', "/"), "/definitely/not/a/disk");
+    std::fs::write(d.path().join("hosts-floor.toml"), text).unwrap();
+    let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
+    assert_eq!(rule, "host.refuse-disk");
+    assert!(why.contains("could not be read"), "{why}");
+}

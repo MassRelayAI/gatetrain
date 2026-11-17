@@ -101,11 +101,13 @@ pub struct MemoryAdmission {
     pub tidy: Option<Box<dyn Fn() -> Result<String>>>,
     /// T9 close's view of this host.
     pub close: Option<Box<dyn CloseEnv>>,
+    /// The hosts file could not be loaded: the floor cannot be judged, so every run is refused (fail closed).
+    pub floor_error: Option<String>,
 }
 
 impl MemoryAdmission {
     pub fn new(lock: PathBuf, db: PathBuf, hosts: Option<(PathBuf, String)>, chain_steps: Vec<String>) -> MemoryAdmission {
-        MemoryAdmission { lock, db, hosts, chain_steps, target_dirs: vec![], repo_root: None, doctor: false, preflight_steps: vec![], light_while_proving: false, disk_floor: false, needs_preflight_gb: None, needs_chain_gb: None, tidy: None, close: None }
+        MemoryAdmission { lock, db, hosts, chain_steps, target_dirs: vec![], repo_root: None, doctor: false, preflight_steps: vec![], light_while_proving: false, disk_floor: false, needs_preflight_gb: None, needs_chain_gb: None, tidy: None, close: None, floor_error: None }
     }
 }
 
