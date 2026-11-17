@@ -240,6 +240,21 @@ fn status_has_one_row_per_run_and_the_earliest_look() {
     assert!(t.contains("next look: 5 min (run-partial-red:"), "{t}");
 }
 
+/// Found on a live chain 2026-11-17: with no other run to learn from, status took the done count as
+/// the total and printed `326/326 running eta <now>`, a false finish. No history means no total.
+#[test]
+fn status_without_history_says_the_total_and_eta_are_unknown() {
+    let o = gt(&["status", "--log", &fx("run-partial-red.log"), "--now", NOW]);
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    let t = out(&o);
+    let row = t.lines().find(|l| l.starts_with("run-partial-red")).unwrap_or_else(|| panic!("{t}"));
+    let cols: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(cols[4], "running", "{row}");
+    assert!(cols[2].ends_with("/?"), "the total must be unknown, not the done count: {row}");
+    assert_eq!(cols[5], "unknown", "no eta without history: {row}");
+    assert_eq!(cols[6], "-", "no band without history: {row}");
+}
+
 #[test]
 fn status_with_a_ledger_replaces_a_running_run_and_keeps_one_row() {
     let (_d, db) = db();

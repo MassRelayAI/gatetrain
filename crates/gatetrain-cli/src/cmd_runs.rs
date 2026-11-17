@@ -173,7 +173,12 @@ pub fn status(a: StatusArgs) -> Result<ExitCode> {
         red.dedup();
         let reference = p.last_ts().unwrap_or(now);
         let (mut eta, mut band) = ("-".to_string(), "-".to_string());
-        if !p.steps.is_empty() && outcome == "running" {
+        // With no other run to learn from, the log alone cannot say how many steps are left: the
+        // done count is not the total, and an eta of "now" reads as a finish. Say unknown instead.
+        let no_total = hist.is_empty() && outcome == "running";
+        if no_total {
+            eta = "unknown".to_string();
+        } else if !p.steps.is_empty() && outcome == "running" {
             let pr = predict::predict(&p.steps, &hist, reference);
             eta = hm(&pr.eta);
             band = format!("{}-{}", hm(&pr.lo), hm(&pr.hi));
@@ -184,7 +189,8 @@ pub fn status(a: StatusArgs) -> Result<ExitCode> {
             next = m.to_string();
             live.push((m, rid.clone(), why));
         }
-        rows.push(vec![rid, p.host.clone().unwrap_or_else(|| "-".into()), format!("{done}/{}", known.len()), red.len().to_string(), outcome.to_string(), eta, band, next]);
+        let total = if no_total { "?".to_string() } else { known.len().to_string() };
+        rows.push(vec![rid, p.host.clone().unwrap_or_else(|| "-".into()), format!("{done}/{total}"), red.len().to_string(), outcome.to_string(), eta, band, next]);
     }
     let head: Vec<String> = ["run", "host", "steps", "reds", "state", "eta", "band", "next look (min)"].iter().map(|s| s.to_string()).collect();
     let mut table = vec![head];
