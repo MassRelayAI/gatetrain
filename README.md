@@ -235,6 +235,12 @@ lanes against main
 
 It is advice (exit 0 unless git fails); the same data with `--json`. Heuristics are listed in [`modules/plan.md`](modules/plan.md).
 
+### The step cache (pre-flight only)
+
+`gatetrain chain --cache <dir>` skips a step whose inputs have not changed since it last passed. A step opts in with `inputs = ["apps/web/**", "package-lock.json"]` (git pathspecs, relative to the plan's `cwd`) and may add `cache_salt = "..."` to invalidate its entries. A step without `inputs` always runs.
+
+The key is a sha-256 over the step's command, `cwd`, salt and `git ls-files -s -- <inputs>`. A dirty or untracked input means the step runs and writes no entry (its `.full` says why). A hit prints `STEP_START`, `STEP_CACHED <step>`, `STEP_TIME <step> 0.0s`, `STEP_EXIT <step> 0` and runs nothing; `needs` treat it as green. Only a green run writes an entry. `--no-cache-for a,b` forces steps to run, and the stamp lists the cached steps in `"cached"`. The cache folder is per host and your choice; nothing is shared implicitly. A proof run must not pass `--cache` (`batch` already refuses cached steps as proof).
+
 ### Tests
 
 ```bash
