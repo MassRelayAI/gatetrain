@@ -7,7 +7,7 @@ use common::to_table;
 use gatetrain_core::config::{Config, Host};
 use gatetrain_core::tidy::close::{run_close, CloseReport, OpsEnv, OwnedItem, OwnedSet};
 use gatetrain_core::tidy::config::build_cfg;
-use gatetrain_core::tidy::{LocalRunner, Ops};
+use gatetrain_core::tidy::{LocalRunner, Ops, Runner};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
@@ -103,10 +103,19 @@ impl Fx {
     }
 
     fn close(&self, main_checkout: &str, kind: &str, key: &str, roots: &[String]) -> CloseReport {
-        let h = Host { name: "real".into(), tidy: to_table(&self.tidy(main_checkout)), ..Default::default() };
+        self.close_with(main_checkout, kind, key, roots, json!({}), &LocalRunner)
+    }
+
+    /// `extra` keys are added to the tidy config; `runner` stands between close and the real local shell.
+    fn close_with(&self, main_checkout: &str, kind: &str, key: &str, roots: &[String], extra: Value, runner: &dyn Runner) -> CloseReport {
+        let mut tidy = self.tidy(main_checkout);
+        for (k, v) in extra.as_object().unwrap() {
+            tidy.as_object_mut().unwrap().insert(k.clone(), v.clone());
+        }
+        let h = Host { name: "real".into(), tidy: to_table(&tidy), ..Default::default() };
         let cfg = Config { hosts: vec![h.clone()], ..Default::default() };
         let t = build_cfg(&cfg, &h).unwrap();
-        let ops = Ops::new(&h, &LocalRunner, &t);
+        let ops = Ops::new(&h, runner, &t);
         let env = OpsEnv { ops: &ops, cfg: &t, reference_prefixes: vec![] };
         let set = OwnedSet { items: vec![OwnedItem::new(kind, key)], branches: vec![], chain_checkout: None, roots: roots.to_vec(), shared_targets: vec![] };
         run_close(&set, &env)
@@ -182,4 +191,81 @@ fn a_plain_folder_inside_a_root_is_still_moved() {
     assert!(rep.clean() && rep.done == vec![key.clone()], "{rep:?}");
     assert!(!f.build.join("tgt-b1").exists());
     assert_eq!(f.trash().len(), 1, "{:?}", f.trash());
+}
+
+// ---- review round 3
+
+/// A lane worktree `<build>/wt-live` on `line/live`: one commit that is not on main, one uncommitted change in the tracked `src/`, and
+/// an ignored `target/` that holds only build output.
+fn live_worktree(f: &Fx) -> std::path::PathBuf {
+    let wt = f.build.join("wt-live");
+    git(&f.main, &["worktree", "add", "-q", "-b", "line/live", &(fwd(&f.build) + "/wt-live")]);
+    write(wt.join(".gitignore"), "target/
+");
+    write(wt.join("src/a.rs"), "fn a() {}
+");
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-q", "-m", "live work"]);
+    write(wt.join("src/a.rs"), "fn a() { /* not committed */ }
+");
+    write(wt.join("target/debug/x.o"), "obj
+");
+    age(&wt);
+    wt
+}
+
+#[test]
+fn bl3_a_recorded_target_that_is_a_dirty_unmerged_worktree_is_not_moved() {
+    let f = fx();
+    let wt = live_worktree(&f);
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live"), &[fwd(&f.build)]);
+    assert!(wt.join("src/a.rs").exists(), "a live worktree was moved as a target: {rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}
+
+#[test]
+fn bl3_a_recorded_tmp_that_is_a_locked_kept_worktree_is_not_moved() {
+    let f = fx();
+    let wt = live_worktree(&f);
+    git(&f.main, &["worktree", "lock", &(fwd(&f.build) + "/wt-live")]);
+    let extra = json!({"keep_lanes": ["live"], "worktree_prefix": "wt-", "keep_branches": ["line/live"]});
+    let rep = f.close_with(&fwd(&f.main), "tmp", &(fwd(&f.build) + "/wt-live"), &[fwd(&f.build)], extra, &LocalRunner);
+    assert!(wt.join("src/a.rs").exists(), "a locked, kept worktree was moved as a temp folder: {rep:?}, trash {:?}", f.trash());
+    assert!(rep.done.is_empty() && !rep.refusals.is_empty(), "{rep:?}");
+}
+
+#[test]
+fn bl3_a_tracked_folder_of_a_worktree_with_an_uncommitted_file_is_not_moved() {
+    let f = fx();
+    let wt = live_worktree(&f);
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/src"), &[fwd(&f.build)]);
+    assert!(wt.join("src/a.rs").exists(), "a tracked folder of a worktree was moved: {rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}
+
+#[test]
+fn bl3_an_ignored_build_folder_inside_a_worktree_is_still_moved() {
+    // the common case: a lane's own target/ (ignored, nothing tracked) goes
+    let f = fx();
+    let wt = live_worktree(&f);
+    let key = fwd(&f.build) + "/wt-live/target";
+    let rep = f.close(&fwd(&f.main), "target", &key, &[fwd(&f.build)]);
+    assert!(rep.clean() && rep.done == vec![key.clone()], "{rep:?}");
+    assert!(!wt.join("target").exists() && wt.join("src/a.rs").exists());
+}
+
+#[test]
+fn minor5_a_worktree_registered_through_a_link_is_seen_inside_the_folder_that_holds_it() {
+    // git records the worktree by the linked spelling; the recorded folder is the real one
+    let f = fx();
+    let wts = f.build.join("wts");
+    std::fs::create_dir_all(wts.join("holder")).unwrap();
+    dir_link(&f.build.join("lnkwts"), &wts);
+    git(&f.main, &["worktree", "add", "-q", "-b", "line/y", &(fwd(&f.build) + "/lnkwts/holder/wt1")]);
+    age(&wts);
+    let listed = git(&f.main, &["worktree", "list", "--porcelain"]);
+    let key = fwd(&wts) + "/holder";
+    let rep = f.close(&fwd(&f.main), "target", &key, &[fwd(&f.build)]);
+    assert!(wts.join("holder/wt1/f.txt").exists(), "moved: {rep:?}; git lists {listed}");
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}; git lists {listed}");
 }

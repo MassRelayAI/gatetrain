@@ -218,3 +218,16 @@ fn ma2_a_link_to_a_shared_chain_target_is_not_owned_in_production() {
     assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned" && r.why.contains("shared")), "{rep:?}");
     assert!(sim.s().has("/build/lnk") && sim.s().has("/build/chain/debug/big.o"));
 }
+
+// ---- review round 3
+
+#[test]
+fn bl3_a_target_inside_a_worktree_whose_content_cannot_be_read_is_unreadable() {
+    // the Sim answers no `git ls-files -- <rel>`: unknown is never read as "nothing tracked"
+    let (sim, h, t) = setup(json!({}));
+    sim.s().dir("/repo/wt/lane-a/target", 10 * 86400);
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("target", "/repo/wt/lane-a/target")], &[]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.unreadable"), "{rep:?}");
+    assert!(sim.s().has("/repo/wt/lane-a/target"));
+}
