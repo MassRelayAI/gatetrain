@@ -55,6 +55,8 @@ pub struct OwnedSet {
     pub chain_checkout: Option<String>,
     /// A path item must sit under one of these folders (`[close] roots`); none configured means nothing is owned.
     pub roots: Vec<String>,
+    /// The shared `[chain] target_dirs`: a recorded target or temp folder that is one, holds one or sits inside one is never the batch's.
+    pub shared_targets: Vec<String>,
 }
 
 /// What close needs to know and do. Every probe may fail or be unknown; unknown is never read as safe.
@@ -80,6 +82,10 @@ pub trait CloseEnv {
     /// The main checkout (or the root checkout) is `path` or sits below it: such a folder can never be a `[close]` root.
     fn holds_main_checkout(&self, _path: &str) -> Result<bool> {
         Ok(false)
+    }
+    /// `a` is `b`, sits inside it or holds it, by every spelling this environment can see.
+    fn overlaps(&self, a: &str, b: &str) -> Result<bool> {
+        Ok(at_or_under(a, b) || at_or_under(b, a))
     }
     /// Why the tidy config keeps it: the worktree's lane is in `keep_lanes` (any case) or the branch is in `keep_branches`.
     fn kept(&self, _worktree: Option<&str>, _branch: Option<&str>) -> Option<String> {
@@ -204,6 +210,13 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
         }
         if env.contains_worktree(key)? {
             return refuse("tidy.not-owned", format!("{key} contains a registered worktree; it is not moved with its contents"));
+        }
+        if matches!(kind, "target" | "tmp") {
+            for s in &set.shared_targets {
+                if env.overlaps(key, s)? {
+                    return refuse("tidy.not-owned", format!("{key} is, holds or sits inside the shared [chain] target_dirs folder {s}; it is never one batch's"));
+                }
+            }
         }
     }
     if kind == "container" && (BUILTIN_REFERENCE_PREFIXES.iter().any(|p| key.starts_with(p)) || env.reference_stack(key)?) {
@@ -445,6 +458,10 @@ impl CloseEnv for OpsEnv<'_> {
             }
         }
         Ok(false)
+    }
+    fn overlaps(&self, a: &str, b: &str) -> Result<bool> {
+        let (fa, fb) = (self.item_forms(a)?, self.place_forms(b)?);
+        Ok(fa.iter().any(|x| fb.iter().any(|y| at_or_under(x, y) || at_or_under(y, x))))
     }
     fn holds_main_checkout(&self, path: &str) -> Result<bool> {
         let (forms, mains) = (self.place_forms(path)?, self.mains()?);
@@ -737,6 +754,9 @@ impl CloseEnv for OwnedEnv {
     }
     fn holds_main_checkout(&self, path: &str) -> Result<bool> {
         self.with(|e| e.holds_main_checkout(path))
+    }
+    fn overlaps(&self, a: &str, b: &str) -> Result<bool> {
+        self.with(|e| e.overlaps(a, b))
     }
     fn kept(&self, worktree: Option<&str>, branch: Option<&str>) -> Option<String> {
         self.with(|e| e.kept(worktree, branch))

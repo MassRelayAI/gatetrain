@@ -1725,7 +1725,7 @@ impl<'a> Engine<'a> {
     /// The batch's own recorded items, and only those.
     fn owned_set(&self, id: &str, f: &Folded, env: &dyn CloseEnv) -> Result<OwnedSet> {
         let ev = self.events(id)?;
-        let mut set = OwnedSet { roots: self.cfg.close_roots.clone(), ..Default::default() };
+        let mut set = OwnedSet { roots: self.cfg.close_roots.clone(), shared_targets: self.cfg.chain_target_dirs.clone(), ..Default::default() };
         let mut runs: Vec<String> = vec![];
         for e in &ev {
             if let Some(r) = &e.run_id {

@@ -108,7 +108,7 @@ impl Fx {
         let t = build_cfg(&cfg, &h).unwrap();
         let ops = Ops::new(&h, &LocalRunner, &t);
         let env = OpsEnv { ops: &ops, cfg: &t, reference_prefixes: vec![] };
-        let set = OwnedSet { items: vec![OwnedItem::new(kind, key)], branches: vec![], chain_checkout: None, roots: roots.to_vec() };
+        let set = OwnedSet { items: vec![OwnedItem::new(kind, key)], branches: vec![], chain_checkout: None, roots: roots.to_vec(), shared_targets: vec![] };
         run_close(&set, &env)
     }
 

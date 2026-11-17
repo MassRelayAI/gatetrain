@@ -13,7 +13,7 @@ fn setup(extra: serde_json::Value) -> (Shared, gatetrain_core::config::Host, gat
 }
 
 fn set(items: &[(&str, &str)], branches: &[&str]) -> OwnedSet {
-    OwnedSet { items: items.iter().map(|(k, v)| OwnedItem::new(k, v)).collect(), branches: branches.iter().map(|b| b.to_string()).collect(), chain_checkout: None, roots: vec!["/repo/wt".into(), "/build".into(), "/trash".into()] }
+    OwnedSet { items: items.iter().map(|(k, v)| OwnedItem::new(k, v)).collect(), branches: branches.iter().map(|b| b.to_string()).collect(), chain_checkout: None, roots: vec!["/repo/wt".into(), "/build".into(), "/trash".into()], shared_targets: vec![] }
 }
 
 #[test]
