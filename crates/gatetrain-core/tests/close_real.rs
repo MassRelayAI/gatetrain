@@ -531,3 +531,14 @@ fn age_all(p: &Path) {
         }
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn r4minor4_a_folder_of_a_worktree_written_in_another_case_is_still_seen_as_tracked() {
+    // the probe asks from the parent with the name as written: on Windows that name is matched without case
+    let f = fx();
+    let wt = live_worktree(&f);
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/SRC"), &[fwd(&f.build)]);
+    assert!(wt.join("src/a.rs").exists(), "{rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}

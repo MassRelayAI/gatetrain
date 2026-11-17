@@ -90,6 +90,10 @@ pub trait CloseEnv {
     fn located(&self, path: &str) -> Result<String> {
         Ok(path.to_string())
     }
+    /// The tidy config's `keep_paths` entry the path is, holds or sits inside, by any spelling.
+    fn kept_path(&self, path: &str) -> Result<Option<String>>;
+    /// The folder holds a `.git` entry at its top: a repository of its own (an independent clone, a nested repository). `None`: unknown.
+    fn own_repo(&self, path: &str) -> Result<Option<bool>>;
     /// For a target or temp folder: whether it is a registered worktree or sits inside one, and then whether it holds work.
     fn worktree_overlap(&self, _path: &str) -> Result<WtOverlap> {
         Ok(WtOverlap::None)
@@ -240,6 +244,9 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
         if let Some(hit) = env.protected(key)? {
             return refuse("tidy.protected", format!("{key} is, contains, sits inside or links into the protect path {hit}"));
         }
+        if let Some(k) = env.kept_path(key)? {
+            return refuse("tidy.protected", format!("{key} is, holds or sits inside the tidy config's keep_paths entry {k}"));
+        }
         if kind == "worktree" && env.is_main_checkout(key)? {
             return refuse("tidy.main-checkout", format!("{key} is the main checkout"));
         }
@@ -276,8 +283,19 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
             if let Some(why) = env.kept(Some(key), None) {
                 return refuse("tidy.protected", why);
             }
+            match env.own_repo(key)? {
+                Some(true) => return refuse("tidy.not-owned", format!("{key} holds a .git at its top: a repository of its own, which the main checkout does not know")),
+                None => return refuse("tidy.unreadable", format!("whether {key} is a repository of its own could not be read")),
+                Some(false) => {}
+            }
             // a worktree goes only as a worktree (dirty, locked, live-lane and keep checks); a folder inside one only when it holds no work
-            match env.worktree_overlap(key)? {
+            let overlap = env.worktree_overlap(key)?;
+            if let WtOverlap::Inside { worktree, .. } = &overlap {
+                if let Some(why) = env.kept(Some(worktree), env.worktree_branch(worktree)?.as_deref()) {
+                    return refuse("tidy.protected", format!("{key} sits inside the worktree {worktree}, which is kept: {why}"));
+                }
+            }
+            match overlap {
                 WtOverlap::Is(w) => return refuse("tidy.not-owned", format!("{key} is the registered worktree {w}; a worktree is closed only as a worktree, with its checks")),
                 WtOverlap::Inside { worktree, work: Some(true) } => return refuse("tidy.not-owned", format!("{key} sits inside the worktree {worktree} and holds tracked or uncommitted files")),
                 WtOverlap::Inside { worktree, work: None } => return refuse("tidy.unreadable", format!("whether {key} (inside the worktree {worktree}) holds tracked or uncommitted files could not be read")),
@@ -537,6 +555,19 @@ impl CloseEnv for OpsEnv<'_> {
     fn located(&self, path: &str) -> Result<String> {
         self.resolved(path, false)
     }
+    fn kept_path(&self, path: &str) -> Result<Option<String>> {
+        let forms = self.item_forms(path)?;
+        for k in self.cfg.keep_paths.iter().filter(|k| !k.is_empty()) {
+            let kf = self.place_forms(k)?;
+            if forms.iter().any(|f| kf.iter().any(|x| at_or_under(f, x) || at_or_under(x, f))) {
+                return Ok(Some(k.clone()));
+            }
+        }
+        Ok(None)
+    }
+    fn own_repo(&self, path: &str) -> Result<Option<bool>> {
+        self.ops.exists(&format!("{}/.git", path.trim_end_matches(['/', '\\']))).map_err(e)
+    }
     fn worktree_overlap(&self, path: &str) -> Result<WtOverlap> {
         let forms = self.item_forms(path)?;
         let mut inside_of: Option<String> = None;
@@ -550,10 +581,15 @@ impl CloseEnv for OpsEnv<'_> {
             }
         }
         let Some(worktree) = inside_of else { return Ok(WtOverlap::None) };
-        // asked from the folder itself (`.`), so no relative path is rebuilt from a normalised spelling
+        // asked from the parent of where the item sits, with its own name as the pathspec: a tracked link is seen as tracked (the
+        // move acts on the link itself, not on where it leads). The name as written keeps its case; on Windows it is matched without case.
+        let at = self.resolved(path, false)?;
+        let parent = at.rsplit_once('/').map(|x| x.0).unwrap_or(&at).to_string();
+        let base = path.replace('\\', "/").trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string();
+        let spec = if self.ops.win { format!(":(literal,icase){base}") } else { format!(":(literal){base}") };
         let mut work = Some(false);
-        for a in [&["ls-files", "--", "."][..], &["status", "--porcelain", "--untracked-files=all", "--", "."][..]] {
-            let c = self.ops.git(path, a).map_err(e)?;
+        for a in [&["ls-files", "--", spec.as_str()][..], &["status", "--porcelain", "--untracked-files=all", "--", spec.as_str()][..]] {
+            let c = self.ops.git(&parent, a).map_err(e)?;
             if !c.ok() {
                 work = None;
                 break;
@@ -780,6 +816,12 @@ impl CloseEnv for FakeCloseEnv {
     fn contains_worktree(&self, path: &str) -> Result<bool> {
         Ok(self.wt_branch.keys().any(|w| self.registered(w) && norm(w) != norm(path) && at_or_under(w, path)))
     }
+    fn kept_path(&self, _path: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    fn own_repo(&self, _path: &str) -> Result<Option<bool>> {
+        Ok(Some(false))
+    }
     fn located(&self, path: &str) -> Result<String> {
         let n = {
             let mut c = self.located_calls.borrow_mut();
@@ -923,6 +965,12 @@ impl CloseEnv for OwnedEnv {
     }
     fn located(&self, path: &str) -> Result<String> {
         self.with(|e| e.located(path))
+    }
+    fn kept_path(&self, path: &str) -> Result<Option<String>> {
+        self.with(|e| e.kept_path(path))
+    }
+    fn own_repo(&self, path: &str) -> Result<Option<bool>> {
+        self.with(|e| e.own_repo(path))
     }
     fn holds_main_checkout(&self, path: &str) -> Result<bool> {
         self.with(|e| e.holds_main_checkout(path))
