@@ -347,6 +347,7 @@ enum BatchCmd {
     /// Create a batch from lane refs
     New {
         id: String,
+        /// A ref, or the id of a batch that is preflighted, proving or proven (the new batch is stacked on its tip)
         #[arg(long)]
         base: String,
         /// The checkout the batch is stacked in
@@ -370,6 +371,25 @@ enum BatchCmd {
     },
     /// Return a held batch to the state it came from
     Release { id: String },
+    /// Stack a batch again on the new tip of the batch it is stacked on
+    Restack { id: String },
+    /// Rerun a red proof (refused while a cause of the red run is open)
+    Retry { id: String },
+    /// Record that the cause of the last red run is a flake or infrastructure, with a reason
+    NoteCause {
+        id: String,
+        /// flake or infra
+        class: String,
+        reason: String,
+    },
+    /// Take the close step of a live batch now; --with-residue closes it with what is left, on a reason
+    Close {
+        id: String,
+        #[arg(long)]
+        with_residue: bool,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Close without a merge; no branch is deleted
     Abandon {
         id: String,
@@ -550,6 +570,32 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
     adm.target_dirs = cfg.chain_target_dirs.iter().map(PathBuf::from).collect();
     adm.repo_root = cfg.chain_repo_root.as_ref().map(PathBuf::from);
     adm.doctor = cfg.doctor && hosts.is_some();
+    adm.preflight_steps = cfg.preflight_steps.clone();
+    if let Some((h, n)) = &hosts {
+        let text = std::fs::read_to_string(h)?;
+        adm.light_while_proving = gatetrain_core::hostlock::host_flag(&text, n, "light_while_proving");
+        if let Ok(hc) = config::load(h) {
+            adm.disk_floor = true;
+            adm.needs_preflight_gb = Some(hc.needs.preflight_gb.f());
+            adm.needs_chain_gb = Some(hc.needs.chain_gb.f());
+            if let Some(host) = hc.hosts.iter().find(|x| x.name == *n) {
+                if let (Some(r), Ok(t)) = (gatetrain_core::runner::for_reach(&host.reach), gatetrain_core::tidy::config::build_cfg(&hc, host)) {
+                    adm.close = Some(Box::new(gatetrain_core::tidy::close::OwnedEnv { host: host.clone(), runner: r, cfg: t, reference_prefixes: cfg.close_protected_container_prefixes.clone() }));
+                }
+            }
+        }
+        if cfg.tidy_auto {
+            // the unattended classes only (`tidy --auto`); never a bulk prune
+            let (hp, hn) = (h.to_string_lossy().into_owned(), n.clone());
+            adm.tidy = Some(Box::new(move || {
+                let out = gatetrain_core::tidy::cmd_tidy(&hp, Some(&hn), false, None, true, &gatetrain_core::tidy::make_runner, None);
+                if out.rc >= 2 {
+                    return Err(gatetrain_core::Error::Batch(format!("tidy --auto on {hn} failed: {}", out.stderr.trim())));
+                }
+                Ok(out.stdout.lines().find(|l| l.contains("reclaimed")).unwrap_or("tidy --auto ran").to_string())
+            }));
+        }
+    }
     let actor = std::env::var("GATETRAIN_ACTOR").unwrap_or_else(|_| "engine".into());
     let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor, crash_after_effect: None };
     let report = |o: Outcome| -> ExitCode {
@@ -591,6 +637,16 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
         BatchCmd::Advance { id } => report(e.advance(&id)?),
         BatchCmd::Hold { id, reason } => report(e.hold(&id, &reason)?),
         BatchCmd::Release { id } => report(e.release(&id)?),
+        BatchCmd::Restack { id } => report(e.restack(&id)?),
+        BatchCmd::Retry { id } => report(e.retry(&id)?),
+        BatchCmd::NoteCause { id, class, reason } => report(e.note_cause(&id, &class, &reason)?),
+        BatchCmd::Close { id, with_residue, reason } => {
+            if with_residue {
+                report(e.close_with_residue(&id, &reason.unwrap_or_default())?)
+            } else {
+                report(e.close_batch(&id)?)
+            }
+        }
         BatchCmd::Abandon { id, reason } => report(e.abandon(&id, &reason)?),
     })
 }

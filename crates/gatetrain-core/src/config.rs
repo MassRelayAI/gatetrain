@@ -351,7 +351,7 @@ fn disk(v: &T, w: &str) -> R<Disk> {
     Ok(Disk { path, min_free_gb, fast, r#use: use_, removable, measure })
 }
 
-const HOST_KEYS: [&str; 33] = ["awake_hours", "cache_server_check", "chain_pattern", "container_prefix", "cores", "cost_per_hour_usd", "disks", "enabled", "gate_scripts", "kind", "lock_file", "lock_max_age_hours", "max_parallel_steps", "max_pollers", "memory_check", "memory_gb", "memory_per_cargo_job_gb", "memory_per_step_gb", "memory_reserve_gb", "name", "os", "ports", "reach", "reserve_cores", "reserved_port_ranges", "roles", "step_default_gb", "tidy", "tools", "watcher_max_age_min", "worktrees", "wsl", "wsl_memory_gb"];
+const HOST_KEYS: [&str; 34] = ["awake_hours", "cache_server_check", "chain_pattern", "container_prefix", "cores", "cost_per_hour_usd", "disks", "enabled", "gate_scripts", "kind", "light_while_proving", "lock_file", "lock_max_age_hours", "max_parallel_steps", "max_pollers", "memory_check", "memory_gb", "memory_per_cargo_job_gb", "memory_per_step_gb", "memory_reserve_gb", "name", "os", "ports", "reach", "reserve_cores", "reserved_port_ranges", "roles", "step_default_gb", "tidy", "tools", "watcher_max_age_min", "worktrees", "wsl", "wsl_memory_gb"];
 
 fn host(v: &T, i: usize) -> R<Host> {
     let w = format!("hosts[{i}]");

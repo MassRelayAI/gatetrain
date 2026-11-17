@@ -3,6 +3,7 @@
 //! force-remove; every removal names one exact path or object.
 pub mod apply;
 pub mod cmd;
+pub mod close;
 pub mod config;
 pub mod inventory;
 pub mod ops;

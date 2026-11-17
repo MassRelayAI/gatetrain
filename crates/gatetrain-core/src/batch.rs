@@ -7,6 +7,7 @@
 use crate::batchcfg::BatchConfig;
 use crate::declog::{self, NewEntry};
 use crate::evidence;
+use crate::tidy::close::{self, CloseEnv, OwnedItem, OwnedSet};
 use crate::ledger::Ledger;
 use crate::logfmt::parse_log;
 use crate::{Error, Result};
@@ -54,6 +55,15 @@ pub trait Admission {
     /// `host.refuse-cwd` (78), `host.refuse-doctor` (79), else `host.admission`. These are the exit codes of `gatetrain hold`.
     fn admit_rule(&self, role: &str, batch: &str) -> Result<Option<(String, String)>> {
         Ok(self.admit(role, batch)?.map(|why| ("host.admission".to_string(), why)))
+    }
+    /// Run `tidy --auto` once on the host the run needs (only the unattended classes, never a bulk prune). `None` = this seam cannot tidy;
+    /// `Some(note)` = it did, with what it reclaimed. Called by the disk floor after a `host.refuse-disk`, when policy allows it.
+    fn tidy_auto(&self, _role: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// What T9 close probes and acts through; `None` = this seam cannot tidy (close then waits).
+    fn close_env(&self) -> Option<&dyn CloseEnv> {
+        None
     }
 }
 
@@ -919,6 +929,31 @@ impl<'a> Engine<'a> {
         !self.cfg.preflight_chain_command.is_empty()
     }
 
+    /// Admission with the disk floor (engine-v2 T3, T4): when the host refuses for disk and policy allows `tidy:auto` (`[disk] tidy_auto`),
+    /// tidy once through the seam, measure again, and admit or refuse with `host.refuse-disk`. One tidy row (`tidy.auto-disk`, outcome
+    /// `recovered` or `still-below`); the refusal row is the caller's. Still below after allowed tidies on two batches in a row is a
+    /// founder escalation row (`host.disk-escalation`).
+    fn admit_floor(&mut self, role: &str, id: &str) -> Result<Option<(String, String)>> {
+        let first = self.adm.admit_rule(role, id)?;
+        let Some((rule, _)) = &first else { return Ok(None) };
+        if rule != "host.refuse-disk" || !self.cfg.tidy_auto {
+            return Ok(first);
+        }
+        let Some(note) = self.adm.tidy_auto(role)? else { return Ok(first) };
+        let again = self.adm.admit_rule(role, id)?;
+        let prev: Option<String> = self.ledger.conn.query_row("SELECT outcome FROM decisions WHERE rule='tidy.auto-disk' AND batch<>? ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).ok();
+        let outcome = if again.is_some() { "still-below" } else { "recovered" };
+        self.decide("tidy", id, None, "tidy.auto-disk", outcome, format!("{note}; the disk is {}", if again.is_some() { "still below its floor" } else { "above its floor" }), Some(json!({"role": role})))?;
+        let Some((r2, w2)) = again else { return Ok(None) };
+        if prev.as_deref() == Some("still-below") {
+            let already: i64 = self.ledger.conn.query_row("SELECT COUNT(*) FROM decisions WHERE rule='host.disk-escalation' AND batch=?", [id], |r| r.get(0)).unwrap_or(0);
+            if already == 0 {
+                self.decide("escalation", id, None, "host.disk-escalation", "founder", format!("the disk is still below its floor after allowed tidies on two batches in a row: {w2}"), None)?;
+            }
+        }
+        Ok(Some((r2, format!("{w2} (still below after tidy:auto)"))))
+    }
+
     /// `None` when the pre-flight of `tip` is proven, else why not. A launched pre-flight is proven by the stamp `gatetrain chain` wrote
     /// (`stamp-<sha>.json` naming the sha and the digest of the configured steps file); the engine's own `<sha>.stamp` is the older form.
     fn stamp_problem(&self, tip: &str, wd: &Path) -> Option<String> {
@@ -1045,7 +1080,7 @@ impl<'a> Engine<'a> {
                 Ok(mk(Some(self.tip(f)?), None, json!({})))
             }
             "T3" if self.launched_preflight() => {
-                if let Some((rule, why)) = self.adm.admit_rule("light", id)? {
+                if let Some((rule, why)) = self.admit_floor("light", id)? {
                     return Ok(Planned::Refuse(rule, why));
                 }
                 let tip = self.tip(f)?;
@@ -1060,7 +1095,7 @@ impl<'a> Engine<'a> {
                 if self.cfg.preflight_command.is_empty() {
                     return Ok(Planned::Refuse("config.preflight-command".into(), "gatetrain.toml has no [preflight] command".into()));
                 }
-                if let Some((rule, why)) = self.adm.admit_rule("light", id)? {
+                if let Some((rule, why)) = self.admit_floor("light", id)? {
                     return Ok(Planned::Refuse(rule, why));
                 }
                 let tip = self.tip(f)?;
@@ -1088,7 +1123,7 @@ impl<'a> Engine<'a> {
                 if self.cfg.chain_command.is_empty() {
                     return Ok(Planned::Refuse("config.chain-command".into(), "gatetrain.toml has no [chain] command".into()));
                 }
-                if let Some((rule, why)) = self.adm.admit_rule("proof", id)? {
+                if let Some((rule, why)) = self.admit_floor("proof", id)? {
                     return Ok(Planned::Refuse(rule, why));
                 }
                 if let Some(r) = self.full_run_budget(id)? {
@@ -1096,7 +1131,7 @@ impl<'a> Engine<'a> {
                 }
                 let run = format!("{id}-p{}", self.next_run_no(f));
                 let log = self.state_dir.join("logs").join(format!("{run}.log"));
-                Ok(mk(Some(tip.clone()), Some(run.clone()), json!({"run_id": run, "log": log.to_string_lossy(), "tested_sha": tip})))
+                Ok(mk(Some(tip.clone()), Some(run.clone()), json!({"run_id": run, "log": log.to_string_lossy(), "tested_sha": tip, "target_dirs": self.cfg.chain_target_dirs})))
             }
             "T6a" => {
                 let tip = self.tip(f)?;
@@ -1121,13 +1156,13 @@ impl<'a> Engine<'a> {
                 if self.cfg.chain_command.is_empty() {
                     return Ok(Planned::Refuse("config.chain-command".into(), "gatetrain.toml has no [chain] command".into()));
                 }
-                if let Some((rule, why)) = self.adm.admit_rule("proof", id)? {
+                if let Some((rule, why)) = self.admit_floor("proof", id)? {
                     return Ok(Planned::Refuse(rule, why));
                 }
                 let run = format!("{id}-p{}", self.next_run_no(f));
                 let log = self.state_dir.join("logs").join(format!("{run}.log"));
                 // settled_tip follows the tip: a stopped retry returns to `preflighted`, whose launch guard compares it
-                Ok(mk(Some(tip.clone()), Some(run.clone()), json!({"run_id": run, "log": log.to_string_lossy(), "tested_sha": tip, "settled_tip": tip})))
+                Ok(mk(Some(tip.clone()), Some(run.clone()), json!({"run_id": run, "log": log.to_string_lossy(), "tested_sha": tip, "settled_tip": tip, "target_dirs": self.cfg.chain_target_dirs})))
             }
             "T7" => {
                 let tip = self.tip(f)?;
@@ -1535,6 +1570,15 @@ impl<'a> Engine<'a> {
         if let Some(why) = self.chain_stamp_problem(&sha, &wd) {
             return self.refuse(id, "preflight.stamp-for-sha", format!("no green preflight stamp for {}: {why}", short(&sha)));
         }
+        if !self.cfg.legacy_stamp_command.is_empty() {
+            // the bridge for a launcher that still demands the repository's old stamp: runs once the chain stamp is read, idempotent by contract
+            let stamp = self.abs(&wd, self.cfg.preflight_stamp_dir.as_deref().unwrap_or_default()).join(format!("stamp-{sha}.json"));
+            let cmd: Vec<String> = self.cfg.legacy_stamp_command.iter().map(|a| a.replace("{sha}", &sha).replace("{results}", &stamp.to_string_lossy())).collect();
+            let (rc, err) = run_plugin(&cmd, &wd, &self.env(id, f, &sha, &run, &log.to_string_lossy()))?;
+            if rc != 0 {
+                return self.refuse(id, "preflight.legacy-stamp", format!("[preflight] legacy_stamp_command exited {rc}: {err}; the batch stays preflighting and the command is tried again"));
+            }
+        }
         self.plain(id, f, "T3o", "preflighted", Some(sha), Some(run), json!({"pf_stamped": true}), "allowed", "GATES_DONE, preflight mode, zero red, a chain stamp for the tip".into())
     }
 
@@ -1621,8 +1665,125 @@ impl<'a> Engine<'a> {
         self.plain(id, f, "T8b", "live", Some(sha), None, json!({}), "allowed", "every automatic target is healthy".into())
     }
 
-    /// T9: closed. Tidy and archive tags are a later slice.
+    /// T9: close. Without `[close] tidy` the batch closes as it always did; with it only the batch's own recorded items are tidied
+    /// (`tidy/close.rs`) and the batch stays `live` while anything is refused or left over (a decision row each, tried again later).
     fn close(&mut self, id: &str, f: &Folded) -> Result<Outcome> {
-        self.plain(id, f, "T9", "closed", None, None, json!({}), "recorded", "closed".into())
+        if !self.cfg.close_tidy {
+            return self.plain(id, f, "T9", "closed", None, None, json!({}), "recorded", "closed".into());
+        }
+        let adm = self.adm;
+        let Some(env) = adm.close_env() else { return Ok(Outcome::Waiting(format!("batch {id}: close needs a tidy environment for this host (`gatetrain batch close`)"))) };
+        let set = self.owned_set(id, f, env)?;
+        let rep = close::run_close(&set, env);
+        let mut last = None;
+        for r in &rep.refusals {
+            last = Some(self.close_row("refusal", id, &r.code, &r.key, &r.why, "refused")?);
+        }
+        for r in &rep.residue {
+            last = Some(self.close_row("refusal", id, "tidy.check-not-clean", r, &format!("`check` still shows {r}"), "refused")?);
+        }
+        for k in &rep.done {
+            self.close_row("tidy", id, "tidy.moved", k, &format!("{k} moved to the recycle bin by exact name"), "allowed")?;
+        }
+        if rep.clean() {
+            let note = format!("owned set tidied: {} moved, {} already gone", rep.done.len(), rep.gone.len());
+            return self.plain(id, f, "T9", "closed", None, None, json!({"tidied": rep.done, "gone": rep.gone}), "recorded", note);
+        }
+        let (code, why) = rep.refusals.first().map(|r| (r.code.clone(), r.why.clone())).unwrap_or_else(|| ("tidy.check-not-clean".into(), rep.residue.first().cloned().unwrap_or_default()));
+        Ok(Outcome::Refused { rule: code, because: format!("{why} ({} refusal(s), {} left over; the batch stays live and is retried)", rep.refusals.len(), rep.residue.len()), decision: last.unwrap_or(0) })
+    }
+
+    /// A close row, written once: an identical (batch, rule, subject, reason) row already in the log is not repeated on a retry.
+    fn close_row(&mut self, kind: &str, id: &str, rule: &str, key: &str, why: &str, outcome: &str) -> Result<i64> {
+        let have: Option<i64> = self.ledger.conn.query_row("SELECT seq FROM decisions WHERE batch=? AND rule=? AND subject=? AND reason=? ORDER BY seq DESC LIMIT 1", params![id, rule, key, why], |r| r.get(0)).ok();
+        match have {
+            Some(seq) if kind == "refusal" => Ok(seq),
+            _ => self.decide(kind, id, Some(key.into()), rule, outcome, why.into(), None),
+        }
+    }
+
+    /// The batch's own recorded items, and only those.
+    fn owned_set(&self, id: &str, f: &Folded, env: &dyn CloseEnv) -> Result<OwnedSet> {
+        let ev = self.events(id)?;
+        let mut set = OwnedSet { roots: self.cfg.close_roots.clone(), ..Default::default() };
+        let mut runs: Vec<String> = vec![];
+        for e in &ev {
+            if let Some(r) = &e.run_id {
+                if !runs.contains(r) {
+                    runs.push(r.clone());
+                }
+            }
+            if e.phase == "done" {
+                if let Some(b) = e.detail["branch"].as_str() {
+                    set.branches.push(b.to_string());
+                }
+            }
+        }
+        let mut lanes: Vec<String> = vec![];
+        for l in f.facts.get("lanes").and_then(|l| l.as_array()).cloned().unwrap_or_default() {
+            if let Some(r) = l["ref"].as_str() {
+                lanes.push(r.to_string());
+            }
+        }
+        set.branches.extend(lanes.iter().cloned());
+        let wd = f.s("workdir").unwrap_or_default();
+        if self.cfg.close_own_workdir && !wd.is_empty() {
+            set.chain_checkout = Some(wd.clone());
+            set.items.push(OwnedItem::new("worktree", &wd));
+        }
+        for w in env.worktrees_on(&set.branches)? {
+            if !set.items.iter().any(|i| i.key == w) {
+                set.items.push(OwnedItem::new("worktree", &w));
+            }
+        }
+        for t in f.facts.get("target_dirs").and_then(|t| t.as_array()).cloned().unwrap_or_default() {
+            if let Some(t) = t.as_str() {
+                set.items.push(OwnedItem::new("target", t));
+            }
+        }
+        for r in &runs {
+            for (sub, kind) in [("containers", "container"), ("tmpdirs", "tmp")] {
+                let file = self.state_dir.join(sub).join(format!("{r}.txt"));
+                for l in std::fs::read_to_string(&file).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    set.items.push(OwnedItem::new(kind, l));
+                }
+            }
+        }
+        let mut branches: Vec<String> = lanes.iter().filter(|l| l.starts_with("line/")).cloned().collect();
+        branches.push(format!("line/batch-{id}"));
+        for b in branches {
+            set.items.push(OwnedItem::new("branch", &b));
+        }
+        Ok(set)
+    }
+
+    /// A person closes a live batch with whatever is left (`batch close --with-residue`): the owned set is tidied as far as the refusals
+    /// allow, every refusal is already a row, and the override row names what stays behind.
+    pub fn close_with_residue(&mut self, id: &str, reason: &str) -> Result<Outcome> {
+        let f = self.fold(id)?;
+        if f.state != "live" {
+            return Ok(Outcome::Idle(format!("batch {id} is {}, not live", f.state)));
+        }
+        if reason.trim().is_empty() {
+            return Err(Error::Batch("closing with residue needs a reason".into()));
+        }
+        let mut left = vec![];
+        let adm = self.adm;
+        if let Some(env) = adm.close_env() {
+            let set = self.owned_set(id, &f, env)?;
+            let rep = close::run_close(&set, env);
+            left = rep.refusals.iter().map(|r| format!("{} ({})", r.key, r.code)).chain(rep.residue.iter().cloned()).collect();
+        }
+        self.decide("override", id, None, "close.with-residue", "recorded", reason.trim().into(), Some(json!({"residue": left})))?;
+        self.plain(id, &f, "T9", "closed", None, None, json!({"residue": left}), "recorded", format!("closed with residue: {}", reason.trim()))
+    }
+
+    /// `batch close`: take the T9 step now (a live batch only).
+    pub fn close_batch(&mut self, id: &str) -> Result<Outcome> {
+        let f = self.fold(id)?;
+        if f.state != "live" {
+            return Ok(Outcome::Idle(format!("batch {id} is {}, not live", f.state)));
+        }
+        self.close(id, &f)
     }
 }

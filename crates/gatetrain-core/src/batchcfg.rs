@@ -85,6 +85,20 @@ pub struct BatchConfig {
     /// `[pipeline] max_ahead` (default 1): unmerged batches a new batch may be stacked on. `prove_ahead` (default false): prove before the base is proven.
     pub max_ahead: usize,
     pub prove_ahead: bool,
+    /// `[close] tidy` (default false): T9 tidies the batch's own recorded items before `closed` (otherwise it closes at once).
+    pub close_tidy: bool,
+    /// `[preflight] steps`: the pre-flight's step names, for the light run's memory admission.
+    pub preflight_steps: Vec<String>,
+    /// `[close] roots`: path items must sit under one of these folders (`tidy.not-owned` otherwise). Empty = no root rule.
+    pub close_roots: Vec<String>,
+    /// `[close] own_workdir` (default false): the batch's checkout is part of its owned set (it is never the main checkout).
+    pub close_own_workdir: bool,
+    /// `[close] protected_container_prefixes`: container name prefixes close never touches (`tidy.reference-stack`).
+    pub close_protected_container_prefixes: Vec<String>,
+    /// `[disk] tidy_auto` (default false): the disk floor may run `tidy --auto` once before refusing (`tidy:auto` allowed by policy).
+    pub tidy_auto: bool,
+    /// `[preflight] legacy_stamp_command`: runs once after a green launched pre-flight, with `{sha}` and `{results}`.
+    pub legacy_stamp_command: Vec<String>,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -124,6 +138,13 @@ impl Default for BatchConfig {
             preflight_stamp_dir: None,
             max_ahead: 1,
             prove_ahead: false,
+            close_tidy: false,
+            preflight_steps: vec![],
+            close_roots: vec![],
+            close_own_workdir: false,
+            close_protected_container_prefixes: vec![],
+            tidy_auto: false,
+            legacy_stamp_command: vec![],
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -208,11 +229,20 @@ impl BatchConfig {
         if let Some(p) = v.get("preflight") {
             c.preflight_chain_command = argv(p.get("chain_command"));
             c.preflight_steps_file = strv(Some(p), "steps_file");
+            c.preflight_steps = argv(p.get("steps"));
             c.preflight_stamp_dir = strv(Some(p), "stamp_dir");
             if !c.preflight_chain_command.is_empty() && c.preflight_stamp_dir.is_none() {
                 return Err(Error::Batch("gatetrain.toml: [preflight] chain_command needs a stamp_dir (where the chain writes its stamp)".into()));
             }
         }
+        if let Some(cl) = v.get("close") {
+            c.close_tidy = cl.get("tidy").and_then(|b| b.as_bool()).unwrap_or(false);
+            c.close_roots = argv(cl.get("roots"));
+            c.close_own_workdir = cl.get("own_workdir").and_then(|b| b.as_bool()).unwrap_or(false);
+            c.close_protected_container_prefixes = argv(cl.get("protected_container_prefixes"));
+        }
+        c.tidy_auto = v.get("disk").and_then(|d| d.get("tidy_auto")).and_then(|b| b.as_bool()).unwrap_or(false);
+        c.legacy_stamp_command = argv(v.get("preflight").and_then(|p| p.get("legacy_stamp_command")));
         if let Some(p) = v.get("pipeline") {
             if let Some(n) = p.get("max_ahead").and_then(|n| n.as_integer()) {
                 c.max_ahead = n.max(0) as usize;

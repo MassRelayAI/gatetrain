@@ -1769,3 +1769,339 @@ fn the_depth_of_the_pipeline_is_limited() {
     fx.cfg.max_ahead = 2;
     fx.open_on("b3", "b2", &wd3, &["lane2"]).unwrap();
 }
+
+// ============================================================ T9 close (owned set) and the disk floor
+
+use gatetrain_core::batch::Admission;
+use gatetrain_core::tidy::close::FakeCloseEnv;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+
+/// An admission seam with a scripted disk verdict, a counted `tidy:auto` and a fake tidy environment for close.
+struct CloseAdm {
+    env: FakeCloseEnv,
+    /// What `admit_rule` answers, in order; when empty it admits.
+    script: RefCell<VecDeque<Option<(String, String)>>>,
+    tidies: Cell<usize>,
+    can_tidy: bool,
+}
+
+impl CloseAdm {
+    fn new(env: FakeCloseEnv) -> CloseAdm {
+        CloseAdm { env, script: RefCell::new(VecDeque::new()), tidies: Cell::new(0), can_tidy: true }
+    }
+    fn floor(script: Vec<Option<(&str, &str)>>) -> CloseAdm {
+        let a = CloseAdm::new(FakeCloseEnv::default());
+        *a.script.borrow_mut() = script.into_iter().map(|s| s.map(|(r, w)| (r.to_string(), w.to_string()))).collect();
+        a
+    }
+}
+
+impl Admission for CloseAdm {
+    fn admit(&self, _: &str, _: &str) -> gatetrain_core::Result<Option<String>> {
+        Ok(None)
+    }
+    fn admit_rule(&self, _: &str, _: &str) -> gatetrain_core::Result<Option<(String, String)>> {
+        Ok(self.script.borrow_mut().pop_front().flatten())
+    }
+    fn tidy_auto(&self, _: &str) -> gatetrain_core::Result<Option<String>> {
+        if !self.can_tidy {
+            return Ok(None);
+        }
+        self.tidies.set(self.tidies.get() + 1);
+        Ok(Some("tidy --auto reclaimed 3 GB".into()))
+    }
+    fn close_env(&self) -> Option<&dyn gatetrain_core::tidy::close::CloseEnv> {
+        Some(&self.env)
+    }
+}
+
+impl Fx {
+    fn adv_with(&mut self, id: &str, adm: &dyn Admission) -> Outcome {
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        e.advance(id).unwrap()
+    }
+
+    fn rows(&self, rule: &str) -> Vec<(String, String)> {
+        let mut st = self.ledger.conn.prepare("SELECT kind,outcome FROM decisions WHERE rule=? ORDER BY seq").unwrap();
+        st.query_map([rule], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|x| x.unwrap()).collect()
+    }
+}
+
+const TGT: &str = "/build/tgt-b1";
+const TMP: &str = "/tmp/gt-b1-step";
+const BR: &str = "line/batch-b1";
+
+/// A batch that is `live`, with the tidy rule on and the run's target folder recorded; its run named a container and a temp folder.
+fn live_fx() -> Fx {
+    let mut fx = Fx::new("[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n");
+    fx.cfg.chain_target_dirs = vec![TGT.into()];
+    fx.cfg.close_tidy = true;
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    for s in ["proven", "merged", "deploying", "live"] {
+        fx.step("b1", s);
+    }
+    std::fs::create_dir_all(fx.state.join("containers")).unwrap();
+    std::fs::write(fx.state.join("containers").join("b1-p1.txt"), "mr-gate-b1-pg\n").unwrap();
+    std::fs::create_dir_all(fx.state.join("tmpdirs")).unwrap();
+    std::fs::write(fx.state.join("tmpdirs").join("b1-p1.txt"), format!("{TMP}\n")).unwrap();
+    fx
+}
+
+/// The full owned set of `live_fx` present in a fake environment: a lane worktree on lane1, the target, a container, a temp folder,
+/// the archived `line/batch-b1` branch.
+fn full_env() -> FakeCloseEnv {
+    let mut e = FakeCloseEnv::with(&[("worktree", "/wt/lane1"), ("target", TGT), ("container", "mr-gate-b1-pg"), ("tmp", TMP), ("branch", BR)]);
+    e.lane_worktrees = vec!["/wt/lane1".into()];
+    e.wt_branch.insert("/wt/lane1".into(), "lane1".into());
+    e.tags.insert(BR.into());
+    e
+}
+
+fn closes_with(code: &str, tweak: impl FnOnce(&mut FakeCloseEnv), untouched: &str) {
+    let mut fx = live_fx();
+    let mut env = full_env();
+    tweak(&mut env);
+    let adm = CloseAdm::new(env);
+    let o = fx.adv_with("b1", &adm);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == code), "{code}: {o:?}");
+    assert_eq!(o.exit_code(), 3);
+    assert_eq!(fx.state("b1"), "live", "{code}: the batch stays live");
+    assert!(!fx.rows(code).is_empty(), "{code}: a decision row");
+    assert!(!adm.env.disposed.borrow().iter().any(|(_, k)| k == untouched), "{code}: {untouched} must not be touched: {:?}", adm.env.disposed.borrow());
+    // the next attempt is the same refusal, and the row is not written again
+    let n = fx.rows(code).len();
+    fx.adv_with("b1", &adm);
+    assert_eq!(fx.rows(code).len(), n, "{code}: a retry does not repeat its row");
+}
+
+#[test]
+fn a_clean_owned_set_is_tidied_and_the_batch_closes_and_check_shows_nothing() {
+    let mut fx = live_fx();
+    let adm = CloseAdm::new(full_env());
+    let o = fx.adv_with("b1", &adm);
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
+    assert_eq!(fx.state("b1"), "closed");
+    assert!(adm.env.present.borrow().is_empty(), "check shows nothing: {:?}", adm.env.present.borrow());
+    let kinds: Vec<String> = adm.env.disposed.borrow().iter().map(|(k, _)| k.clone()).collect();
+    for k in ["worktree", "target", "container", "tmp", "branch"] {
+        assert!(kinds.iter().any(|x| x == k), "{k} in {kinds:?}");
+    }
+    assert_eq!(fx.rows("tidy.moved").len(), 5);
+}
+
+#[test]
+fn only_recorded_items_are_planned_never_a_stamp_or_an_out_folder() {
+    let mut fx = live_fx();
+    let env = full_env();
+    env.present.borrow_mut().insert(("target".into(), "/build/other-batch-tgt".into()));
+    env.present.borrow_mut().insert(("tmp".into(), "/out/b1/stamp-x.json".into()));
+    let adm = CloseAdm::new(env);
+    fx.adv_with("b1", &adm);
+    let touched: Vec<String> = adm.env.disposed.borrow().iter().map(|(_, k)| k.clone()).collect();
+    assert!(!touched.iter().any(|k| k.contains("other-batch") || k.contains("stamp")), "{touched:?}");
+}
+
+#[test]
+fn a_protected_item_is_refused_and_nothing_inside_or_linking_into_it_goes() {
+    closes_with("tidy.protected", |e| e.protect.push("/build".into()), TGT);
+}
+
+#[test]
+fn a_reference_stack_container_is_refused() {
+    closes_with("tidy.reference-stack", |e| e.reference_prefixes.push("mr-gate-".into()), "mr-gate-b1-pg");
+}
+
+#[test]
+fn a_worktree_with_uncommitted_work_is_refused() {
+    closes_with("tidy.uncommitted", |e| { e.dirty.insert("/wt/lane1".into()); }, "/wt/lane1");
+}
+
+#[test]
+fn a_worktree_whose_lane_is_not_proven_on_main_is_a_live_lane() {
+    closes_with("tidy.live-lane", |e| { e.unmerged.insert("lane1".into()); }, "/wt/lane1");
+}
+
+#[test]
+fn the_main_checkout_is_never_tidied() {
+    closes_with("tidy.main-checkout", |e| e.main_checkout = Some("/wt/lane1".into()), "/wt/lane1");
+}
+
+#[test]
+fn a_worktree_on_a_branch_the_batch_does_not_own_is_not_owned() {
+    closes_with("tidy.not-owned", |e| { e.wt_branch.insert("/wt/lane1".into(), "someone-elses".into()); }, "/wt/lane1");
+}
+
+#[test]
+fn an_item_in_use_is_refused() {
+    closes_with("tidy.in-use", |e| { e.in_use.insert(TGT.into(), "the host lock is held by run b9-p1".into()); }, TGT);
+    closes_with("tidy.in-use", |e| { e.in_use.insert("mr-gate-b1-pg".into(), "container mr-gate-b1-pg is running".into()); }, "mr-gate-b1-pg");
+}
+
+#[test]
+fn a_branch_without_a_local_archive_tag_is_refused() {
+    closes_with("tidy.no-archive-tag", |e| { e.tags.clear(); }, BR);
+}
+
+#[test]
+fn an_unreadable_item_is_refused_not_guessed() {
+    closes_with("tidy.unreadable", |e| { e.unreadable.insert(TGT.into()); }, TGT);
+}
+
+#[test]
+fn a_failed_move_leaves_the_batch_live_with_check_not_clean() {
+    closes_with("tidy.check-not-clean", |e| { e.fail_dispose.insert(TMP.into()); }, "never-matches");
+    // and it is tried again at the next advance: once the move works the batch closes
+    let mut fx = live_fx();
+    let mut env = full_env();
+    env.fail_dispose.insert(TMP.into());
+    let adm = CloseAdm::new(env);
+    assert!(matches!(fx.adv_with("b1", &adm), Outcome::Refused { rule, .. } if rule == "tidy.check-not-clean"));
+    assert_eq!(fx.state("b1"), "live");
+    let healed = CloseAdm::new({
+        let mut e = FakeCloseEnv::with(&[("tmp", TMP)]);
+        e.lane_worktrees = vec![];
+        e
+    });
+    assert!(matches!(fx.adv_with("b1", &healed), Outcome::Advanced { to, .. } if to == "closed"));
+}
+
+#[test]
+fn a_refusal_never_blocks_the_next_batch_and_a_person_may_close_with_residue() {
+    let mut fx = live_fx();
+    let adm = CloseAdm::new({
+        let mut e = full_env();
+        e.dirty.insert("/wt/lane1".into());
+        e
+    });
+    assert!(matches!(fx.adv_with("b1", &adm), Outcome::Refused { .. }));
+    // another batch opens and advances while b1 is still live
+    let repo = fx.repo.clone();
+    fx.open_on("b2", "main", &repo, &[]).unwrap();
+    assert!(matches!(fx.adv_with("b2", &adm), Outcome::Advanced { to, .. } if to == "stacked"));
+    // a reason is required; with one, the batch closes and the residue is on the record
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), crash_after_effect: None };
+    assert!(e.close_with_residue("b1", " ").is_err());
+    let o = e.close_with_residue("b1", "the lane worktree is kept on purpose").unwrap();
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
+    let rows = fx.rows("close.with-residue");
+    assert_eq!(rows, vec![("override".to_string(), "recorded".to_string())]);
+    assert_eq!(fx.state("b1"), "closed");
+}
+
+#[test]
+fn without_the_close_tidy_setting_close_is_immediate_as_before() {
+    let mut fx = live_fx();
+    fx.cfg.close_tidy = false;
+    fx.step("b1", "closed");
+}
+
+// ---- the disk floor (T3, T4)
+
+#[test]
+fn below_the_floor_with_policy_the_engine_tidies_once_measures_again_and_admits() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let adm = CloseAdm::floor(vec![Some(("host.refuse-disk", "free 5 GB - predicted 8 GB < min_free_gb 10")), None]);
+    let o = fx.adv_with("b1", &adm);
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "preflighted"), "{o:?}");
+    assert_eq!(adm.tidies.get(), 1);
+    assert_eq!(fx.rows("tidy.auto-disk"), vec![("tidy".to_string(), "recovered".to_string())]);
+    assert!(fx.rows("host.refuse-disk").is_empty());
+}
+
+#[test]
+fn still_below_after_the_tidy_is_one_tidy_row_and_one_refusal_row() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let adm = CloseAdm::floor(vec![Some(("host.refuse-disk", "free 5 GB < floor")), Some(("host.refuse-disk", "free 6 GB < floor"))]);
+    let o = fx.adv_with("b1", &adm);
+    assert!(matches!(&o, Outcome::Refused { rule, because, .. } if rule == "host.refuse-disk" && because.contains("tidy:auto")), "{o:?}");
+    assert_eq!(o.exit_code(), 77);
+    assert_eq!(adm.tidies.get(), 1, "tidied once, not in a loop");
+    assert_eq!(fx.rows("tidy.auto-disk"), vec![("tidy".to_string(), "still-below".to_string())]);
+    assert_eq!(fx.rows("host.refuse-disk").len(), 1);
+    assert_eq!(fx.state("b1"), "settled");
+}
+
+#[test]
+fn without_the_policy_the_engine_does_not_tidy_it_only_refuses() {
+    let mut fx = Fx::new("");
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let adm = CloseAdm::floor(vec![Some(("host.refuse-disk", "free 5 GB < floor"))]);
+    assert!(matches!(fx.adv_with("b1", &adm), Outcome::Refused { rule, .. } if rule == "host.refuse-disk"));
+    assert_eq!(adm.tidies.get(), 0);
+    assert!(fx.rows("tidy.auto-disk").is_empty());
+}
+
+#[test]
+fn another_refusal_than_disk_never_triggers_a_tidy() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let adm = CloseAdm::floor(vec![Some(("host.refuse-memory", "no"))]);
+    assert!(matches!(fx.adv_with("b1", &adm), Outcome::Refused { rule, .. } if rule == "host.refuse-memory"));
+    assert_eq!(adm.tidies.get(), 0);
+}
+
+#[test]
+fn still_below_on_two_batches_in_a_row_is_a_founder_escalation() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    for id in ["b1", "b2"] {
+        fx.open(id);
+        fx.step(id, "stacked");
+        fx.step(id, "settled");
+        let adm = CloseAdm::floor(vec![Some(("host.refuse-disk", "low")), Some(("host.refuse-disk", "still low"))]);
+        assert!(matches!(fx.adv_with(id, &adm), Outcome::Refused { .. }));
+        let esc = fx.ledger.conn.query_row("SELECT COUNT(*) FROM decisions WHERE rule='host.disk-escalation' AND batch=?", [id], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(esc, if id == "b2" { 1 } else { 0 }, "{id}");
+    }
+}
+
+// ---- the legacy stamp bridge
+
+#[test]
+fn the_legacy_stamp_command_runs_after_a_green_launched_preflight_with_the_sha_and_the_results_path() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    let out = fx.root().join("legacy.out");
+    fx.cfg.legacy_stamp_command = vec!["sh".into(), "-c".into(), format!("echo \"$0 $1\" > '{}'", fwd(&out)), "{sha}".into(), "{results}".into()];
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    let sha = fx.lock.launches.lock().unwrap()[0].sha.clone();
+    fx.pf_log("preflight", GREEN);
+    fx.pf_stamp(&sha);
+    fx.step("b1", "preflighted");
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.starts_with(&sha) && text.trim().ends_with(&format!("stamp-{sha}.json")), "{text}");
+}
+
+#[test]
+fn a_failing_legacy_stamp_command_keeps_the_batch_preflighting_and_is_tried_again() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.cfg.legacy_stamp_command = vec!["sh".into(), "-c".into(), "exit 4".into()];
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    let sha = fx.lock.launches.lock().unwrap()[0].sha.clone();
+    fx.pf_log("preflight", GREEN);
+    fx.pf_stamp(&sha);
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "preflight.legacy-stamp");
+    assert!(because.contains("exited 4"), "{because}");
+    assert_eq!(fx.state("b1"), "preflighting");
+    fx.cfg.legacy_stamp_command = vec!["sh".into(), "-c".into(), "exit 0".into()];
+    fx.step("b1", "preflighted");
+}

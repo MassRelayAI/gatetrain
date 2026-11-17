@@ -115,3 +115,26 @@ fn a_host_that_fails_doctor_refuses_the_batch_with_79_and_a_host_that_passes_doe
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     assert!(out(&gt(&["batch", "status", "b1", "--db", &fx.db])).contains("b1: preflighted"));
 }
+
+#[test]
+fn the_batch_verbs_retry_restack_note_cause_and_close_exist_and_answer_for_a_batch_in_the_wrong_state() {
+    let fx = Fx::new("");
+    let run = |args: &[&str]| {
+        let mut a = vec!["batch"];
+        a.extend(args);
+        a.extend(["--db", &fx.db]);
+        gt(&a)
+    };
+    let o = run(&["retry", "b1"]);
+    assert_eq!(o.status.code(), Some(0));
+    assert!(out(&o).contains("not red"), "{}", out(&o));
+    let o = run(&["restack", "b1"]);
+    assert!(out(&o).contains("not stacked on another batch"), "{}", out(&o));
+    let o = run(&["note-cause", "b1", "flake", "a reason"]);
+    assert!(out(&o).contains("not red"), "{}", out(&o));
+    let o = run(&["close", "b1"]);
+    assert!(out(&o).contains("not live"), "{}", out(&o));
+    // closing with residue needs a reason, and only a live batch can be closed
+    let o = run(&["close", "b1", "--with-residue", "--reason", "x"]);
+    assert!(out(&o).contains("not live"), "{}", out(&o));
+}

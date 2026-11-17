@@ -120,3 +120,57 @@ fn a_light_run_is_admitted_on_the_steps_of_the_preflight_not_the_chain() {
     assert_eq!(a.admit("light", "b").unwrap(), None, "4 GB of pre-flight steps fit");
     assert!(a.admit("proof", "b").unwrap().is_some(), "the proof is still judged on the chain's steps");
 }
+
+fn floor_adm(d: &Path, uses: &str, min_free: &str) -> MemoryAdmission {
+    let hosts = d.join("hosts-floor.toml");
+    let disk = d.to_string_lossy().replace('\\', "/");
+    std::fs::write(&hosts, format!("[[hosts]]\nname = \"host-a\"\nmemory_gb = 64\nmemory_reserve_gb = 2\nstep_default_gb = 1\n[[hosts.disks]]\npath = \"{disk}\"\nmin_free_gb = {min_free}\nuse = [\"{uses}\"]\n")).unwrap();
+    let mut a = MemoryAdmission::new(d.join("host.lock"), d.join("g.db"), Some((hosts, "host-a".into())), vec![]);
+    a.disk_floor = true;
+    a
+}
+
+#[test]
+fn the_disk_floor_refuses_an_unknown_growth_and_admits_a_known_one_that_fits() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "chain", "0");
+    let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("unknown growth refuses");
+    assert_eq!(rule, "host.refuse-disk");
+    assert!(why.contains("unknown"), "{why}");
+    a.needs_chain_gb = Some(0.001);
+    assert_eq!(a.admit_rule("proof", "b").unwrap(), None, "a tiny growth fits");
+}
+
+#[test]
+fn the_disk_floor_refuses_when_free_minus_growth_is_below_the_minimum() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "chain", "0");
+    a.needs_chain_gb = Some(1.0e9);
+    let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
+    assert_eq!(rule, "host.refuse-disk");
+    assert!(why.contains("min_free_gb") && why.contains("predicted growth"), "{why}");
+    // a floor that is off changes nothing
+    a.disk_floor = false;
+    assert_eq!(a.admit_rule("proof", "b").unwrap(), None);
+}
+
+#[test]
+fn the_disk_floor_looks_only_at_the_disk_whose_use_covers_the_run() {
+    let d = tempfile::tempdir().unwrap();
+    // the only disk is for the chain: a light run (preflight) is not judged by it
+    let mut a = floor_adm(d.path(), "chain", "0");
+    a.needs_preflight_gb = Some(1.0e9);
+    assert_eq!(a.admit_rule("light", "b").unwrap(), None);
+    // the same disk for preflight: now it is
+    let mut a = floor_adm(d.path(), "preflight", "0");
+    a.needs_preflight_gb = Some(1.0e9);
+    assert!(a.admit_rule("light", "b").unwrap().is_some());
+}
+
+#[test]
+fn light_while_proving_is_a_known_host_key_and_is_read_from_the_file() {
+    let text = "[[hosts]]\nname = \"h\"\nlight_while_proving = true\n[[hosts]]\nname = \"g\"\n";
+    gatetrain_core::config::validate_text(text).unwrap();
+    assert!(gatetrain_core::hostlock::host_flag(text, "h", "light_while_proving"));
+    assert!(!gatetrain_core::hostlock::host_flag(text, "g", "light_while_proving"));
+}
