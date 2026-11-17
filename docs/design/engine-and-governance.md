@@ -60,14 +60,14 @@ merge; the branches get archive tags, nothing is deleted).
 
 | # | from -> to | guards (all must hold) | effect |
 |---|---|---|---|
-| T1 | `open` -> `stacked` | every lane carries the reviews its risk tags need, bound to its current tip (6.4); the base is an ancestor of every lane; `lanes` reports no certain conflict the stack strategy has no resolver for | create `batch/<id>/s<n>` at the base, apply each lane's own commits through the stack strategy (7.1), check that every lane's tip subject is in the result (L33) |
+| T1 | `open` -> `stacked` | every lane carries the reviews its risk tags need, bound to its current tip (6.4); the base is an ancestor of every lane; **when `[lanes] require_stamp` is on, every lane tip has a green lane stamp (6.7a, `stack.lane-stamp`)**; `lanes` reports no certain conflict the stack strategy has no resolver for | create `batch/<id>/s<n>` at the base, apply each lane's own commits through the stack strategy (7.1), check that every lane's tip subject is in the result (L33) |
 | T2 | `stacked` -> `settled` | the tree is clean apart from generated paths | run the regen command until a pass changes nothing (at most `max_passes`), commit the changed and new files inside the generated directories by name |
 | T3 | `settled` -> `preflighted` | a light host has a free slot and passes `doctor` for `preflight` | run the preflight command there; green writes a stamp for exactly this sha |
-| T4 | `preflighted` -> `proving` | the stamp matches the tip; a proof host is free (no lease, no lock, no chain process), awake, and passes `doctor` for `chain`; the full-chain budget is not spent | take the lease, start the holder with the chain command (4.3), record the run |
+| T4 | `preflighted` -> `proving` | the stamp matches the tip; a proof host is free (no lease, no lock, no chain process), awake, and passes `doctor` for `chain`; the full-run budget is not spent (`[chain] max_full_runs_per_batch`, `budget.full-runs`) | take the lease, start the holder with the chain command (4.3), record the run |
 | T5 | `proving` -> `proven` | the log ends with `GATES_DONE`, mode is `full`, zero red steps, the log's commit equals the recorded tested sha, cached steps are allowed and verified | write the proof record, release the lease |
 | T5r | `proving` -> `red` | `GATES_DONE` with at least one red | run `diagnose`, store findings, release the lease |
 | T5s | `proving` -> `preflighted` | no `GATES_DONE`, the holder is gone or the host rebooted | mark the run `stopped` (not red, L42), release the lease, charge the infra budget |
-| T6a | `red` -> `proving` | every red is in a retryable class and inside its budget (5.3) | red-only rerun of exactly those steps on the same sha and host |
+| T6a | `red` -> `proving` | every cause of the last red run is addressed: the batch tip moved past the tested sha (at least one new commit), or a person recorded the red as a `flake` or `infra` with a reason (`retry.causes-open`); the full-run budget is not spent (`budget.full-runs`); then the T4 launch guards (stamp for the tip, clean tree, proof host admitted); the retry classes of 5.3 arrive with `diagnose` | a full rerun on the tip under a new run id and log (T4 and T6a share one run sequence). The red-only form of 5.4 is a later slice |
 | T6b | `red` -> `stacked` | a patch was applied to the batch (automatic or by a person) | new tip sha; every stamp and proof for the old sha is void |
 | T6c | `red` -> `held` | any red is not automatic, or a budget is spent | escalation bundle (5.5) |
 | T7 | `proven` -> `merged` | section 6.3: tested sha equals the tip equals the commit being merged; the protected branch can fast-forward to it; approvals the policy asks for exist | compare-and-swap the protected ref from its recorded old value to the proven sha |
@@ -260,7 +260,7 @@ From `[rerun]` in the policy file; none has a default higher than shown.
 | `per_step_per_sha` | 1 | a retry of one step on one sha |
 | `per_batch` | 3 | every flake retry in the batch |
 | `infra_per_batch` | 2 | stopped runs and infra retries |
-| `full_chains_per_batch` | 4 | every full proof chain; when spent, the batch is `held` |
+| `full_chains_per_batch` | 4 | every full proof chain; when spent, the batch is `held`. In `gatetrain.toml` today: `[chain] max_full_runs_per_batch` (default unlimited), refusal `budget.full-runs`; a launch counts when it is not later `stopped` (T5s) |
 | `flake_window` | 2 flakes in 10 batches | a step over it is `real` until a person resets it |
 
 ### 5.4 A flake must never hide a real red
@@ -503,6 +503,23 @@ REFUSED merge batch-42
 Exit code 3 means "refused by a rule" (0 advanced or nothing to do, 1 failed, 2 usage or config). `gatetrain policy explain <rule>`
 prints the rule, where it is set, and the last decisions that cited it.
 
+### 6.7a Batch engine refusals
+
+Each is a `refusal` entry in the decision log (an identical repeat is not logged twice), exit code 3, and leaves the batch where it is.
+Rules added by ADR 002 are marked.
+
+| rule id | transition | refused when | to proceed |
+|---|---|---|---|
+| `stack.base-ancestor` | T1 | the base is not an ancestor of a lane | rebase the lane |
+| `stack.lane-stamp` (ADR 002) | T1 | `[lanes] require_stamp = true` and a lane tip has no `<stamp_dir>/stamp-<tip sha>.json` naming that sha; every such lane is named | run `gatetrain chain` green on that lane tip |
+| `settle.tip-moved` | T3, T4 | the branch moved after settle | settle again |
+| `preflight.stamp-for-sha` | T4, T6a | no green preflight stamp for the tip | preflight the tip |
+| `retry.causes-open` (ADR 002) | T6a | the last proof run was red, the tip is still the tested sha, and no cause note covers that run | commit a fix, or `note_cause` `flake` or `infra` with a reason |
+| `budget.full-runs` (ADR 002) | T4, T6a | `[chain] max_full_runs_per_batch` full runs are already used | a person raises the budget, or abandons the batch |
+
+A cause note is a decision-log entry of kind `override`, rule `retry.cause-noted`, evidence `{run_id, class, tested_sha}`. It covers
+that run only: a second red run needs its own fix or note.
+
 ### 6.8 The decision log
 
 One append-only table, `decisions`, with update and delete triggers that abort. Each entry:
@@ -569,6 +586,10 @@ branch       = "batch/{batch}/s{attempt}"
 hubs         = [{ glob = "**/routes.json", rebuild = ["tools/merge-json", "{base}", "{ours}", "{theirs}"] }]
 resolvers    = [{ glob = "tests/**", take = "lane" }, { glob = "**/*.lock", take = "manual" }]
 
+[lanes]
+require_stamp = true                         # optional; default off (stack.lane-stamp)
+stamp_dir     = "ci/stamps"                  # where `gatetrain chain` wrote stamp-<sha>.json; relative to the batch checkout
+
 [regen]
 command        = ["tools/regen-all"]
 max_passes     = 3
@@ -580,6 +601,7 @@ command = ["tools/preflight"]
 
 [chain]
 command          = ["tools/run-chain"]       # must print the log format of docs/log-format.md
+max_full_runs_per_batch = 4                  # optional; default unlimited (budget.full-runs)
 red_only_command = ["tools/run-chain", "--only", "{steps}"]
 preview_command  = ["tools/run-chain", "--preview"]
 
