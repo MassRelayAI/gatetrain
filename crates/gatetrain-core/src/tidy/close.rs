@@ -59,6 +59,17 @@ pub struct OwnedSet {
     pub shared_targets: Vec<String>,
 }
 
+/// How a target or temp folder meets the registered worktrees.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WtOverlap {
+    /// It is no worktree and sits in none (other than the main checkout, which is judged on its own).
+    None,
+    /// It is this registered worktree, by some spelling.
+    Is(String),
+    /// It sits inside this worktree; `work` = it holds a tracked file or an untracked file that is not ignored (`None`: unknown).
+    Inside { worktree: String, work: Option<bool> },
+}
+
 /// What close needs to know and do. Every probe may fail or be unknown; unknown is never read as safe.
 pub trait CloseEnv {
     fn exists(&self, kind: &str, key: &str) -> Result<Option<bool>>;
@@ -74,6 +85,10 @@ pub trait CloseEnv {
     /// A registered worktree other than `path` itself sits inside `path`.
     fn contains_worktree(&self, _path: &str) -> Result<bool> {
         Ok(false)
+    }
+    /// For a target or temp folder: whether it is a registered worktree or sits inside one, and then whether it holds work.
+    fn worktree_overlap(&self, _path: &str) -> Result<WtOverlap> {
+        Ok(WtOverlap::None)
     }
     /// The path sits strictly below one of `roots`, by every spelling this environment can see (as written, and where it leads).
     fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
@@ -212,6 +227,13 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
             return refuse("tidy.not-owned", format!("{key} contains a registered worktree; it is not moved with its contents"));
         }
         if matches!(kind, "target" | "tmp") {
+            // a worktree goes only as a worktree (dirty, locked, live-lane and keep checks); a folder inside one only when it holds no work
+            match env.worktree_overlap(key)? {
+                WtOverlap::Is(w) => return refuse("tidy.not-owned", format!("{key} is the registered worktree {w}; a worktree is closed only as a worktree, with its checks")),
+                WtOverlap::Inside { worktree, work: Some(true) } => return refuse("tidy.not-owned", format!("{key} sits inside the worktree {worktree} and holds tracked or uncommitted files")),
+                WtOverlap::Inside { worktree, work: None } => return refuse("tidy.unreadable", format!("whether {key} (inside the worktree {worktree}) holds tracked or uncommitted files could not be read")),
+                WtOverlap::Inside { work: Some(false), .. } | WtOverlap::None => {}
+            }
             for s in &set.shared_targets {
                 if env.overlaps(key, s)? {
                     return refuse("tidy.not-owned", format!("{key} is, holds or sits inside the shared [chain] target_dirs folder {s}; it is never one batch's"));
@@ -448,6 +470,34 @@ impl CloseEnv for OpsEnv<'_> {
             }
         }
         Ok(false)
+    }
+    fn worktree_overlap(&self, path: &str) -> Result<WtOverlap> {
+        let forms = self.item_forms(path)?;
+        let mut inside_of: Option<String> = None;
+        for w in self.ops.worktrees().map_err(e)? {
+            let wf = self.place_forms(&w.path)?;
+            if wf.iter().any(|x| forms.contains(x)) {
+                return Ok(WtOverlap::Is(w.path));
+            }
+            if inside_of.is_none() && wf.iter().any(|x| forms.iter().any(|f| inside(f, x))) {
+                inside_of = Some(w.path);
+            }
+        }
+        let Some(worktree) = inside_of else { return Ok(WtOverlap::None) };
+        // asked from the folder itself (`.`), so no relative path is rebuilt from a normalised spelling
+        let mut work = Some(false);
+        for a in [&["ls-files", "--", "."][..], &["status", "--porcelain", "--", "."][..]] {
+            let c = self.ops.git(path, a).map_err(e)?;
+            if !c.ok() {
+                work = None;
+                break;
+            }
+            if !c.out.trim().is_empty() {
+                work = Some(true);
+                break;
+            }
+        }
+        Ok(WtOverlap::Inside { worktree, work })
     }
     fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
         // below a root as written, and where it sits below where that root leads
@@ -763,6 +813,9 @@ impl CloseEnv for OwnedEnv {
     }
     fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
         self.with(|e| e.owned_under(path, roots))
+    }
+    fn worktree_overlap(&self, path: &str) -> Result<WtOverlap> {
+        self.with(|e| e.worktree_overlap(path))
     }
     fn holds_main_checkout(&self, path: &str) -> Result<bool> {
         self.with(|e| e.holds_main_checkout(path))
