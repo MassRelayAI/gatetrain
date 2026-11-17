@@ -13,7 +13,7 @@
 use super::apply::do_item;
 use super::config::TidyCfg;
 use super::inventory::{Extra, Item};
-use super::ops::{norm, Fatal, Ops};
+use super::ops::{lane_of, norm, Fatal, Ops};
 use crate::{Error, Result};
 
 /// Refusal codes (decision-log rules).
@@ -73,6 +73,18 @@ pub trait CloseEnv {
     fn contains_worktree(&self, _path: &str) -> Result<bool> {
         Ok(false)
     }
+    /// The path sits strictly below one of `roots`, by every spelling this environment can see (as written, and where it leads).
+    fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
+        Ok(roots.iter().any(|r| inside(path, r)))
+    }
+    /// The main checkout (or the root checkout) is `path` or sits below it: such a folder can never be a `[close]` root.
+    fn holds_main_checkout(&self, _path: &str) -> Result<bool> {
+        Ok(false)
+    }
+    /// Why the tidy config keeps it: the worktree's lane is in `keep_lanes` (any case) or the branch is in `keep_branches`.
+    fn kept(&self, _worktree: Option<&str>, _branch: Option<&str>) -> Option<String> {
+        None
+    }
     fn worktree_branch(&self, path: &str) -> Result<Option<String>>;
     fn worktree_locked(&self, _path: &str) -> Result<bool> {
         Ok(false)
@@ -124,9 +136,22 @@ impl CloseReport {
     }
 }
 
-fn under(path: &str, root: &str) -> bool {
+/// `path` is `root` or sits below it (normalised spellings, nothing resolved).
+fn at_or_under(path: &str, root: &str) -> bool {
     let (p, r) = (norm(path), norm(root));
     p == r || p.starts_with(&format!("{}/", r.trim_end_matches('/')))
+}
+
+/// `path` sits strictly below `root`: a record that names a root itself never owns the whole root.
+fn inside(path: &str, root: &str) -> bool {
+    at_or_under(path, root) && norm(path) != norm(root)
+}
+
+/// A file-system root (`/`, `C:/`, `//host/share`): never a `[close]` root, since it would own every path.
+pub fn is_fs_root(p: &str) -> bool {
+    let n = norm(p.trim());
+    let b = n.as_bytes();
+    n.is_empty() || (b.len() == 2 && b[1] == b':') || (n.starts_with("//") && n[2..].split('/').filter(|x| !x.is_empty()).count() <= 2)
 }
 
 fn row(code: &str, key: &str, why: impl Into<String>) -> Row {
@@ -157,8 +182,25 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
         if set.roots.is_empty() {
             return refuse("tidy.not-owned", format!("{key}: no [close] roots are configured, so no path is owned"));
         }
-        if !set.roots.iter().any(|r| under(key, r)) {
-            return refuse("tidy.not-owned", format!("{key} is not under any [close] root"));
+        let owning: Vec<&String> = set.roots.iter().filter(|r| inside(key, r)).collect();
+        if owning.is_empty() {
+            return refuse("tidy.not-owned", format!("{key} is not strictly below any [close] root"));
+        }
+        let (mut good, mut bad) = (vec![], vec![]);
+        for r in owning {
+            if is_fs_root(r) {
+                bad.push(format!("{r} is a file-system root"));
+            } else if env.holds_main_checkout(r)? {
+                bad.push(format!("{r} holds the main checkout"));
+            } else {
+                good.push(r.clone());
+            }
+        }
+        if good.is_empty() {
+            return refuse("tidy.not-owned", format!("{key} is only below [close] roots that can own nothing: {}", bad.join("; ")));
+        }
+        if !env.owned_under(key, &good)? {
+            return refuse("tidy.not-owned", format!("{key} leads outside every [close] root once its links are resolved"));
         }
         if env.contains_worktree(key)? {
             return refuse("tidy.not-owned", format!("{key} contains a registered worktree; it is not moved with its contents"));
@@ -170,6 +212,9 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
     let mut cleared = Cleared::default();
     if kind == "worktree" {
         let b = env.worktree_branch(key)?;
+        if let Some(why) = env.kept(Some(key), b.as_deref()) {
+            return refuse("tidy.protected", why);
+        }
         match &b {
             Some(b) if set.branches.contains(b) => {}
             None if set.chain_checkout.as_deref().is_some_and(|c| norm(c) == norm(key)) => {}
@@ -192,6 +237,9 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
         }
     }
     if kind == "branch" {
+        if let Some(why) = env.kept(None, Some(key)) {
+            return refuse("tidy.protected", why);
+        }
         let Some(sha) = env.resolve_branch(key)? else { return refuse("tidy.unreadable", format!("branch {key} cannot be resolved to one commit")) };
         match env.merged_sha(&sha)? {
             Some(true) => {}
@@ -315,6 +363,34 @@ impl OpsEnv<'_> {
         Ok(o.out.split_whitespace().map(String::from).collect())
     }
 
+    fn resolved(&self, p: &str, follow_last: bool) -> Result<String> {
+        let r = if follow_last { self.ops.rp(p) } else { self.ops.rpl(p) }.map_err(e)?;
+        r.ok_or_else(|| Error::Batch(format!("cannot resolve {p}; what cannot be located is never judged safe")))
+    }
+
+    /// An item's spellings: as written, where it sits (its parent resolved), and where it leads (a link followed).
+    fn item_forms(&self, p: &str) -> Result<Vec<String>> {
+        let mut v = vec![norm(p), self.resolved(p, false)?, self.resolved(p, true)?];
+        v.dedup();
+        Ok(v)
+    }
+
+    /// A place's spellings: as written and resolved.
+    fn place_forms(&self, p: &str) -> Result<Vec<String>> {
+        let mut v = vec![norm(p), self.resolved(p, true)?];
+        v.dedup();
+        Ok(v)
+    }
+
+    /// Every spelling of the main checkout and of the root checkout.
+    fn mains(&self) -> Result<Vec<String>> {
+        let mut v = vec![];
+        for m in [self.cfg.main_checkout.as_deref(), self.cfg.root_checkout.as_deref()].into_iter().flatten().filter(|m| !m.is_empty()) {
+            v.extend(self.place_forms(m)?);
+        }
+        Ok(v)
+    }
+
     fn rev(&self, r: &str) -> Result<Option<String>> {
         let c = self.ops.git(self.main()?, &["rev-parse", "--verify", "--quiet", r]).map_err(e)?;
         let s = c.out.trim().to_string();
@@ -336,14 +412,50 @@ impl CloseEnv for OpsEnv<'_> {
     fn reference_stack(&self, name: &str) -> Result<bool> {
         Ok(self.reference_prefixes.iter().any(|p| !p.is_empty() && name.starts_with(p.as_str())))
     }
+    // the main-checkout, worktree and root rules compare every spelling: as written and resolved, on both sides (a junction, a
+    // symlinked folder or a short name never makes a path look like somewhere else); a spelling that cannot be resolved is unreadable
     fn is_main_checkout(&self, path: &str) -> Result<bool> {
-        Ok([self.cfg.main_checkout.as_deref(), self.cfg.root_checkout.as_deref()].into_iter().flatten().any(|m| norm(m) == norm(path)))
+        let (forms, mains) = (self.item_forms(path)?, self.mains()?);
+        Ok(forms.iter().any(|f| mains.contains(f)))
     }
     fn in_main_checkout(&self, path: &str) -> Result<bool> {
-        Ok([self.cfg.main_checkout.as_deref(), self.cfg.root_checkout.as_deref()].into_iter().flatten().any(|m| under(path, m)))
+        let (forms, mains) = (self.item_forms(path)?, self.mains()?);
+        Ok(forms.iter().any(|f| mains.iter().any(|m| at_or_under(f, m))))
     }
     fn contains_worktree(&self, path: &str) -> Result<bool> {
-        Ok(self.ops.worktrees().map_err(e)?.into_iter().any(|w| norm(&w.path) != norm(path) && under(&w.path, path)))
+        let forms = self.item_forms(path)?;
+        let own = [norm(path), self.resolved(path, false)?];
+        for w in self.ops.worktrees().map_err(e)? {
+            let wf = self.place_forms(&w.path)?;
+            if wf.iter().any(|x| own.contains(x)) {
+                continue; // the worktree is the item itself
+            }
+            if wf.iter().any(|x| forms.iter().any(|f| at_or_under(x, f))) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
+        // below a root as written, and where it sits below where that root leads
+        let at = self.resolved(path, false)?;
+        for r in roots {
+            if inside(path, r) && inside(&at, &self.resolved(r, true)?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    fn holds_main_checkout(&self, path: &str) -> Result<bool> {
+        let (forms, mains) = (self.place_forms(path)?, self.mains()?);
+        Ok(mains.iter().any(|m| forms.iter().any(|f| at_or_under(m, f))))
+    }
+    fn kept(&self, worktree: Option<&str>, branch: Option<&str>) -> Option<String> {
+        if let Some(b) = branch.filter(|b| self.cfg.keep_branches.iter().any(|k| k == b)) {
+            return Some(format!("branch {b} is on the tidy config's keep_branches"));
+        }
+        let lane = lane_of(worktree?, self.cfg);
+        self.cfg.keep_lanes.iter().any(|k| k.to_lowercase() == lane.to_lowercase()).then(|| format!("lane {lane} is on the tidy config's keep_lanes"))
     }
     fn worktree_branch(&self, path: &str) -> Result<Option<String>> {
         Ok(self.ops.worktrees().map_err(e)?.into_iter().find(|w| norm(&w.path) == norm(path)).and_then(|w| w.branch))
@@ -399,7 +511,7 @@ impl CloseEnv for OpsEnv<'_> {
         if kind == "branch" {
             return Ok(None);
         }
-        if let Some((_, run)) = self.ops.hold_named().map_err(e)?.into_iter().find(|(p, _)| under(key, p) || under(p, key)) {
+        if let Some((_, run)) = self.ops.hold_named().map_err(e)?.into_iter().find(|(p, _)| at_or_under(key, p) || at_or_under(p, key)) {
             return Ok(Some(format!("the host lock is held by run {run}, which names {key}")));
         }
         match self.ops.recent(key, 60.0).map_err(e)? {
@@ -496,7 +608,7 @@ impl CloseEnv for FakeCloseEnv {
         Ok(Some(self.present.borrow().contains(&(kind.to_string(), key.to_string()))))
     }
     fn protected(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.protect.iter().find(|p| under(key, p) || under(p, key)).cloned())
+        Ok(self.protect.iter().find(|p| at_or_under(key, p) || at_or_under(p, key)).cloned())
     }
     fn reference_stack(&self, name: &str) -> Result<bool> {
         Ok(self.reference_prefixes.iter().any(|p| name.starts_with(p.as_str())))
@@ -505,10 +617,13 @@ impl CloseEnv for FakeCloseEnv {
         Ok(self.is_main(path))
     }
     fn in_main_checkout(&self, path: &str) -> Result<bool> {
-        Ok(self.main_checkout.as_deref().is_some_and(|m| under(path, m)))
+        Ok(self.main_checkout.as_deref().is_some_and(|m| at_or_under(path, m)))
     }
     fn contains_worktree(&self, path: &str) -> Result<bool> {
-        Ok(self.wt_branch.keys().any(|w| self.registered(w) && norm(w) != norm(path) && under(w, path)))
+        Ok(self.wt_branch.keys().any(|w| self.registered(w) && norm(w) != norm(path) && at_or_under(w, path)))
+    }
+    fn holds_main_checkout(&self, path: &str) -> Result<bool> {
+        Ok(self.main_checkout.as_deref().is_some_and(|m| at_or_under(m, path)))
     }
     fn worktree_branch(&self, path: &str) -> Result<Option<String>> {
         Ok(self.wt_branch.get(path).cloned())
@@ -616,6 +731,15 @@ impl CloseEnv for OwnedEnv {
     }
     fn contains_worktree(&self, path: &str) -> Result<bool> {
         self.with(|e| e.contains_worktree(path))
+    }
+    fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
+        self.with(|e| e.owned_under(path, roots))
+    }
+    fn holds_main_checkout(&self, path: &str) -> Result<bool> {
+        self.with(|e| e.holds_main_checkout(path))
+    }
+    fn kept(&self, worktree: Option<&str>, branch: Option<&str>) -> Option<String> {
+        self.with(|e| e.kept(worktree, branch))
     }
     fn worktree_branch(&self, path: &str) -> Result<Option<String>> {
         self.with(|e| e.worktree_branch(path))

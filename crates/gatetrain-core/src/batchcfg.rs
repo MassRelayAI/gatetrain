@@ -243,6 +243,9 @@ impl BatchConfig {
             if c.close_tidy && c.close_roots.is_empty() {
                 return Err(Error::Batch("gatetrain.toml: [close] tidy = true needs [close] roots (the folders a batch may tidy inside); without them nothing is owned".into()));
             }
+            if let Some(r) = c.close_roots.iter().find(|r| crate::tidy::close::is_fs_root(r)) {
+                return Err(Error::Batch(format!("gatetrain.toml: [close] roots names the file-system root {r:?}; a root owns every path below it, so it must be a folder of its own")));
+            }
         }
         c.tidy_auto = v.get("disk").and_then(|d| d.get("tidy_auto")).and_then(|b| b.as_bool()).unwrap_or(false);
         c.legacy_stamp_command = argv(v.get("preflight").and_then(|p| p.get("legacy_stamp_command")));
