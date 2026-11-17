@@ -79,47 +79,29 @@ pub trait CloseEnv {
     /// The path is the main checkout.
     fn is_main_checkout(&self, path: &str) -> Result<bool>;
     /// The path is the main checkout or sits inside it.
-    fn in_main_checkout(&self, path: &str) -> Result<bool> {
-        self.is_main_checkout(path)
-    }
+    fn in_main_checkout(&self, path: &str) -> Result<bool>;
     /// A registered worktree other than `path` itself sits inside `path`.
-    fn contains_worktree(&self, _path: &str) -> Result<bool> {
-        Ok(false)
-    }
+    fn contains_worktree(&self, path: &str) -> Result<bool>;
     /// Where the path sits, its parent's links resolved and the last component not followed: what a move of it acts on.
-    fn located(&self, path: &str) -> Result<String> {
-        Ok(path.to_string())
-    }
+    fn located(&self, path: &str) -> Result<String>;
     /// The tidy config's `keep_paths` entry the path is, holds or sits inside, by any spelling.
     fn kept_path(&self, path: &str) -> Result<Option<String>>;
     /// The folder holds a `.git` entry at its top: a repository of its own (an independent clone, a nested repository). `None`: unknown.
     fn own_repo(&self, path: &str) -> Result<Option<bool>>;
     /// For a target or temp folder: whether it is a registered worktree or sits inside one, and then whether it holds work.
-    fn worktree_overlap(&self, _path: &str) -> Result<WtOverlap> {
-        Ok(WtOverlap::None)
-    }
+    fn worktree_overlap(&self, path: &str) -> Result<WtOverlap>;
     /// The path sits strictly below one of `roots`, by every spelling this environment can see (as written, and where it leads).
-    fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
-        Ok(roots.iter().any(|r| spec_owns(path, r)))
-    }
+    fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool>;
     /// The main checkout (or the root checkout) is `path` or sits below it (for a prefix root: the root would own it): such a root can
     /// never own anything.
-    fn holds_main_checkout(&self, _path: &str) -> Result<bool> {
-        Ok(false)
-    }
+    fn holds_main_checkout(&self, path: &str) -> Result<bool>;
     /// `a` is `b`, sits inside it or holds it, by every spelling this environment can see.
-    fn overlaps(&self, a: &str, b: &str) -> Result<bool> {
-        Ok(at_or_under(a, b) || at_or_under(b, a))
-    }
+    fn overlaps(&self, a: &str, b: &str) -> Result<bool>;
     /// Why the tidy config keeps it: the lane of the path (a worktree, target or temp folder) or of a `line/<lane>` branch is in
     /// `keep_lanes` (any case), or the branch is in `keep_branches`.
-    fn kept(&self, _path: Option<&str>, _branch: Option<&str>) -> Option<String> {
-        None
-    }
+    fn kept(&self, path: Option<&str>, branch: Option<&str>) -> Option<String>;
     fn worktree_branch(&self, path: &str) -> Result<Option<String>>;
-    fn worktree_locked(&self, _path: &str) -> Result<bool> {
-        Ok(false)
-    }
+    fn worktree_locked(&self, path: &str) -> Result<bool>;
     fn dirty(&self, path: &str) -> Result<Option<bool>>;
     /// Whether the branch (by name) is proven on main: the proof of a worktree's lane.
     fn merged_on_main(&self, branch: &str) -> Result<Option<bool>>;
@@ -136,9 +118,7 @@ pub trait CloseEnv {
     /// Why the item is in use: the lock is held, it was written within 60 minutes, the container is running.
     fn in_use(&self, kind: &str, key: &str) -> Result<Option<String>>;
     /// Worktrees (other than the main checkout) that sit on one of these branches: the lane worktrees of the batch.
-    fn worktrees_on(&self, _branches: &[String]) -> Result<Vec<String>> {
-        Ok(vec![])
-    }
+    fn worktrees_on(&self, branches: &[String]) -> Result<Vec<String>>;
     /// Move a target or temp folder to `trash_dir`, remove a worktree, remove a container by exact name. `Err(why)` = it did not go.
     fn dispose(&self, kind: &str, key: &str) -> Result<std::result::Result<(), String>>;
 }
@@ -818,6 +798,18 @@ impl CloseEnv for FakeCloseEnv {
     }
     fn kept_path(&self, _path: &str) -> Result<Option<String>> {
         Ok(None)
+    }
+    fn worktree_overlap(&self, _path: &str) -> Result<WtOverlap> {
+        Ok(WtOverlap::None)
+    }
+    fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
+        Ok(roots.iter().any(|r| spec_owns(path, r)))
+    }
+    fn overlaps(&self, a: &str, b: &str) -> Result<bool> {
+        Ok(at_or_under(a, b) || at_or_under(b, a))
+    }
+    fn kept(&self, _path: Option<&str>, _branch: Option<&str>) -> Option<String> {
+        None
     }
     fn own_repo(&self, _path: &str) -> Result<Option<bool>> {
         Ok(Some(false))

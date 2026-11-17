@@ -542,3 +542,50 @@ fn r4minor4_a_folder_of_a_worktree_written_in_another_case_is_still_seen_as_trac
     assert!(wt.join("src/a.rs").exists(), "{rep:?}, trash {:?}", f.trash());
     assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
 }
+
+#[test]
+fn r4minor2_a_close_through_the_owned_env_the_cli_uses_closes_what_is_clean_and_keeps_the_rest() {
+    use gatetrain_core::tidy::close::OwnedEnv;
+    let f = fx();
+    let clean = f.sib("a"); // merged, clean: goes with its branch
+    let dirty = f.sib("b");
+    write(dirty.join("notes.txt"), "never added\n");
+    age(&dirty);
+    git(&f.main, &["worktree", "add", "-q", "-b", "line/k", &(fwd(&f.build) + "/wt-k")]);
+    let kept = f.build.join("wt-k");
+    write(kept.join(".gitignore"), "target/\n");
+    git(&kept, &["add", "."]);
+    git(&kept, &["commit", "-q", "-m", "ignore target"]);
+    write(kept.join("target/x.o"), "obj\n");
+    age(&kept);
+    dir_link(&f.build.join("lnk"), &f.main);
+    let mut tidy = f.tidy(&fwd(&f.main));
+    for (k, v) in json!({"keep_lanes": ["k"], "worktree_prefix": "wt-"}).as_object().unwrap() {
+        tidy.as_object_mut().unwrap().insert(k.clone(), v.clone());
+    }
+    let h = Host { name: "real".into(), tidy: to_table(&tidy), ..Default::default() };
+    let cfg = Config { hosts: vec![h.clone()], ..Default::default() };
+    let t = build_cfg(&cfg, &h).unwrap();
+    let env = OwnedEnv { host: h, runner: Box::new(LocalRunner), cfg: t, reference_prefixes: vec![] };
+    let r = fwd(&f.root);
+    let items = vec![
+        OwnedItem::new("worktree", &(r.clone() + "/main-wt-a")),
+        OwnedItem::new("worktree", &(r.clone() + "/main-wt-b")),
+        OwnedItem::new("target", &(fwd(&f.build) + "/wt-k/target")),
+        OwnedItem::new("target", &(fwd(&f.build) + "/lnk/shared")),
+        OwnedItem::new("branch", "line/a"),
+        OwnedItem::new("branch", "line/b"),
+    ];
+    let roots = vec![format!("prefix:{r}/main-wt-"), fwd(&f.build)];
+    let set = OwnedSet { items, branches: vec!["line/a".into(), "line/b".into()], chain_checkout: None, roots, shared_targets: vec![] };
+    let rep = run_close(&set, &env);
+    let code = |k: &str| rep.refusals.iter().find(|x| x.key.ends_with(k)).map(|x| x.code.clone()).unwrap_or_default();
+    assert!(!clean.exists() && rep.done.iter().any(|d| d.ends_with("/main-wt-a")), "{rep:?}");
+    // the worktree's removal deletes its branch by sha, so the branch item is already gone when it is looked at
+    assert!(git(&f.main, &["branch", "--list", "line/a"]).trim().is_empty() && (rep.gone.contains(&"line/a".to_string()) || rep.done.contains(&"line/a".to_string())), "{rep:?}");
+    assert!(dirty.join("notes.txt").exists() && code("/main-wt-b") == "tidy.uncommitted", "{rep:?}");
+    assert!(code("line/b") == "tidy.in-use", "the branch stays with its worktree: {rep:?}");
+    assert!(kept.join("target/x.o").exists() && code("/wt-k/target") == "tidy.protected", "{rep:?}");
+    assert!(f.main.join("shared/keep.txt").exists() && code("/lnk/shared") == "tidy.main-checkout", "{rep:?}");
+    assert!(f.main.join("f.txt").exists() && !git(&f.main, &["tag", "--list", "archive/line/a"]).trim().is_empty());
+}
