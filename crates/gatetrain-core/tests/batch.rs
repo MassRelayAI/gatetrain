@@ -2488,3 +2488,11 @@ fn minor2_an_escalation_already_on_record_for_the_batch_is_not_written_again() {
     assert_eq!(fx.rows("tidy.auto-disk").len(), 2, "both batches tidied once");
     assert_eq!(fx.rows("host.disk-escalation").len(), 1, "one escalation for b2, not two");
 }
+
+#[test]
+fn ma7_a_prefix_root_needs_a_folder_and_a_non_empty_name_prefix() {
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"prefix:/repos/app-wt-\"]\n").is_ok());
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"prefix:/repos/\"]\n").is_err(), "an empty name prefix owns every sibling");
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"prefix:/app-wt-\"]\n").is_err(), "a prefix in a file-system root");
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"prefix:app-wt-\"]\n").is_err(), "no folder");
+}

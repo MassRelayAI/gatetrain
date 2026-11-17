@@ -252,3 +252,55 @@ fn ma6_a_kept_lane_keeps_its_target_and_temp_folder() {
     assert!(rep.done.is_empty() && rep.refusals.iter().filter(|r| r.code == "tidy.protected").count() == 2, "{rep:?}");
     assert!(sim.s().has("/build/targets/lane-a/debug/big.o") && sim.s().has("/build/tmp/lane-a"));
 }
+
+/// The sibling layout: main at /repo/main, a merged clean lane worktree beside it at /repo/main-wt-x, and an unrelated /repo/main-other.
+fn sibling_sim() -> (Shared, gatetrain_core::config::Host, gatetrain_core::tidy::config::TidyCfg) {
+    let (sim, h, t) = setup(json!({}));
+    {
+        let mut s = sim.s();
+        s.dir("/repo/main-wt-x", 10 * 86400);
+        s.file("/repo/main-wt-x/src.rs", 5, 10 * 86400);
+        s.dir("/repo/main-other", 10 * 86400);
+        s.file("/repo/main-other/keep.txt", 5, 10 * 86400);
+        s.worktrees.push(("/repo/main-wt-x".into(), "line/x".into()));
+        s.branches.push("line/x".into());
+        s.ancestors.insert("line/x".into());
+    }
+    (sim, h, t)
+}
+
+fn prefix_set(items: &[(&str, &str)], root: &str) -> OwnedSet {
+    let mut s = set(items, &["line/x"]);
+    s.roots = vec![root.into()];
+    s
+}
+
+#[test]
+fn ma7_a_prefix_root_closes_a_lane_worktree_that_sits_beside_main() {
+    let (sim, h, t) = sibling_sim();
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&prefix_set(&[("worktree", "/repo/main-wt-x")], "prefix:/repo/main-wt-"), &env_for(&ops, &t));
+    assert!(rep.clean() && rep.done == vec!["/repo/main-wt-x".to_string()], "{rep:?}");
+    assert!(!sim.s().has("/repo/main-wt-x"));
+    assert!(sim.s().has("/repo/main/a.rs"), "main untouched");
+}
+
+#[test]
+fn ma7_a_prefix_root_owns_neither_main_nor_a_sibling_without_the_prefix() {
+    let (sim, h, t) = sibling_sim();
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&prefix_set(&[("worktree", "/repo/main"), ("target", "/repo/main-other")], "prefix:/repo/main-wt-"), &env_for(&ops, &t));
+    assert!(rep.done.is_empty(), "{rep:?}");
+    assert!(rep.refusals.iter().any(|r| r.key == "/repo/main-other" && r.code == "tidy.not-owned"), "{rep:?}");
+    assert!(rep.refusals.iter().any(|r| r.key == "/repo/main"), "{rep:?}");
+    assert!(sim.s().has("/repo/main-other/keep.txt") && sim.s().has("/repo/main/a.rs"));
+}
+
+#[test]
+fn ma7_a_prefix_that_matches_the_main_checkouts_own_name_owns_nothing() {
+    let (sim, h, t) = sibling_sim();
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&prefix_set(&[("worktree", "/repo/main-wt-x")], "prefix:/repo/ma"), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned"), "{rep:?}");
+    assert!(sim.s().has("/repo/main-wt-x"));
+}
