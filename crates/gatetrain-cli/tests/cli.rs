@@ -62,10 +62,10 @@ fn ledger_migrate_old_format_keeps_rows_and_adds_v1() {
 
     let o = gt(&["ledger", "migrate", "--db", db.to_str().unwrap()]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    assert!(out(&o).contains("version 0 -> 5"), "{}", out(&o));
+    assert!(out(&o).contains("version 0 -> 8"), "{}", out(&o));
 
     let l = Ledger::open(&db).unwrap();
-    assert_eq!(l.version().unwrap(), 5);
+    assert_eq!(l.version().unwrap(), 8);
     assert_eq!(l.runs().unwrap().len(), 1, "old rows survive");
     assert_eq!(l.step_count("r1").unwrap(), 2);
     let tables: i64 = l.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('run_snapshots','decisions','run_current')", [], |r| r.get(0)).unwrap();
@@ -74,7 +74,7 @@ fn ledger_migrate_old_format_keeps_rows_and_adds_v1() {
 
     // idempotent
     let o = gt(&["ledger", "migrate", "--db", db.to_str().unwrap()]);
-    assert!(out(&o).contains("already at version 5"), "{}", out(&o));
+    assert!(out(&o).contains("already at version 8"), "{}", out(&o));
 }
 
 #[test]

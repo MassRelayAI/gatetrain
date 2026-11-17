@@ -81,7 +81,7 @@ fn a_wsl_vm_cap_lowers_the_total() {
 #[test]
 fn step_peaks_are_stored_append_only_and_typical_memory_is_a_median() {
     let mut l = Ledger::open_in_memory().unwrap();
-    assert_eq!(l.migrate().unwrap().1, 5);
+    assert_eq!(l.migrate().unwrap().1, 8);
     for (run, mb) in [("r1", 1000.0), ("r2", 3000.0), ("r3", 2000.0)] {
         l.record_step_peak(run, "test-api", mb, "cgroup", "2026-11-15T00:00:00Z").unwrap();
     }

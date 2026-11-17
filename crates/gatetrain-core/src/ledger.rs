@@ -167,8 +167,159 @@ CREATE TRIGGER IF NOT EXISTS step_shards_no_delete BEFORE DELETE ON step_shards
   BEGIN SELECT RAISE(ABORT, 'step_shards is append-only'); END;
 "#;
 
+/// Version 6 (engine v2 E6): what `probe` measured, per host and per disk. NULL = unknown, `unknown` (JSON) says why.
+const V6: &str = r#"
+CREATE TABLE IF NOT EXISTS host_probes (
+  host           TEXT NOT NULL,
+  at             TEXT NOT NULL,
+  os             TEXT,
+  arch           TEXT,
+  virt           TEXT,
+  cores          INTEGER,
+  mem_total_mb   REAL,
+  cpu_one_mbps   REAL,
+  cpu_all_mbps   REAL,
+  host_class     TEXT,
+  tool_versions  TEXT,
+  duration_ms    INTEGER,
+  unknown        TEXT,
+  PRIMARY KEY (host, at)
+);
+CREATE TABLE IF NOT EXISTS disk_probes (
+  host              TEXT NOT NULL,
+  at                TEXT NOT NULL,
+  path              TEXT NOT NULL,
+  device            TEXT,
+  fs_type           TEXT,
+  rotational        INTEGER,
+  rotational_source TEXT,
+  fsync_p50_ms      REAL,
+  fsync_p95_ms      REAL,
+  seq_write_mbps    REAL,
+  smallfile_per_s   REAL,
+  free_gb           REAL,
+  total_gb          REAL,
+  bytes_written     INTEGER,
+  duration_ms       INTEGER,
+  unknown           TEXT,
+  PRIMARY KEY (host, at, path)
+);
+CREATE TRIGGER IF NOT EXISTS host_probes_no_update BEFORE UPDATE ON host_probes
+  BEGIN SELECT RAISE(ABORT, 'host_probes is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS host_probes_no_delete BEFORE DELETE ON host_probes
+  BEGIN SELECT RAISE(ABORT, 'host_probes is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS disk_probes_no_update BEFORE UPDATE ON disk_probes
+  BEGIN SELECT RAISE(ABORT, 'disk_probes is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS disk_probes_no_delete BEFORE DELETE ON disk_probes
+  BEGIN SELECT RAISE(ABORT, 'disk_probes is append-only'); END;
+"#;
+
+/// Version 7 (engine v2 E7): the sampler. Columns are added to `host_samples` (which nothing wrote before); `disk_samples` is new.
+const V7: &str = r#"
+ALTER TABLE host_samples ADD COLUMN run_id TEXT;
+ALTER TABLE host_samples ADD COLUMN running_steps INTEGER;
+ALTER TABLE host_samples ADD COLUMN cpu_busy_pct REAL;
+ALTER TABLE host_samples ADD COLUMN iowait_pct REAL;
+ALTER TABLE host_samples ADD COLUMN mem_free_mb REAL;
+ALTER TABLE host_samples ADD COLUMN stall_io_some REAL;
+ALTER TABLE host_samples ADD COLUMN stall_io_full REAL;
+ALTER TABLE host_samples ADD COLUMN stall_cpu_some REAL;
+ALTER TABLE host_samples ADD COLUMN stall_mem_some REAL;
+CREATE TABLE IF NOT EXISTS disk_samples (
+  host       TEXT NOT NULL,
+  at         TEXT NOT NULL,
+  device     TEXT NOT NULL,
+  path       TEXT,
+  busy_pct   REAL,
+  read_mbps  REAL,
+  write_mbps REAL,
+  free_gb    REAL,
+  PRIMARY KEY (host, at, device)
+);
+CREATE TRIGGER IF NOT EXISTS host_samples_no_update BEFORE UPDATE ON host_samples
+  BEGIN SELECT RAISE(ABORT, 'host_samples is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS host_samples_no_delete BEFORE DELETE ON host_samples
+  BEGIN SELECT RAISE(ABORT, 'host_samples is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS disk_samples_no_update BEFORE UPDATE ON disk_samples
+  BEGIN SELECT RAISE(ABORT, 'disk_samples is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS disk_samples_no_delete BEFORE DELETE ON disk_samples
+  BEGIN SELECT RAISE(ABORT, 'disk_samples is append-only'); END;
+"#;
+
+/// Version 8 (engine v2 E8): the advice `advise` printed, and the later comparison of its prediction with what was measured.
+const V8: &str = r#"
+CREATE TABLE IF NOT EXISTS advice (
+  advice_id    TEXT PRIMARY KEY,
+  at           TEXT NOT NULL,
+  rule         TEXT NOT NULL,
+  host         TEXT,
+  subject      TEXT,
+  move_json    TEXT,
+  minutes_low  REAL,
+  minutes_high REAL,
+  confidence   TEXT NOT NULL,
+  evidence     TEXT,
+  config_hash  TEXT
+);
+CREATE TABLE IF NOT EXISTS advice_checks (
+  advice_id        TEXT NOT NULL,
+  run_id           TEXT NOT NULL,
+  at               TEXT NOT NULL,
+  measured_minutes REAL,
+  verdict          TEXT NOT NULL,
+  PRIMARY KEY (advice_id, run_id)
+);
+CREATE TRIGGER IF NOT EXISTS advice_no_update BEFORE UPDATE ON advice
+  BEGIN SELECT RAISE(ABORT, 'advice is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS advice_no_delete BEFORE DELETE ON advice
+  BEGIN SELECT RAISE(ABORT, 'advice is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS advice_checks_no_update BEFORE UPDATE ON advice_checks
+  BEGIN SELECT RAISE(ABORT, 'advice_checks is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS advice_checks_no_delete BEFORE DELETE ON advice_checks
+  BEGIN SELECT RAISE(ABORT, 'advice_checks is append-only'); END;
+"#;
+
 /// The schema version this binary writes.
-pub const CURRENT_VERSION: i64 = 5;
+pub const CURRENT_VERSION: i64 = 8;
+
+/// One row of `host_probes` (E6).
+#[derive(Debug, Clone, Default)]
+pub struct HostProbeRow {
+    pub host: String,
+    pub at: String,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+    pub virt: Option<String>,
+    pub cores: Option<i64>,
+    pub mem_total_mb: Option<f64>,
+    pub cpu_one_mbps: Option<f64>,
+    pub cpu_all_mbps: Option<f64>,
+    pub host_class: Option<String>,
+    pub tool_versions: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub unknown: Option<String>,
+}
+
+/// One row of `disk_probes` (E6).
+#[derive(Debug, Clone, Default)]
+pub struct DiskProbeRow {
+    pub host: String,
+    pub at: String,
+    pub path: String,
+    pub device: Option<String>,
+    pub fs_type: Option<String>,
+    pub rotational: Option<i64>,
+    pub rotational_source: Option<String>,
+    pub fsync_p50_ms: Option<f64>,
+    pub fsync_p95_ms: Option<f64>,
+    pub seq_write_mbps: Option<f64>,
+    pub smallfile_per_s: Option<f64>,
+    pub free_gb: Option<f64>,
+    pub total_gb: Option<f64>,
+    pub bytes_written: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub unknown: Option<String>,
+}
 
 pub struct Ledger {
     pub conn: Connection,
@@ -228,6 +379,15 @@ impl Ledger {
         }
         if from < 5 {
             tx.execute_batch(V5)?;
+        }
+        if from < 6 {
+            tx.execute_batch(V6)?;
+        }
+        if from < 7 {
+            tx.execute_batch(V7)?;
+        }
+        if from < 8 {
+            tx.execute_batch(V8)?;
         }
         tx.pragma_update(None, "user_version", CURRENT_VERSION)?;
         tx.commit()?;
@@ -301,6 +461,56 @@ impl Ledger {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Store one probe of a host (E6). `unknown` is a JSON object of figure to reason.
+    pub fn record_host_probe(&self, p: &HostProbeRow) -> Result<()> {
+        self.require_current()?;
+        self.conn.execute(
+            "INSERT INTO host_probes(host,at,os,arch,virt,cores,mem_total_mb,cpu_one_mbps,cpu_all_mbps,host_class,tool_versions,duration_ms,unknown) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![p.host, p.at, p.os, p.arch, p.virt, p.cores, p.mem_total_mb, p.cpu_one_mbps, p.cpu_all_mbps, p.host_class, p.tool_versions, p.duration_ms, p.unknown],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_disk_probe(&self, p: &DiskProbeRow) -> Result<()> {
+        self.require_current()?;
+        self.conn.execute(
+            "INSERT INTO disk_probes(host,at,path,device,fs_type,rotational,rotational_source,fsync_p50_ms,fsync_p95_ms,seq_write_mbps,smallfile_per_s,free_gb,total_gb,bytes_written,duration_ms,unknown) \
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![p.host, p.at, p.path, p.device, p.fs_type, p.rotational, p.rotational_source, p.fsync_p50_ms, p.fsync_p95_ms, p.seq_write_mbps, p.smallfile_per_s, p.free_gb, p.total_gb, p.bytes_written, p.duration_ms, p.unknown],
+        )?;
+        Ok(())
+    }
+
+    /// Ingest the lines of a `samples.jsonl` (E7): the `{"unknown": ..}` header is skipped. A line whose host and time are already stored
+    /// is skipped (the file may be ingested twice). Returns how many rows were written.
+    pub fn record_samples(&self, text: &str) -> Result<usize> {
+        self.require_current()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0;
+        for l in text.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = match serde_json::from_str(l) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let (Some(host), Some(at)) = (v["host"].as_str(), v["at"].as_str()) else { continue };
+            let f = |k: &str| v[k].as_f64();
+            let added = tx.execute(
+                "INSERT OR IGNORE INTO host_samples(host,at,run_id,running_steps,load_1m,cpu_busy_pct,iowait_pct,mem_free_mb,stall_io_some,stall_io_full,stall_cpu_some,stall_mem_some) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![host, at, v["run_id"].as_str(), v["running_steps"].as_i64(), f("load_1m"), f("cpu_busy_pct"), f("iowait_pct"), f("mem_free_mb"), f("stall_io_some"), f("stall_io_full"), f("stall_cpu_some"), f("stall_mem_some")],
+            )?;
+            if added > 0 {
+                n += 1;
+                for d in v["disks"].as_array().into_iter().flatten() {
+                    if let Some(dev) = d["device"].as_str() {
+                        tx.execute("INSERT OR IGNORE INTO disk_samples(host,at,device,busy_pct) VALUES(?,?,?,?)", params![host, at, dev, d["busy_pct"].as_f64()])?;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     pub fn step_count(&self, run_id: &str) -> Result<i64> {
