@@ -2430,3 +2430,35 @@ fn ma2_a_recorded_target_that_is_contains_or_sits_inside_a_shared_chain_target_i
     assert_eq!(fx.rows("tidy.not-owned").len(), 3);
     assert!(touched(&adm, TGT), "the run's own target still goes");
 }
+
+#[test]
+fn ma3_a_floor_that_cannot_be_judged_never_tidies() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    let adm = CloseAdm::floor(vec![Some(("host.disk-unknown", "host h is reached over ssh: its free space is unknown"))]);
+    let o = fx.adv_with("b1", &adm);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "host.disk-unknown"), "{o:?}");
+    assert_eq!(o.exit_code(), 77, "still a disk refusal of admission");
+    assert_eq!(adm.tidies.get(), 0, "nothing says the disk is low");
+    assert!(fx.rows("tidy.auto-disk").is_empty());
+}
+
+#[test]
+fn ma3_unknown_after_a_tidy_is_not_still_below_and_never_escalates() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    for id in ["b1", "b2"] {
+        fx.open(id);
+        fx.step(id, "stacked");
+        fx.step(id, "settled");
+        let adm = CloseAdm::floor(vec![Some(("host.refuse-disk", "free 5 GB < floor")), Some(("host.disk-unknown", "free space could not be read"))]);
+        let o = fx.adv_with(id, &adm);
+        assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "host.disk-unknown"), "{id}: {o:?}");
+    }
+    let outcomes: Vec<String> = fx.rows("tidy.auto-disk").into_iter().map(|(_, o)| o).collect();
+    assert!(!outcomes.iter().any(|o| o == "still-below"), "a disk that could not be measured is not measured below its floor: {outcomes:?}");
+    assert!(fx.rows("host.disk-escalation").is_empty(), "no founder escalation without a measured shortfall");
+}

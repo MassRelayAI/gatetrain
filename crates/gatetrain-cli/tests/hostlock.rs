@@ -135,7 +135,7 @@ fn the_disk_floor_refuses_an_unknown_growth_and_admits_a_known_one_that_fits() {
     let d = tempfile::tempdir().unwrap();
     let mut a = floor_adm(d.path(), "chain", "0");
     let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("unknown growth refuses");
-    assert_eq!(rule, "host.refuse-disk");
+    assert_eq!(rule, "host.disk-unknown", "a floor that cannot be judged is not a low disk");
     assert!(why.contains("unknown"), "{why}");
     a.needs_chain_gb = Some(0.001);
     assert_eq!(a.admit_rule("proof", "b").unwrap(), None, "a tiny growth fits");
@@ -182,7 +182,7 @@ fn a_host_missing_from_the_hosts_file_is_refused_not_skipped() {
     a.hosts = Some((d.path().join("hosts-floor.toml"), "nobody".into()));
     a.needs_chain_gb = Some(0.001);
     let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
-    assert_eq!(rule, "host.refuse-disk");
+    assert_eq!(rule, "host.disk-unknown", "a floor that cannot be judged is not a low disk");
     assert!(why.contains("nobody"), "{why}");
 }
 
@@ -194,7 +194,7 @@ fn a_hosts_file_that_failed_to_load_refuses_every_run() {
     assert_eq!(a.admit_rule("proof", "b").unwrap(), None);
     a.floor_error = Some("hosts.toml: bad".into());
     let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
-    assert_eq!(rule, "host.refuse-disk");
+    assert_eq!(rule, "host.disk-unknown", "a floor that cannot be judged is not a low disk");
     assert!(why.contains("hosts.toml: bad"), "{why}");
 }
 
@@ -206,7 +206,7 @@ fn an_ssh_host_free_space_is_not_measured_here_and_is_refused_as_unknown() {
     let text = std::fs::read_to_string(d.path().join("hosts-floor.toml")).unwrap().replace("name = \"host-a\"", "name = \"host-a\"\nreach = \"ssh builder\"");
     std::fs::write(d.path().join("hosts-floor.toml"), text).unwrap();
     let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
-    assert_eq!(rule, "host.refuse-disk");
+    assert_eq!(rule, "host.disk-unknown", "a floor that cannot be judged is not a low disk");
     assert!(why.contains("ssh") && why.contains("unknown"), "{why}");
 }
 
@@ -218,6 +218,20 @@ fn free_space_that_cannot_be_read_refuses() {
     let text = std::fs::read_to_string(d.path().join("hosts-floor.toml")).unwrap().replace(&d.path().to_string_lossy().replace('\\', "/"), "/definitely/not/a/disk");
     std::fs::write(d.path().join("hosts-floor.toml"), text).unwrap();
     let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
-    assert_eq!(rule, "host.refuse-disk");
+    assert_eq!(rule, "host.disk-unknown", "a floor that cannot be judged is not a low disk");
     assert!(why.contains("could not be read"), "{why}");
+}
+
+#[test]
+fn ma3_an_ssh_host_with_no_floor_for_the_use_is_not_refused() {
+    // the only disk with min_free_gb is for pre-flights: a proof on this ssh host has no floor to judge
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "preflight", "10");
+    a.needs_chain_gb = Some(0.001);
+    let text = std::fs::read_to_string(d.path().join("hosts-floor.toml")).unwrap().replace("name = \"host-a\"", "name = \"host-a\"
+reach = \"ssh builder\"");
+    std::fs::write(d.path().join("hosts-floor.toml"), text).unwrap();
+    assert_eq!(a.admit_rule("proof", "b").unwrap(), None, "no disk of this host has a floor for a chain");
+    let (rule, _) = a.admit_rule("light", "b").unwrap().expect("a pre-flight has a floor that is not measured here");
+    assert_eq!(rule, "host.disk-unknown");
 }
