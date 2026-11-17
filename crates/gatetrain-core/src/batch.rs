@@ -1688,6 +1688,18 @@ impl<'a> Engine<'a> {
         let Some(env) = adm.close_env() else { return Ok(Outcome::Waiting(format!("batch {id}: close needs a tidy environment for this host (`gatetrain batch close`)"))) };
         let set = self.owned_set(id, f, env)?;
         let rep = close::run_close(&set, env);
+        let last = self.close_rows(id, &rep)?;
+        if rep.clean() {
+            let note = format!("owned set tidied: {} moved, {} already gone", rep.done.len(), rep.gone.len());
+            return self.plain(id, f, "T9", "closed", None, None, json!({"tidied": rep.done, "gone": rep.gone}), "recorded", note);
+        }
+        let (code, why) = rep.refusals.first().map(|r| (r.code.clone(), r.why.clone())).unwrap_or_else(|| ("tidy.check-not-clean".into(), rep.residue.first().cloned().unwrap_or_default()));
+        Ok(Outcome::Refused { rule: code, because: format!("{why} ({} refusal(s), {} left over; the batch stays live and is retried)", rep.refusals.len(), rep.residue.len()), decision: last.unwrap_or(0) })
+    }
+
+    /// The rows of one close run: a refusal row per refusal and per left-over item, a `tidy.moved` row per item that went. The last
+    /// refusal row's seq, if any.
+    fn close_rows(&mut self, id: &str, rep: &close::CloseReport) -> Result<Option<i64>> {
         let mut last = None;
         for r in &rep.refusals {
             last = Some(self.close_row("refusal", id, &r.code, &r.key, &r.why, "refused")?);
@@ -1698,12 +1710,7 @@ impl<'a> Engine<'a> {
         for k in &rep.done {
             self.close_row("tidy", id, "tidy.moved", k, &format!("{k} moved to the recycle bin by exact name"), "allowed")?;
         }
-        if rep.clean() {
-            let note = format!("owned set tidied: {} moved, {} already gone", rep.done.len(), rep.gone.len());
-            return self.plain(id, f, "T9", "closed", None, None, json!({"tidied": rep.done, "gone": rep.gone}), "recorded", note);
-        }
-        let (code, why) = rep.refusals.first().map(|r| (r.code.clone(), r.why.clone())).unwrap_or_else(|| ("tidy.check-not-clean".into(), rep.residue.first().cloned().unwrap_or_default()));
-        Ok(Outcome::Refused { rule: code, because: format!("{why} ({} refusal(s), {} left over; the batch stays live and is retried)", rep.refusals.len(), rep.residue.len()), decision: last.unwrap_or(0) })
+        Ok(last)
     }
 
     /// A close row, written once: an identical (batch, rule, subject, reason) row already in the log is not repeated on a retry.
@@ -1785,9 +1792,11 @@ impl<'a> Engine<'a> {
         }
         let mut left = vec![];
         let adm = self.adm;
-        if let Some(env) = adm.close_env() {
+        // `[close] tidy = false` means close never tidies, by hand or not; with it on, the run writes the same rows as `close`
+        if let (true, Some(env)) = (self.cfg.close_tidy, adm.close_env()) {
             let set = self.owned_set(id, &f, env)?;
             let rep = close::run_close(&set, env);
+            self.close_rows(id, &rep)?;
             left = rep.refusals.iter().map(|r| format!("{} ({})", r.key, r.code)).chain(rep.residue.iter().cloned()).collect();
         }
         self.decide("override", id, None, "close.with-residue", "recorded", reason.trim().into(), Some(json!({"residue": left})))?;
