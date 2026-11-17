@@ -86,6 +86,10 @@ pub trait CloseEnv {
     fn contains_worktree(&self, _path: &str) -> Result<bool> {
         Ok(false)
     }
+    /// Where the path sits, its parent's links resolved and the last component not followed: what a move of it acts on.
+    fn located(&self, path: &str) -> Result<String> {
+        Ok(path.to_string())
+    }
     /// For a target or temp folder: whether it is a registered worktree or sits inside one, and then whether it holds work.
     fn worktree_overlap(&self, _path: &str) -> Result<WtOverlap> {
         Ok(WtOverlap::None)
@@ -222,6 +226,9 @@ fn row(code: &str, key: &str, why: impl Into<String>) -> Row {
 #[derive(Debug, Clone, Default)]
 struct Cleared {
     sha: Option<String>,
+    /// A target or temp folder: where it sat when it was judged (its parent resolved). The move acts on this spelling, so a link
+    /// retargeted after the judgement cannot carry the move somewhere else.
+    at: Option<String>,
 }
 
 /// The first refusal of one item, or what it is cleared with. Nothing here changes anything.
@@ -283,10 +290,13 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
             }
         }
     }
+    let mut cleared = Cleared::default();
+    if matches!(kind, "target" | "tmp") {
+        cleared.at = Some(env.located(key)?);
+    }
     if kind == "container" && (BUILTIN_REFERENCE_PREFIXES.iter().any(|p| key.starts_with(p)) || env.reference_stack(key)?) {
         return refuse("tidy.reference-stack", format!("container {key} carries a protected reference-stack prefix"));
     }
-    let mut cleared = Cleared::default();
     if kind == "worktree" {
         let b = env.worktree_branch(key)?;
         if let Some(why) = env.kept(Some(key), b.as_deref()) {
@@ -339,6 +349,8 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
 /// so a branch is only ever judged after the worktree that was on it has gone (or refused, which keeps the branch).
 pub fn run_close(set: &OwnedSet, env: &dyn CloseEnv) -> CloseReport {
     let mut rep = CloseReport::default();
+    // (kind, the spelling acted on, the recorded key) of every item that went
+    let mut acted: Vec<(String, String, String)> = vec![];
     for phase in [false, true] {
         for it in set.items.iter().filter(|i| (i.kind == "branch") == phase) {
             match env.exists(&it.kind, &it.key) {
@@ -365,7 +377,7 @@ pub fn run_close(set: &OwnedSet, env: &dyn CloseEnv) -> CloseReport {
             };
             // the plan may be minutes old: protect, dirty, in use and merged are read again at the moment of action
             let cleared = match judge(set, it, env) {
-                Ok(Ok(c)) if c.sha == plan.sha => c,
+                Ok(Ok(c)) if c.sha == plan.sha && c.at == plan.at => c,
                 Ok(Ok(_)) => {
                     rep.refusals.push(row("tidy.unreadable", &it.key, format!("{} changed between the plan and the action", it.key)));
                     continue;
@@ -390,21 +402,22 @@ pub fn run_close(set: &OwnedSet, env: &dyn CloseEnv) -> CloseReport {
                     Err(e) => Err(e),
                 }
             } else {
-                env.dispose(&it.kind, &it.key)
+                env.dispose(&it.kind, cleared.at.as_deref().unwrap_or(&it.key))
             };
             match went {
-                Ok(Ok(())) => rep.done.push(it.key.clone()),
+                Ok(Ok(())) => {
+                    rep.done.push(it.key.clone());
+                    acted.push((it.kind.clone(), cleared.at.clone().unwrap_or_else(|| it.key.clone()), it.key.clone()));
+                }
                 Ok(Err(why)) => rep.residue.push(format!("{}: {why}", it.key)),
                 Err(e) => rep.residue.push(format!("{}: {e}", it.key)),
             }
         }
     }
     // `check`: what is still there that was acted on
-    for it in &set.items {
-        if rep.done.contains(&it.key) {
-            if let Ok(Some(true)) = env.exists(&it.kind, &it.key) {
-                rep.residue.push(format!("{}: still present after the move", it.key));
-            }
+    for (kind, at, key) in &acted {
+        if let Ok(Some(true)) = env.exists(kind, at) {
+            rep.residue.push(format!("{key}: still present after the move"));
         }
     }
     rep.residue.sort();
@@ -520,6 +533,9 @@ impl CloseEnv for OpsEnv<'_> {
             }
         }
         Ok(false)
+    }
+    fn located(&self, path: &str) -> Result<String> {
+        self.resolved(path, false)
     }
     fn worktree_overlap(&self, path: &str) -> Result<WtOverlap> {
         let forms = self.item_forms(path)?;
@@ -889,6 +905,9 @@ impl CloseEnv for OwnedEnv {
     }
     fn worktree_overlap(&self, path: &str) -> Result<WtOverlap> {
         self.with(|e| e.worktree_overlap(path))
+    }
+    fn located(&self, path: &str) -> Result<String> {
+        self.with(|e| e.located(path))
     }
     fn holds_main_checkout(&self, path: &str) -> Result<bool> {
         self.with(|e| e.holds_main_checkout(path))
