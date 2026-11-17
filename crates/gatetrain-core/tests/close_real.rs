@@ -269,3 +269,59 @@ fn minor5_a_worktree_registered_through_a_link_is_seen_inside_the_folder_that_ho
     assert!(wts.join("holder/wt1/f.txt").exists(), "moved: {rep:?}; git lists {listed}");
     assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}; git lists {listed}");
 }
+
+/// The real local shell, with one twist: right after the second idle probe (the last look of the second `judge`), the link `link` is
+/// pointed at `to`. That is a writer that retargets a link between the judgement and the move, made deterministic.
+struct Retarget {
+    link: std::path::PathBuf,
+    to: std::path::PathBuf,
+    probes: std::cell::Cell<usize>,
+}
+
+impl Runner for Retarget {
+    fn is_local(&self) -> bool {
+        LocalRunner.is_local()
+    }
+    fn run_for(&self, cmd: &str, timeout: Option<f64>) -> Result<gatetrain_core::tidy::RunOut, String> {
+        let out = LocalRunner.run_for(cmd, timeout);
+        if cmd.contains("AddMinutes(-") || cmd.contains(" -mmin -") {
+            self.probes.set(self.probes.get() + 1);
+            if self.probes.get() == 2 {
+                std::fs::remove_dir(&self.link).or_else(|_| std::fs::remove_file(&self.link)).unwrap();
+                dir_link(&self.link, &self.to);
+            }
+        }
+        out
+    }
+    fn run_argv(&self, cwd: &Path, argv: &[String]) -> Result<gatetrain_core::runner::Output, String> {
+        LocalRunner.run_argv(cwd, argv)
+    }
+    fn run_argv_to(&self, argv: &[String], timeout: Option<f64>) -> Result<gatetrain_core::tidy::RunOut, String> {
+        LocalRunner.run_argv_to(argv, timeout)
+    }
+    fn shell_free(&self) -> bool {
+        LocalRunner.shell_free()
+    }
+    fn put_file(&self, path: &str, text: &str) -> Result<(), String> {
+        LocalRunner.put_file(path, text)
+    }
+    fn scratch_dir(&self) -> Option<String> {
+        LocalRunner.scratch_dir()
+    }
+}
+
+#[test]
+fn minor1_the_move_acts_on_the_folder_that_was_judged_not_where_a_link_leads_now() {
+    let f = fx();
+    let real = f.build.join("real");
+    write(real.join("shared/x.o"), "the batch's own output\n");
+    age(&real);
+    let lnk = f.build.join("lnk");
+    dir_link(&lnk, &real);
+    let rt = Retarget { link: lnk.clone(), to: f.main.clone(), probes: std::cell::Cell::new(0) };
+    let key = fwd(&f.build) + "/lnk/shared";
+    let rep = f.close_with(&fwd(&f.main), "target", &key, &[fwd(&f.build)], json!({}), &rt);
+    assert!(rt.probes.get() >= 2, "the second judgement made its idle probe ({} probes)", rt.probes.get());
+    assert!(f.main.join("shared/keep.txt").exists(), "the link was retargeted into main after the judgement and main's folder moved: {rep:?}, trash {:?}", f.trash());
+    assert!(!real.join("shared").exists(), "the judged folder is the one that went: {rep:?}");
+}
