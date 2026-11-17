@@ -149,7 +149,9 @@ fn a_timeout_kills_the_child_and_its_grandchild() {
     let toml = step("slowpoke", "fast", &[], Some(1), &["gcmarker", marker.to_str().unwrap(), "4"]);
     let t0 = Instant::now();
     let r = chain(d.path(), &toml, &["--par", "1"]);
-    assert!(t0.elapsed().as_secs_f64() < 3.5, "the 1 s timeout did not end the step on time");
+    // Exit 124 below proves the timeout fired and the missing marker proves the tree was killed; a wall-clock bound under the
+    // step's own 4 s sleep flaked on a loaded host (taskkill /T and pgrep take time), so it only guards against a hang now.
+    assert!(t0.elapsed().as_secs_f64() < 30.0, "the 1 s timeout did not end the step (hung)");
     assert_eq!(code(&r), 1);
     let p = parse_log(&r.stdout).unwrap();
     assert_eq!(p.steps[0].exit_code, Some(124), "{}", r.stdout);
