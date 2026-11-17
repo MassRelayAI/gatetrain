@@ -33,6 +33,11 @@ pub struct Step {
     #[serde(default)]
     pub needs: Vec<String>,
     pub timeout_s: Option<f64>,
+    /// git pathspecs (relative to the plan's cwd) this step reads; with `--cache` an unchanged set means the step is not re-run. No inputs = never cached.
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    /// mixed into the cache key: change it to invalidate the step's entries (a tool version, an env the inputs do not show)
+    pub cache_salt: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +54,10 @@ pub struct Opts {
     pub keep_going: bool,
     pub only: Vec<String>,
     pub skip: Vec<String>,
+    /// the step cache folder (the caller's choice, one per host); None = no caching
+    pub cache: Option<PathBuf>,
+    /// steps that run even when the cache has them
+    pub no_cache_for: Vec<String>,
 }
 
 pub struct Outcome {
@@ -180,9 +189,9 @@ fn host() -> String {
 
 /// Run the plan, calling `emit` once per log-format line. Err = config error (a name in only/skip that is no step, an unusable out folder).
 pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> Result<Outcome, String> {
-    for n in o.only.iter().chain(&o.skip) {
+    for n in o.only.iter().chain(&o.skip).chain(&o.no_cache_for) {
         if !plan.steps.iter().any(|s| &s.name == n) {
-            return Err(format!("--only/--skip names {n:?}, which is no step"));
+            return Err(format!("--only/--skip/--no-cache-for names {n:?}, which is no step"));
         }
     }
     std::fs::create_dir_all(&o.out).map_err(|e| format!("cannot create {}: {e}", o.out.display()))?;
@@ -217,6 +226,9 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let mut state = vec![St::Pending; plan.steps.len()];
     let mut times: Vec<(usize, i64, f64)> = Vec::new();
     let mut reds: Vec<(String, i64)> = Vec::new();
+    let mut keys: Vec<Option<String>> = vec![None; plan.steps.len()];
+    let mut notes: Vec<Option<String>> = vec![None; plan.steps.len()];
+    let mut cached: Vec<usize> = Vec::new();
     let t_run = Instant::now();
     let mut fast_red = false;
     for tier in [Tier::Fast, Tier::Slow] {
@@ -254,6 +266,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 }
             }
             // start what is ready, in file order
+            let mut hit = false;
             for &i in &mine {
                 if running >= par {
                     break;
@@ -269,6 +282,31 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 if !ready {
                     continue;
                 }
+                if let Some(cdir) = &o.cache {
+                    let step = &plan.steps[i];
+                    if !step.inputs.is_empty() {
+                        match cache_key(step, &cwd) {
+                            Ok(k) => {
+                                let entry = (!o.no_cache_for.contains(&step.name)).then(|| read_entry(cdir, &step.name, &k)).flatten();
+                                if let Some((esha, eat)) = entry {
+                                    emit(&format!("STEP_START {} {}", step.name, Ts::now_utc().iso()));
+                                    emit(&format!("STEP_CACHED {}", step.name));
+                                    emit(&format!("STEP_TIME {} 0.0s", step.name));
+                                    emit(&format!("STEP_EXIT {} 0", step.name));
+                                    let full = o.out.join(format!("{}.full", step.name));
+                                    let _ = std::fs::write(&full, format!("cached: green at {esha} {eat}, key {k}\n"));
+                                    state[i] = St::Green;
+                                    times.push((i, 0, 0.0));
+                                    cached.push(i);
+                                    hit = true;
+                                    continue;
+                                }
+                                keys[i] = Some(k);
+                            }
+                            Err(why) => notes[i] = Some(format!("chain: not cached: {why}")),
+                        }
+                    }
+                }
                 state[i] = St::Running;
                 running += 1;
                 emit(&format!("STEP_START {} {}", plan.steps[i].name, Ts::now_utc().iso()));
@@ -277,6 +315,9 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     let (rc, secs) = exec(&step, &cwd, &out);
                     let _ = tx.send(Done { idx: i, rc, secs });
                 });
+            }
+            if hit {
+                continue; // a cached step is green already: settle skips and start its dependents
             }
             if running == 0 {
                 break;
@@ -287,7 +328,15 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             emit(&format!("STEP_TIME {name} {:.1}s", d.secs));
             emit(&format!("STEP_EXIT {name} {}", d.rc));
             times.push((d.idx, d.rc, d.secs));
+            if let Some(n) = &notes[d.idx] {
+                append_line(&o.out.join(format!("{name}.full")), n);
+            }
             if d.rc == 0 {
+                if let (Some(cdir), Some(k), Some(sha)) = (&o.cache, &keys[d.idx], &sha) {
+                    if let Err(e) = write_entry(cdir, name, k, sha, d.secs) {
+                        eprintln!("chain: cannot write the cache entry for {name}: {e}");
+                    }
+                }
                 state[d.idx] = St::Green;
             } else {
                 state[d.idx] = St::Red;
@@ -323,6 +372,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 "sha": sha, "host": host(), "at": Ts::now_utc().iso(), "mode": "preflight", "par": par,
                 "total_seconds": (t_run.elapsed().as_secs_f64() * 10.0).round() / 10.0,
                 "digest": digest, "steps": steps,
+                "cached": cached.iter().map(|&i| plan.steps[i].name.clone()).collect::<Vec<_>>(),
             });
             let p = o.out.join(format!("stamp-{sha}.json"));
             std::fs::write(&p, serde_json::to_string_pretty(&body).unwrap_or_default() + "\n").map_err(|e| format!("cannot write {}: {e}", p.display()))?;
@@ -332,6 +382,57 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         Err("not a git repository: no stamp written".to_string())
     };
     Ok(Outcome { reds, stamp })
+}
+
+/// The cache key of a step: sha-256 over its command, cwd, salt and `git ls-files -s -- <inputs>` (mode, blob, path of every tracked
+/// input). Err(why) = this run must not use or fill the cache: a dirty input (modified or untracked), no tracked input, or git failing.
+fn cache_key(step: &Step, cwd: &Path) -> Result<String, String> {
+    let mut spec: Vec<&str> = vec!["--"];
+    spec.extend(step.inputs.iter().map(String::as_str));
+    let with = |head: &[&'static str]| -> Vec<&str> { head.iter().copied().chain(spec.iter().copied()).collect() };
+    match git_out(cwd, &with(&["status", "--porcelain"])) {
+        Some(d) if d.is_empty() => {}
+        Some(_) => return Err("inputs are dirty (git status --porcelain is not empty for them); the step ran and no entry was written".into()),
+        None => return Err("git status failed for the inputs".into()),
+    }
+    let ls = git_out(cwd, &with(&["ls-files", "-s"])).ok_or_else(|| "git ls-files failed for the inputs".to_string())?;
+    let mut lines: Vec<&str> = ls.lines().collect();
+    if lines.is_empty() {
+        return Err("the inputs match no tracked file".into());
+    }
+    lines.sort_unstable();
+    let mut h = Sha256::new();
+    let mut part = |s: &str| {
+        h.update((s.len() as u64).to_le_bytes());
+        h.update(s.as_bytes());
+    };
+    part(&match (&step.run, &step.argv) {
+        (Some(r), _) => format!("run:{r}"),
+        (None, Some(a)) => format!("argv:{}", serde_json::to_string(a).unwrap_or_default()),
+        _ => String::new(),
+    });
+    part(&cwd.to_string_lossy());
+    part(step.cache_salt.as_deref().unwrap_or(""));
+    for l in lines {
+        part(l);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// (sha, time) of a green entry for this key, if the file is there and says the same key.
+fn read_entry(cache: &Path, step: &str, key: &str) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(cache.join(step).join(format!("{key}.json"))).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    (v["key"].as_str()? == key).then(|| (v["sha"].as_str().unwrap_or("unknown").to_string(), v["at"].as_str().unwrap_or("unknown").to_string()))
+}
+
+fn write_entry(cache: &Path, step: &str, key: &str, sha: &str, secs: f64) -> Result<(), String> {
+    let dir = cache.join(step);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let body = serde_json::json!({"sha": sha, "at": Ts::now_utc().iso(), "seconds": (secs * 10.0).round() / 10.0, "key": key, "host": host()});
+    let tmp = dir.join(format!("{key}.json.tmp"));
+    std::fs::write(&tmp, serde_json::to_string_pretty(&body).unwrap_or_default() + "\n").map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, dir.join(format!("{key}.json"))).map_err(|e| e.to_string())
 }
 
 /// The digest a stamp carries: sha-256 of the steps file, so a stamp says which checks produced it.

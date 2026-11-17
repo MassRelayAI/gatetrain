@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 #[derive(Args)]
 pub struct ChainArgs {
-    /// the steps file: [[step]] name, run (shell string) or argv, tier = "fast"|"slow", needs, timeout_s; optional top-level cwd
+    /// the steps file: [[step]] name, run (shell string) or argv, tier = "fast"|"slow", needs, timeout_s, inputs, cache_salt; optional top-level cwd
     #[arg(long)]
     steps: PathBuf,
     /// how many steps of a tier may run at once
@@ -25,6 +25,13 @@ pub struct ChainArgs {
     /// leave these steps out (comma list)
     #[arg(long, value_delimiter = ',')]
     skip: Vec<String>,
+    /// the step cache folder (per host, your choice): a step with `inputs` whose tracked inputs are unchanged since it last passed is not re-run
+    /// (printed as STEP_CACHED). For pre-flight only: a proof run must not pass this flag
+    #[arg(long)]
+    cache: Option<PathBuf>,
+    /// run these steps even when the cache has them (comma list)
+    #[arg(long, value_delimiter = ',')]
+    no_cache_for: Vec<String>,
 }
 
 pub fn run(a: ChainArgs) -> ExitCode {
@@ -51,7 +58,7 @@ pub fn run(a: ChainArgs) -> ExitCode {
         eprintln!("chain: --par must be at least 1");
         return ExitCode::from(2);
     }
-    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip };
+    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();
         let _ = writeln!(so, "{l}");
