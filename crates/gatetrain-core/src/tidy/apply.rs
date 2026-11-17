@@ -128,6 +128,31 @@ fn set(rec: &mut Vec<(String, J)>, k: &str, v: J) {
 
 type Done = (Option<i64>, &'static str, String);
 
+/// Docker's own total for one `docker system df` type ("Images", "Build Cache"), or None when it cannot be read.
+fn docker_type_bytes(ops: &Ops, ty: &str) -> R<Option<i64>> {
+    let o = ops.run0(r#"docker system df --format "{{.Type}}|{{.Size}}|{{.Reclaimable}}""#)?;
+    if !o.ok() {
+        return Ok(None);
+    }
+    Ok(o.out.lines().find_map(|l| {
+        let p: Vec<&str> = l.split('|').collect();
+        (p.len() >= 2 && p[0].trim() == ty).then(|| super::inventory::parse_size(p[1].trim()))
+    }))
+}
+
+/// The item's size after an action, from the MEASURED change of Docker's total (clamped to 0..=planned, so other Docker activity on the host
+/// cannot inflate it), and the freed text for the log. Unknown when either total cannot be read: never the plan (a real host reported 86 GB
+/// freed for a prune that freed about 1 GB, 2026-11-17).
+fn measured_after(planned: Option<i64>, before: Option<i64>, after_total: Option<i64>) -> (Option<i64>, String) {
+    match (planned, before, after_total) {
+        (Some(b), Some(x), Some(y)) => {
+            let freed = (x - y).clamp(0, b.max(0));
+            (Some(b - freed), super::inventory::human(Some(freed)))
+        }
+        _ => (None, "unknown (Docker's usage could not be read before and after)".into()),
+    }
+}
+
 pub fn cache_hours(cfg: &TidyCfg) -> i64 {
     ((cfg.cache_days * 24.0).ceil() as i64).max(1) // a window under an hour is an hour, never `until=0h` (= everything)
 }
@@ -190,13 +215,17 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done>
             if split_ws(&used.out).contains(&it.key.as_str()) {
                 return guard(format!("image {} is used by a container", it.key));
             }
+            let before = docker_type_bytes(ops, "Images")?;
             let r = ops.run_argv(&["docker".into(), "rmi".into(), it.key.clone()], None)?;
-            Ok((Some(0), if r.ok() { "ok" } else { "failed" }, "removed by exact name".into()))
+            let (after, freed) = measured_after(it.bytes, before, docker_type_bytes(ops, "Images")?);
+            Ok((after, if r.ok() { "ok" } else { "failed" }, format!("removed by exact name; freed: {freed}")))
         }
         "prune-cache" => {
             let argv: Vec<String> = ["docker", "builder", "prune", "-f", "--filter"].iter().map(|s| s.to_string()).chain([format!("until={}h", cache_hours(cfg))]).collect();
+            let before = docker_type_bytes(ops, "Build Cache")?;
             let r = ops.run_argv(&argv, None)?;
-            Ok((Some(0), if r.ok() { "ok" } else { "failed" }, format!("build cache older than {} days", fmt_g(cfg.cache_days))))
+            let (after, freed) = measured_after(it.bytes, before, docker_type_bytes(ops, "Build Cache")?);
+            Ok((after, if r.ok() { "ok" } else { "failed" }, format!("build cache older than {} days; freed: {freed}", fmt_g(cfg.cache_days))))
         }
         k => guard(format!("unknown action {k}")),
     }

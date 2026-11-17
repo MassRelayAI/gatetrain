@@ -493,7 +493,7 @@ h1: 4 item(s) still plannable, 0 threshold(s) crossed
 ### end
 ### tidy_apply_all rc=1
 h1: 8 planned in targets,worktrees,containers,images,cache,trash; 8 done, 0 failed
-h1: 11.1 GB reclaimed (measured: size before minus size after, per item that went ok; 11.1 GB planned); log {DIR}/l.jsonl
+h1: 3.1 GB reclaimed (measured: size before minus size after, per item that went ok; 11.1 GB planned); log {DIR}/l.jsonl
 h1: disk /build 5 GB free (min 50)
 h1: 0 item(s) still plannable, 1 threshold(s) crossed
 h1: THRESHOLD: disk /build: 5 GB free < 50
@@ -510,9 +510,9 @@ h1: THRESHOLD: disk /build: 5 GB free < 50
 {"action": "rm-container", "after_bytes": null, "before_bytes": 0, "class": "containers", "host": "h1", "item": "gate-1", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
 {"action": "rm-container", "after_bytes": 0, "before_bytes": 0, "class": "containers", "host": "h1", "item": "gate-1", "note": "removed by exact name", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
 {"action": "rm-image", "after_bytes": null, "before_bytes": 2147483648, "class": "images", "host": "h1", "item": "gate-img:1", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
-{"action": "rm-image", "after_bytes": 0, "before_bytes": 2147483648, "class": "images", "host": "h1", "item": "gate-img:1", "note": "removed by exact name", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "rm-image", "after_bytes": 2147483648, "before_bytes": 2147483648, "class": "images", "host": "h1", "item": "gate-img:1", "note": "removed by exact name; freed: 0 B", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
 {"action": "prune-cache", "after_bytes": null, "before_bytes": 6442450944, "class": "cache", "host": "h1", "item": "build cache", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
-{"action": "prune-cache", "after_bytes": 0, "before_bytes": 6442450944, "class": "cache", "host": "h1", "item": "build cache", "note": "build cache older than 3 days", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
+{"action": "prune-cache", "after_bytes": null, "before_bytes": 6442450944, "class": "cache", "host": "h1", "item": "build cache", "note": "build cache older than 3 days; freed: unknown (Docker's usage could not be read before and after)", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
 {"action": "remove", "after_bytes": null, "before_bytes": 52428800, "class": "trash", "host": "h1", "item": "/trash/old", "note": "about to run", "status": "intent", "ts": "2027-01-15T15:00:00+0700"}
 {"action": "remove", "after_bytes": 0, "before_bytes": 52428800, "class": "trash", "free_gb_after": 5.0, "free_gb_before": 5.0, "host": "h1", "item": "/trash/old", "note": "removed", "status": "ok", "ts": "2027-01-15T15:00:00+0700"}
 ### end
