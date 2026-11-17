@@ -384,7 +384,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     Ok(Outcome { reds, stamp })
 }
 
-/// The cache key of a step: sha-256 over its command, cwd, salt and `git ls-files -s -- <inputs>` (mode, blob, path of every tracked
+/// The cache key of a step: sha-256 over its command, its directory relative to the repository top, salt and `git ls-files -s -- <inputs>` (mode, blob, path of every tracked
 /// input). Err(why) = this run must not use or fill the cache: a dirty input (modified or untracked), no tracked input, or git failing.
 fn cache_key(step: &Step, cwd: &Path) -> Result<String, String> {
     let mut spec: Vec<&str> = vec!["--"];
@@ -411,7 +411,10 @@ fn cache_key(step: &Step, cwd: &Path) -> Result<String, String> {
         (None, Some(a)) => format!("argv:{}", serde_json::to_string(a).unwrap_or_default()),
         _ => String::new(),
     });
-    part(&cwd.to_string_lossy());
+    // the directory RELATIVE to the repository top (`git rev-parse --show-prefix`), never the absolute path: two worktrees of one
+    // commit (the pre-check's and the proof's) must share a key (engine-v2 design, conflict X with this branch)
+    let prefix = git_out(cwd, &["rev-parse", "--show-prefix"]).ok_or_else(|| "git rev-parse --show-prefix failed".to_string())?;
+    part(&format!("cwd:{prefix}"));
     part(step.cache_salt.as_deref().unwrap_or(""));
     for l in lines {
         part(l);

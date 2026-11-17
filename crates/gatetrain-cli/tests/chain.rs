@@ -515,3 +515,24 @@ fn diagnose_reads_a_log_with_a_cached_step() {
     let text = String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
     assert!(text.contains('r') && !text.contains("panicked"), "{text}");
 }
+
+#[test]
+fn two_worktrees_of_one_commit_share_a_cache_key() {
+    // engine-v2 X: the pre-check runs in the batch worktree and the proof in another worktree of the same commit; an absolute cwd in
+    // the key would make them never share an entry. The key must hash the directory relative to the repository top.
+    let repo = cache_repo();
+    let second = tempfile::tempdir().unwrap();
+    let wt = second.path().join("wt2");
+    git(repo.path(), &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]);
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let c = cache.path().to_str().unwrap();
+    let r1 = chain(work.path(), &with_cwd(repo.path(), &cstep("a", &[], &["in.txt"], &marker, &[])), &["--cache", c]);
+    assert_eq!(code(&r1), 0, "{}", r1.stdout);
+    std::fs::remove_file(&marker).unwrap();
+    let work2 = tempfile::tempdir().unwrap();
+    let r2 = chain(work2.path(), &with_cwd(&wt, &cstep("a", &[], &["in.txt"], &marker, &[])), &["--cache", c]);
+    assert_eq!(code(&r2), 0, "{}", r2.stdout);
+    assert!(r2.stdout.contains("STEP_CACHED a"), "the second worktree of the same commit missed the cache: {}", r2.stdout);
+    assert!(!marker.exists());
+}
