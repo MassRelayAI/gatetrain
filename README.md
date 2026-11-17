@@ -11,6 +11,7 @@
   <a href="#installation">Install</a> &middot;
   <a href="#how-it-works">How it works</a> &middot;
   <a href="#the-basic-workflow">Workflow</a> &middot;
+  <a href="docs/chain.md">Chain</a> &middot;
   <a href="#profiles-from-zero-cost-to-cloud">Profiles</a> &middot;
   <a href="docs/lessons.md">Lessons</a> &middot;
   <a href="#roadmap">Roadmap</a>
@@ -99,6 +100,8 @@ Commands:
   ledger     The ledger file
   check      Find leftovers: build targets, worktrees, containers, images, cache, recycle bin (read-only)
   tidy       Clean the leftovers `check` finds (dry run unless --apply or --auto)
+  chain      Run a steps file: fast then slow tier in parallel, full output per step, log-format lines on stdout, a stamp when green and clean
+  privacy-check  Fail when any file of a repository holds a word on its hashed deny-list `.privacy-denylist` (a hit names the file and line, never the word)
   watch      Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, stackable, blocked, next assignments
   ingest     Parse a chain log into the ledger (a run id already there is refused; --replace only for a running or stopped run)
   status     One table for every chain log given: state, eta and when to look next
@@ -235,11 +238,95 @@ lanes against main
 
 It is advice (exit 0 unless git fails); the same data with `--json`. Heuristics are listed in [`modules/plan.md`](modules/plan.md).
 
+### The step runner: `gatetrain chain`
+
+`chain` runs a steps file in two tiers and reports every red. The full guide and every key is [`docs/chain.md`](docs/chain.md).
+
+<p align="center"><img src="docs/assets/tiers.svg" alt="The fast tier runs in parallel, a red stops the slow tier, every red is reported" width="100%"></p>
+
+```toml
+cwd = "."
+
+[[step]]
+name = "lint"
+tier = "fast"
+run = "echo lint ok"
+
+[[step]]
+name = "unit"
+tier = "fast"
+run = "echo 3 passed"
+inputs = ["web/**"]
+
+[[step]]
+name = "e2e"
+tier = "slow"
+needs = ["unit"]
+timeout_s = 600
+run = "echo e2e ok"
+```
+
+Real output on a throwaway git repository (the host name is replaced by `builder-1`):
+
+```text
+$ gatetrain chain --steps steps.toml --out out --cache cache
+branch master at 9e7eba84b7befc39b6bb0492a447707361a30752 on builder-1
+CHAIN_MODE preflight
+CHAIN_PARALLEL 4
+STEP_START lint 2026-11-17T13:06:50.636601+00:00
+STEP_START unit 2026-11-17T13:06:50.736785+00:00
+STEP_TIME lint 0.1s
+STEP_EXIT lint 0
+STEP_TIME unit 0.1s
+STEP_EXIT unit 0
+STEP_START e2e 2026-11-17T13:06:50.792727+00:00
+STEP_TIME e2e 0.1s
+STEP_EXIT e2e 0
+RED_SUMMARY: none
+GATES_DONE
+chain: green, stamp out\stamp-9e7eba84b7befc39b6bb0492a447707361a30752.json
+```
+
+The fast tier runs up to `--par` steps at once. A red there skips the slow tier (`STEP_SKIPPED`) unless `--keep-going`; every red is
+printed as `RED_NOW` when it happens and listed in `RED_SUMMARY`; each step's whole output is in `out/<step>.full`. A step that outlives
+its `timeout_s` has its whole process tree killed, on Linux and on Windows. The exit code is 0 green, 1 red, 2 a bad steps file. A green
+run on a clean tree writes `stamp-<sha>.json`. A step with `inputs` can be skipped by the cache below.
+
 ### The step cache (pre-flight only)
 
 `gatetrain chain --cache <dir>` skips a step whose inputs have not changed since it last passed. A step opts in with `inputs = ["apps/web/**", "package-lock.json"]` (git pathspecs, relative to the plan's `cwd`) and may add `cache_salt = "..."` to invalidate its entries. A step without `inputs` always runs.
 
-The key is a sha-256 over the step's command, `cwd`, salt and `git ls-files -s -- <inputs>`. A dirty or untracked input means the step runs and writes no entry (its `.full` says why). A hit prints `STEP_START`, `STEP_CACHED <step>`, `STEP_TIME <step> 0.0s`, `STEP_EXIT <step> 0` and runs nothing; `needs` treat it as green. Only a green run writes an entry. `--no-cache-for a,b` forces steps to run, and the stamp lists the cached steps in `"cached"`. The cache folder is per host and your choice; nothing is shared implicitly. A proof run must not pass `--cache` (`batch` already refuses cached steps as proof).
+The key is a sha-256 over the step's command, `cwd`, salt and `git ls-files -s -- <inputs>`. A dirty or untracked input means the step runs and writes no entry (its `.full` says why). A hit prints `STEP_START`, `STEP_CACHED <step>`, `STEP_TIME <step> 0.0s`, `STEP_EXIT <step> 0` and runs nothing; `needs` treat it as green. Only a green run writes an entry. `--no-cache-for a,b` forces steps to run, and the stamp lists the cached steps in `"cached"`. The cache folder is per host and your choice; nothing is shared implicitly. A proof run must not pass `--cache` (`batch` already refuses cached steps as proof). The key is taken relative to the repository top, so a pre-check and a later run in two worktrees of one commit share an entry.
+
+### Diagnose groups reds by cause
+
+One broken file can turn hundreds of steps red. `diagnose` keeps each step's class, evidence and remedy, and first prints a `causes:` section: red steps that share a message are one cause, with the most specific evidence line. A baseline file that did not parse once made about 440 steps of an adopter's chain red; it was one cause.
+
+<p align="center"><img src="docs/assets/causes.svg" alt="About 440 red steps collapse into one cause" width="100%"></p>
+
+Real output on a small log of five red steps (four share a message):
+
+```text
+$ gatetrain diagnose causes-demo.log
+causes:
+  4 steps: error: baseline.json: expected value at line 1 column 1 (db-gate-1, db-gate-2, db-gate-3, +1 more)
+5 red steps from 2 causes (1 cause explains 4)
+db-gate-1: real (rc=1, 1 block(s))
+  [real] error: baseline.json: expected value at line 1 column 1
+...
+```
+
+A run with a single red prints no `causes:` section.
+
+### Governance rules for a batch
+
+Three rules in the batch engine keep a red from costing a whole round (design: [ADR 002](docs/design/adr-002-lane-stamp-and-cause-gated-rerun.md)). All are off until configured, so an existing config behaves as before.
+
+- **Lane stamp.** `[lanes] require_stamp = true` and `stamp_dir`: stacking is refused (`stack.lane-stamp`) unless every lane tip has the `stamp-<sha>.json` that `chain` writes after a green run on a clean tree. The refusal names each lane without one.
+- **Cause-gated retry.** A red batch is retried only when its tip moved (a new commit addresses the causes), or when a person recorded the red as a `flake` or `infra` with a reason; otherwise `retry.causes-open` refuses. A blind rerun is a lottery ticket that hides the red.
+- **Full-run budget.** `[chain] max_full_runs_per_batch` caps full proofs per batch (`budget.full-runs`); absent means unlimited. A run that was stopped is not charged.
+
+The command-line verbs for the retry and the cause note are not wired yet; the rules are in the engine and tested.
 
 ### Tests
 
@@ -260,7 +347,9 @@ Works alongside single-branch development skill sets (brainstorming, plans, test
 
 Work is cut into **lanes**. A lane is one branch, one worktree, one owner and a list of owned files. Lanes whose files do not overlap run **in parallel** on whatever machine has a free slot.
 
-Finished lanes are **stacked** into a **batch**. The batch gets a cheap **pre-flight**. Then one **chain** (the full verification run) proves it on the builder. Only a chain that is green on exactly the tested commit **merges**.
+Finished lanes are **stacked** into a **batch**. The batch gets a cheap **pre-flight**: `gatetrain chain` runs the fast checks in parallel, reports every red at once and stops short of the slow tier when one is red. Then one **chain** (the full verification run) proves it on the builder. Only a chain that is green on exactly the tested commit **merges**.
+
+<p align="center"><img src="docs/assets/pipeline.svg" alt="Lane stamp, stack, pre-flight on a light host, proof on a proof host, merge; the next batch pre-flights while one proves (planned)" width="100%"></p>
 
 A cheap recurring **tick** watches every machine, chain, lane and disk. It acts only where a written rule covers it, and it reports in a few lines. Everything is a row in the **ledger**. Every failure that happened twice becomes a **lesson**: a rule plus a test that proves it.
 
@@ -269,7 +358,7 @@ The binary is the part that measures and guards:
 | step of the flow | commands that do it |
 |---|---|
 | plan and stack | `lanes`, `generated`, `batch` |
-| pre-flight and chain | `doctor`, `hold`, `memory`, `running`, `stop` |
+| pre-flight and chain | `chain`, `doctor`, `hold`, `memory`, `running`, `stop` |
 | read the run | `ingest`, `report`, `trace`, `eta`, `next-tick`, `status`, `diagnose`, `flaky` |
 | tick | `status`, `next-tick`, `watch` |
 | tidy | `check`, `tidy` |
@@ -292,7 +381,7 @@ tick 14:53  batch-42 run 2: 255/440 steps, 0 red, merger armed
 1. **using-gatetrain** - Activates when a session runs more than one lane, more than one machine, or a long verification run. Introduces the rest.
 2. **plan-lanes** - Activates before work is split. Maps the code first, cuts lanes with owned files, finds hidden coupling, marks risky lanes, schedules the longest first across free machines.
 3. **review-lane** - Activates when a lane is handed to a worker and when a risky lane is finished. A brief with red-first proof; an independent reviewer who gets the diff, not your conclusion.
-4. **preflight-and-chain** - Activates when lanes are finished. Stacks by base, repairs known artefacts only, pre-flights on a free machine, runs the full chain on the builder, stops safely.
+4. **preflight-and-chain** - Activates when lanes are finished. Stacks by base, repairs known artefacts only, pre-flights on a free machine with `gatetrain chain`, runs the full chain on the builder, stops safely.
 5. **tick** - Activates on a timer. Chains, merges, queues, reviews due, branches, disk; acts only on written rules; reports in a few lines.
 6. **tidy** - Activates after a merge. Archive tags first, links unlinked first, exact names only, never the main checkout.
 
@@ -481,22 +570,34 @@ Seventy-six so far, each with the rule and what enforces it ([`docs/lessons.md`]
 
 ## Roadmap
 
+Done:
+
 - [x] Method, lessons, module pages, host profiles, ledger schema
 - [x] Agent skills: using-gatetrain, plan-lanes, review-lane, preflight-and-chain, tick, diagnose-run, tidy
 - [x] Claude Code plugin manifest and marketplace
 - [x] `gatetrain doctor` (pre-run checks per host, disks as resources) and `gatetrain stop` (chain plus queued followers)
 - [x] `gatetrain watch`: a repository's lanes and the next assignments, read-only (log watchers are still `status` / `next-tick`)
-- [ ] `gatetrain tick` (generic, host-aware); `status` and multi-log `next-tick` are built
 - [x] `gatetrain hold`, `running`, `memory` and `batch`: the host lock, the memory rule and the batch state machine
-- [x] `gatetrain chain` (step runner): `--steps`, `--par`, `--out`, fast then slow tier, a stamp for a clean green tree
 - [x] Ledger writer: `gatetrain ingest` (chain logs into runs and steps), `report`, `trace` (Perfetto timeline)
 - [x] `gatetrain eta` (prediction from the ledger) and `gatetrain next-tick` (adaptive cadence)
-- [ ] `gatetrain stack` with base detection, artefact repair and pre-flight on a free host
 - [x] `gatetrain lanes`: pre-stack collision radar (bases, containment, hotspots, doubled lines, port clashes, paired counts, parallel groups)
-- [ ] `gatetrain plan`: declared owned files per lane, hidden coupling via a code graph, scheduling across hosts, critical path
 - [x] Ledger views: critical path approximation (`report`), flaky steps (`flaky`)
-- [ ] Ledger views: cost per batch, agent scorecard
-- [ ] Cloud adapters for the `budget` and `speed` profiles
+- [x] `gatetrain chain`: the fast/slow step runner, every red reported, full output per step, tree kill on Linux and Windows, `STEP_SKIPPED`, a stamp
+- [x] The input-keyed step cache for pre-flight (`--cache`)
+- [x] `diagnose` causes: red steps grouped by shared message
+- [x] Batch governance: lane stamp, cause-gated retry, the full-run budget (ADR 002)
+
+Next, in the order of [engine v2](docs/design/engine-v2.md) (a design; nothing below is built):
+
+- [ ] E1: `chain` feeds the ledger (`--mode`, `--host`, `--db`); `diagnose` reads the `.full` files
+- [ ] E2: shards, one slow step split across slots
+- [ ] E3: evidence, so a proof may accept a verified result it did not run (`key_cmd`, shadow mode)
+- [ ] E5: the pre-flight as a launched run, and pipelining the next batch while one proves
+- [ ] E9: multi-host: a detached holder, `reach = "wsl"`, the fast tier off the proof host
+- [ ] E6, E7, E8: `probe` (measure a disk), the sampler, `advise` (read-only advice from the ledger)
+- [ ] E10: `tick`, one pass that advances the batches and prints a few lines
+
+Not scheduled: `gatetrain stack` with base detection and artefact repair, `gatetrain plan` (owned files, hidden coupling, critical path), ledger views for cost per batch and an agent scorecard, cloud adapters for the `budget` and `speed` profiles.
 
 ## Contributing
 

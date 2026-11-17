@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" width="960" height="330" role="img" aria-label="gatetrain chain: the fast tier runs in parallel; every red is reported; a red fast step stops the slow tier, which is marked skipped">
+  <style>
+    .bg{fill:#F6F5F1}.ink{fill:#1F2226}.sub{fill:#5A5F66}.run{fill:#D9D6CE}.pre{fill:#2E6F69}.red{fill:#C2553A}.ok{fill:#2E6F69}.axis{stroke:#C9C6BE}.box{fill:#FFFFFF;stroke:#1F2226}.dash{fill:none;stroke:#5A5F66;stroke-dasharray:6 5}.arrow{stroke:#5A5F66;fill:none}.gate{stroke:#1F2226}.wh{fill:#FFFFFF}
+    .t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.s{font:400 13px Inter,Segoe UI,Helvetica,Arial,sans-serif}.m{font:400 13px ui-monospace,Consolas,Menlo,monospace}
+    @media (prefers-color-scheme: dark){.bg{fill:#15171A}.ink{fill:#E9E7E1}.sub{fill:#A9A6A0}.run{fill:#3A3E44}.pre{fill:#4AA39A}.red{fill:#E07A5F}.ok{fill:#4AA39A}.axis{stroke:#3A3E44}.box{fill:#1F2226;stroke:#E9E7E1}.dash{stroke:#A9A6A0}.arrow{stroke:#A9A6A0}.gate{stroke:#E9E7E1}.wh{fill:#15171A}}
+  </style>
+  <rect class="bg" width="960" height="330" rx="16"/>
+  <text class="t ink" x="32" y="40">Fast first, every red reported</text>
+  <text class="s sub" x="32" y="62">The fast tier runs in parallel. A red in it stops the slow tier. Nothing is hidden: all reds are listed, each with its full output.</text>
+  <text class="s sub" x="32" y="104">fast tier</text>
+  <rect class="ok" x="150" y="88" width="120" height="22" rx="6"/><text class="m ink" x="280" y="104">lint</text>
+  <rect class="ok" x="150" y="118" width="170" height="22" rx="6"/><text class="m ink" x="330" y="134">build</text>
+  <rect class="red" x="150" y="148" width="90" height="22" rx="6"/><text class="m ink" x="250" y="164">typecheck  rc=1</text>
+  <rect class="red" x="150" y="178" width="140" height="22" rx="6"/><text class="m ink" x="300" y="194">unit  rc=2</text>
+  <text class="s sub" x="32" y="150">up to --par</text><text class="s sub" x="32" y="168">at once</text>
+  <line class="gate" x1="560" y1="76" x2="560" y2="214" stroke-width="3"/>
+  <circle class="red" cx="560" cy="66" r="8"/>
+  <text class="s ink" x="576" y="84">gate: a fast step is red</text>
+  <text class="s sub" x="32" y="254">slow tier</text>
+  <rect class="dash" x="150" y="238" width="380" height="22" rx="6"/>
+  <rect class="dash" x="600" y="238" width="300" height="22" rx="6"/>
+  <text class="m sub" x="160" y="254">e2e  STEP_SKIPPED</text>
+  <text class="m sub" x="610" y="254">--keep-going runs it anyway</text>
+  <text class="m ink" x="32" y="300">RED_SUMMARY: typecheck(rc=1) unit(rc=2)</text>
+  <text class="s sub" x="400" y="300">exit 1. out/typecheck.full and out/unit.full hold all each step wrote.</text>
+</svg>
