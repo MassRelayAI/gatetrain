@@ -1,5 +1,6 @@
 //! The ledger: opens the existing SQLite file (ledger/schema.sql, same tables and columns as gatetrain/db.py),
 //! migrates it forward only (`PRAGMA user_version`), and keeps run snapshots instead of delete-and-reinsert.
+use crate::chain::RunRec;
 use crate::logfmt::ParsedLog;
 use crate::{Error, Result};
 use rusqlite::{params, Connection};
@@ -99,8 +100,75 @@ CREATE TRIGGER IF NOT EXISTS batch_events_no_delete BEFORE DELETE ON batch_event
   BEGIN SELECT RAISE(ABORT, 'batch_events is append-only'); END;
 "#;
 
+/// Version 4 (engine v2, slice E1): `chain --db` writes its own run. Columns are only added (NULL = unknown); the new tables are insert-only.
+const V4: &str = r#"
+ALTER TABLE runs ADD COLUMN mode TEXT;
+ALTER TABLE runs ADD COLUMN par INTEGER;
+ALTER TABLE runs ADD COLUMN plan_digest TEXT;
+ALTER TABLE runs ADD COLUMN log_sha256 TEXT;
+ALTER TABLE runs ADD COLUMN config_hash TEXT;
+ALTER TABLE runs ADD COLUMN host_class TEXT;
+ALTER TABLE runs ADD COLUMN gatetrain_version TEXT;
+ALTER TABLE steps ADD COLUMN tier TEXT;
+ALTER TABLE steps ADD COLUMN input_key TEXT;
+ALTER TABLE steps ADD COLUMN cached_from TEXT;
+ALTER TABLE steps ADD COLUMN shards INTEGER;
+CREATE TABLE IF NOT EXISTS step_skips (
+  run_id       TEXT NOT NULL,
+  step         TEXT NOT NULL,
+  reason       TEXT NOT NULL,
+  PRIMARY KEY (run_id, step)
+);
+CREATE TABLE IF NOT EXISTS stamps (
+  digest       TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL,
+  sha          TEXT NOT NULL,
+  host         TEXT NOT NULL,
+  run_id       TEXT,
+  plan_digest  TEXT,
+  at           TEXT NOT NULL,
+  body         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stamp_links (
+  digest       TEXT NOT NULL,
+  prev_digest  TEXT NOT NULL,
+  PRIMARY KEY (digest, prev_digest)
+);
+CREATE TRIGGER IF NOT EXISTS step_skips_no_update BEFORE UPDATE ON step_skips
+  BEGIN SELECT RAISE(ABORT, 'step_skips is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS step_skips_no_delete BEFORE DELETE ON step_skips
+  BEGIN SELECT RAISE(ABORT, 'step_skips is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS stamps_no_update BEFORE UPDATE ON stamps
+  BEGIN SELECT RAISE(ABORT, 'stamps is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS stamps_no_delete BEFORE DELETE ON stamps
+  BEGIN SELECT RAISE(ABORT, 'stamps is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS stamp_links_no_update BEFORE UPDATE ON stamp_links
+  BEGIN SELECT RAISE(ABORT, 'stamp_links is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS stamp_links_no_delete BEFORE DELETE ON stamp_links
+  BEGIN SELECT RAISE(ABORT, 'stamp_links is append-only'); END;
+"#;
+
+/// Version 5 (engine v2, slice E2): one row per shard of a sharded step.
+const V5: &str = r#"
+CREATE TABLE IF NOT EXISTS step_shards (
+  run_id       TEXT NOT NULL,
+  step         TEXT NOT NULL,
+  shard        INTEGER NOT NULL,
+  of           INTEGER NOT NULL,
+  started_at   TEXT,
+  duration_sec REAL,
+  exit_code    INTEGER,
+  log_ref      TEXT,
+  PRIMARY KEY (run_id, step, shard)
+);
+CREATE TRIGGER IF NOT EXISTS step_shards_no_update BEFORE UPDATE ON step_shards
+  BEGIN SELECT RAISE(ABORT, 'step_shards is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS step_shards_no_delete BEFORE DELETE ON step_shards
+  BEGIN SELECT RAISE(ABORT, 'step_shards is append-only'); END;
+"#;
+
 /// The schema version this binary writes.
-pub const CURRENT_VERSION: i64 = 3;
+pub const CURRENT_VERSION: i64 = 5;
 
 pub struct Ledger {
     pub conn: Connection,
@@ -155,6 +223,12 @@ impl Ledger {
         if from < 3 {
             tx.execute_batch(V3)?;
         }
+        if from < 4 {
+            tx.execute_batch(V4)?;
+        }
+        if from < 5 {
+            tx.execute_batch(V5)?;
+        }
         tx.pragma_update(None, "user_version", CURRENT_VERSION)?;
         tx.commit()?;
         Ok((from, CURRENT_VERSION))
@@ -193,6 +267,40 @@ impl Ledger {
             m.entry(k).or_default().push(v);
         }
         Ok(m)
+    }
+
+    /// Write one finished `chain` run (engine v2, slice E1): its run row, steps, shards, skips and stamp, in one transaction.
+    /// Append-only: a run id already present is an error and nothing is written.
+    pub fn record_chain_run(&self, rid: &str, r: &RunRec) -> Result<()> {
+        self.require_current()?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO runs(id,kind,batch,host,commit_sha,started_at,ended_at,outcome,mode,par,plan_digest,log_sha256,gatetrain_version)              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            params![rid, "chain", r.branch, r.host, r.sha, r.started_at, r.ended_at, r.outcome, r.mode, r.par as i64, r.plan_digest, r.log_sha256, env!("CARGO_PKG_VERSION")],
+        )?;
+        for s in &r.steps {
+            tx.execute(
+                "INSERT INTO steps(run_id,name,started_at,ended_at,duration_sec,exit_code,cached,log_ref,tier,input_key,cached_from,shards) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![rid, s.name, s.started_at, s.ended_at, s.secs, s.rc, s.cached as i64, s.log_ref, s.tier, s.key, s.cached_from, s.shards],
+            )?;
+        }
+        for h in &r.shards {
+            tx.execute(
+                "INSERT INTO step_shards(run_id,step,shard,of,started_at,duration_sec,exit_code,log_ref) VALUES(?,?,?,?,?,?,?,?)",
+                params![rid, h.step, h.shard, h.of, h.started_at, h.secs, h.rc, h.log_ref],
+            )?;
+        }
+        for (step, why) in &r.skips {
+            tx.execute("INSERT INTO step_skips(run_id,step,reason) VALUES(?,?,?)", params![rid, step, why])?;
+        }
+        if let Some((digest, body)) = &r.stamp {
+            tx.execute(
+                "INSERT INTO stamps(digest,kind,sha,host,run_id,plan_digest,at,body) VALUES(?,?,?,?,?,?,?,?)",
+                params![digest, r.mode, r.sha, r.host, rid, r.plan_digest, r.ended_at, body],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn step_count(&self, run_id: &str) -> Result<i64> {

@@ -5,6 +5,7 @@ use crate::logfmt::{splitlines, ParsedLog, Step};
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 const SLOW_FACTOR: f64 = 3.0;
@@ -388,12 +389,76 @@ pub fn classify(idx: usize, lines: &[String], steps: &[Step], history: &History,
 }
 
 pub fn diagnose_log(text: &str, p: &ParsedLog, history: &History, rules: &[Rule]) -> Vec<Finding> {
+    diagnose_log_in(text, p, history, rules, None)
+}
+
+/// The folder a `chain` run named in its `CHAIN_OUT` line, if the log has one.
+pub fn chain_out_of(text: &str) -> Option<PathBuf> {
+    splitlines(text).into_iter().find_map(|l| l.strip_prefix("CHAIN_OUT ").map(|d| PathBuf::from(py_strip(d)))).filter(|d| !d.as_os_str().is_empty())
+}
+
+/// At most this much of the end of a `.full` file is read: the evidence of a red is at its end.
+const FULL_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_tail_lines(path: &Path) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else { return Vec::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let cut = len > FULL_TAIL_BYTES;
+    if cut && f.seek(SeekFrom::Start(len - FULL_TAIL_BYTES)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if f.take(FULL_TAIL_BYTES).read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<String> = splitlines(&text).into_iter().map(|l| py_rstrip(l).to_string()).collect();
+    if cut && !lines.is_empty() {
+        lines.remove(0); // a partial first line
+    }
+    lines
+}
+
+/// The output of a red step of a `chain` run, from its `.full` files in `dir` (engine v2 sections 5 and 6): `<step>.full`, or for a
+/// sharded step the files of its red shards (named by its `STEP_SHARD <step> i/n EXIT rc` lines; none red = the `shard_check` file).
+pub fn full_output(dir: &Path, step: &str, text: &str) -> Vec<String> {
+    let head = format!("STEP_SHARD {step} ");
+    let mut shards: Vec<(String, i64)> = Vec::new(); // (file, rc)
+    for l in splitlines(text) {
+        let Some(rest) = l.strip_prefix(head.as_str()) else { continue };
+        let mut w = rest.split_whitespace();
+        if let (Some(frac), Some("EXIT"), Some(rc)) = (w.next(), w.next(), w.next().and_then(|r| r.parse::<i64>().ok())) {
+            if let Some((i, n)) = frac.split_once('/') {
+                shards.push((format!("{step}.{i}of{n}.full"), rc));
+            }
+        }
+    }
+    if shards.is_empty() {
+        return read_tail_lines(&dir.join(format!("{step}.full")));
+    }
+    let red: Vec<&(String, i64)> = shards.iter().filter(|(_, rc)| *rc != 0).collect();
+    if red.is_empty() {
+        return read_tail_lines(&dir.join(format!("{step}.check.full")));
+    }
+    red.iter().flat_map(|(f, _)| read_tail_lines(&dir.join(f))).collect()
+}
+
+/// Like [`diagnose_log`]; a red step with no `=== <step>` output in the log is read from its `.full` file in `out`, or else in the folder
+/// the log's own `CHAIN_OUT` line names.
+pub fn diagnose_log_in(text: &str, p: &ParsedLog, history: &History, rules: &[Rule], out: Option<&Path>) -> Vec<Finding> {
     let outs = step_output(text);
-    let empty = Vec::new();
+    let dir: Option<PathBuf> = out.map(Path::to_path_buf).or_else(|| chain_out_of(text)).filter(|d| d.is_dir());
     let mut res = Vec::new();
     for (i, s) in p.steps.iter().enumerate() {
         if !matches!(s.exit_code, None | Some(0)) {
-            res.extend(classify(i, outs.get(&s.name).unwrap_or(&empty), &p.steps, history, rules));
+            let banner = outs.get(&s.name).filter(|v| !v.is_empty());
+            let lines = match (banner, &dir) {
+                (Some(b), _) => b.clone(),
+                (None, Some(d)) => full_output(d, &s.name, text),
+                (None, None) => Vec::new(),
+            };
+            res.extend(classify(i, &lines, &p.steps, history, rules));
         }
     }
     res

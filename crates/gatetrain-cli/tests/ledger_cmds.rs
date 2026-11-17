@@ -82,7 +82,7 @@ fn a_run_id_is_refused_twice_and_only_a_running_run_can_be_replaced() {
 fn ingest_writes_a_ledger_a_new_file_needs_no_migrate_for() {
     let (_d, db) = db();
     gt(&["ingest", &fx("run-stopped.log"), "--db", &db, "--now", "2026-11-12T20:00:00+07:00"]);
-    assert_eq!(q(&db, "pragma user_version"), "3");
+    assert_eq!(q(&db, "pragma user_version"), "5");
 }
 
 #[test]
@@ -271,13 +271,13 @@ fn a_ledger_of_an_older_version_is_read_and_written_after_ingest_migrates_it() {
     c.execute_batch(&std::fs::read_to_string(repo().join("ledger/schema.sql")).unwrap()).unwrap();
     drop(c);
     assert_eq!(code(&gt(&["ingest", &fx("run-one-red.log"), "--db", &db])), 0);
-    assert_eq!(q(&db, "pragma user_version"), "3");
+    assert_eq!(q(&db, "pragma user_version"), "5");
 }
 
 #[test]
 fn a_ledger_newer_than_this_binary_is_refused() {
     let (_d, db) = db();
-    rusqlite::Connection::open(&db).unwrap().pragma_update(None, "user_version", 4).unwrap();
+    rusqlite::Connection::open(&db).unwrap().pragma_update(None, "user_version", 6).unwrap();
     let o = gt(&["ingest", &fx("run-one-red.log"), "--db", &db]);
     assert_ne!(code(&o), 0);
     assert!(err(&o).contains("newer"), "{}", err(&o));

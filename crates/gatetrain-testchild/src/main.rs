@@ -87,6 +87,15 @@ fn main() {
             std::thread::sleep(Duration::from_secs_f64(arg(2).parse().unwrap_or(0.0)));
             std::hint::black_box(&v);
         }
+        // `exitif VALUE WHEN CODE`: exit CODE when VALUE equals WHEN, else 0 (a shard that is red for one number only)
+        "exitif" => std::process::exit(if arg(1) == arg(2) { arg(3).parse().unwrap_or(1) } else { 0 }),
+        // `failprint CODE VALUE WHEN A B..`: print A, B.. one per line, then exit CODE when VALUE equals WHEN (else 0)
+        "failprint" => {
+            for x in a.iter().skip(4) {
+                println!("{x}");
+            }
+            std::process::exit(if arg(2) == arg(3) { arg(1).parse().unwrap_or(1) } else { 0 });
+        }
         // `args A B C`: one argument per line
         "args" => {
             for x in &a[1..] {

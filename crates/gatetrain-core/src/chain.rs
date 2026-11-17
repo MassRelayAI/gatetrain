@@ -6,6 +6,9 @@
 //! runs to the end; `slow` starts only when `fast` was green, or with `keep_going`. A step's stdout and stderr go straight to
 //! `<out>/<step>.full` as they are written ([`crate::runner::run_to_file`]: nothing held in memory, the file can be followed, a
 //! timeout keeps the partial output and kills the whole process tree).
+//!
+//! Engine v2 (docs/design/engine-v2.md): `shards = N` runs a step's command N times at once and reports ONE logical step plus
+//! `STEP_SHARD` lines; the finished run is returned as a [`RunRec`] so `chain --db` can write it into the ledger.
 use crate::logfmt::Ts;
 use crate::runner::{run_to_file, shell_command, LocalRunner, Runner};
 use serde::Deserialize;
@@ -38,6 +41,13 @@ pub struct Step {
     pub inputs: Vec<String>,
     /// mixed into the cache key: change it to invalidate the step's entries (a tool version, an env the inputs do not show)
     pub cache_salt: Option<String>,
+    /// 1 to 64: run the command this many times at once, `{shard}` (1-based) and `{shards}` replaced in `run`/`argv`; reported as ONE logical step
+    pub shards: Option<u32>,
+    /// argv run once after every shard is green; `GATETRAIN_SHARD_OUT` names the shard output files (an OS path list). Non-zero makes the step red.
+    pub shard_check: Option<Vec<String>>,
+    /// the command reads `GATETRAIN_SHARD` / `GATETRAIN_SHARDS` itself, so it needs no `{shard}` placeholder
+    #[serde(default)]
+    pub shard_env: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +68,60 @@ pub struct Opts {
     pub cache: Option<PathBuf>,
     /// steps that run even when the cache has them
     pub no_cache_for: Vec<String>,
+    /// what the run claims to be: `preflight` (the default), `lane` or `full`. The caller refuses `full` together with only/skip.
+    pub mode: String,
+    /// the host's name in the log, the stamp and the ledger; None = the environment, then the OS ([`host_name`])
+    pub host: Option<String>,
+}
+
+/// One logical step of a finished run, as the ledger keeps it.
+#[derive(Debug, Clone)]
+pub struct StepRec {
+    pub name: String,
+    pub tier: &'static str,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub rc: i64,
+    pub secs: f64,
+    pub cached: bool,
+    /// for a cached step: the commit its cache entry was written at
+    pub cached_from: Option<String>,
+    pub key: Option<String>,
+    pub shards: i64,
+    pub log_ref: String,
+}
+
+/// One shard of a sharded step.
+#[derive(Debug, Clone)]
+pub struct ShardRec {
+    pub step: String,
+    pub shard: i64,
+    pub of: i64,
+    pub started_at: String,
+    pub secs: f64,
+    pub rc: i64,
+    pub log_ref: String,
+}
+
+/// Everything `chain --db` writes into the ledger (engine v2, E1).
+#[derive(Debug, Clone)]
+pub struct RunRec {
+    pub sha: Option<String>,
+    pub branch: Option<String>,
+    pub host: String,
+    pub mode: String,
+    pub par: usize,
+    pub started_at: String,
+    pub ended_at: String,
+    pub outcome: &'static str,
+    pub plan_digest: String,
+    /// sha-256 of every line `run` emitted, each followed by a newline: the digest of the log a caller captured
+    pub log_sha256: String,
+    pub steps: Vec<StepRec>,
+    pub shards: Vec<ShardRec>,
+    pub skips: Vec<(String, String)>,
+    /// (digest = sha-256 of the stamp file's bytes, the file's text); None when no stamp was written
+    pub stamp: Option<(String, String)>,
 }
 
 pub struct Outcome {
@@ -65,6 +129,7 @@ pub struct Outcome {
     pub reds: Vec<(String, i64)>,
     /// the stamp path, or why none was written
     pub stamp: Result<PathBuf, String>,
+    pub record: RunRec,
 }
 
 /// Parse and validate a steps file. Err = config error (exit 2).
@@ -91,6 +156,7 @@ pub fn load(text: &str) -> Result<Plan, String> {
         if s.timeout_s.is_some_and(|t| t <= 0.0 || !t.is_finite()) {
             return Err(format!("step {:?}: timeout_s must be positive", s.name));
         }
+        check_shards(s)?;
         seen.push(s);
     }
     for s in &plan.steps {
@@ -120,6 +186,54 @@ pub fn load(text: &str) -> Result<Plan, String> {
     Ok(plan)
 }
 
+fn check_shards(s: &Step) -> Result<(), String> {
+    let has_ph = s.run.iter().chain(s.argv.iter().flatten()).any(|t| t.contains("{shard}") || t.contains("{shards}"));
+    match s.shards {
+        None => {
+            if has_ph {
+                return Err(format!("step {:?}: {{shard}} and {{shards}} need `shards = N`", s.name));
+            }
+            if s.shard_check.is_some() || s.shard_env {
+                return Err(format!("step {:?}: shard_check and shard_env need `shards = N`", s.name));
+            }
+        }
+        Some(n) => {
+            if !(1..=64).contains(&n) {
+                return Err(format!("step {:?}: shards must be 1 to 64", s.name));
+            }
+            if n > 1 && !has_ph && !s.shard_env {
+                return Err(format!("step {:?}: shards = {n} but the command has no {{shard}}; use {{shard}}/{{shards}} or `shard_env = true`", s.name));
+            }
+        }
+    }
+    if s.shard_check.as_ref().is_some_and(|a| a.is_empty()) {
+        return Err(format!("step {:?}: shard_check is empty", s.name));
+    }
+    Ok(())
+}
+
+fn subst(t: &str, i: u32, n: u32) -> String {
+    t.replace("{shards}", &n.to_string()).replace("{shard}", &i.to_string())
+}
+
+/// How many shards a step really has: `shards = 1` is one ordinary run (its placeholders still read 1 of 1).
+fn nshards(step: &Step) -> u32 {
+    step.shards.unwrap_or(1)
+}
+
+fn is_sharded(step: &Step) -> bool {
+    nshards(step) > 1
+}
+
+/// The file one part of a step writes to.
+fn part_file(step: &Step, part: Part) -> String {
+    match part {
+        Part::Whole => format!("{}.full", step.name),
+        Part::Shard(i) => format!("{}.{i}of{}.full", step.name, nshards(step)),
+        Part::Check => format!("{}.check.full", step.name),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum St {
     Pending,
@@ -129,27 +243,80 @@ enum St {
     Skipped,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Part {
+    /// the step is not sharded
+    Whole,
+    /// shard i, 1-based
+    Shard(u32),
+    /// the `shard_check` command
+    Check,
+}
+
 struct Done {
     idx: usize,
+    part: Part,
     rc: i64,
     secs: f64,
 }
 
-fn exec(step: &Step, cwd: &Path, out: &Path) -> (i64, f64) {
+/// A sharded step while it runs.
+struct Sh {
+    /// the next shard to start (1-based); shards queue for `--par` slots, one slot each
+    next: u32,
+    n: u32,
+    started: Instant,
+    shard_start: Vec<Option<String>>,
+    /// (rc, seconds) of each shard that ended
+    ended: Vec<Option<(i64, f64)>>,
+    /// RED_NOW is printed once per logical step, at its first red part
+    red_noted: bool,
+    checking: bool,
+}
+
+/// Run `f`; a panic is a part that never reported an exit: rc 125 and a note in its `.full` (engine v2 section 6).
+pub(crate) fn guarded(full: &Path, f: impl FnOnce() -> (i64, f64)) -> (i64, f64) {
     let t0 = Instant::now();
-    let mut c = match (&step.argv, &step.run) {
-        (Some(a), _) => {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(_) => {
+            append_line(full, "chain: the worker for this part died before it reported an exit; it is red with rc 125");
+            (125, t0.elapsed().as_secs_f64())
+        }
+    }
+}
+
+fn exec(step: &Step, cwd: &Path, out: &Path, part: Part) -> (i64, f64) {
+    let t0 = Instant::now();
+    let n = nshards(step);
+    let i = if let Part::Shard(i) = part { i } else { 1 };
+    // placeholders are replaced in the step's own command, whether or not it is split
+    let t = |x: &str| if step.shards.is_some() { subst(x, i, n) } else { x.to_string() };
+    let mut c = match (part, &step.shard_check, &step.argv, &step.run) {
+        (Part::Check, Some(a), _, _) => {
             let mut c = Command::new(&a[0]);
             c.args(&a[1..]);
+            let files: Vec<PathBuf> = (1..=n).map(|k| out.join(part_file(step, Part::Shard(k)))).collect();
+            if let Ok(j) = std::env::join_paths(files) {
+                c.env("GATETRAIN_SHARD_OUT", j);
+            }
+            c
+        }
+        (_, _, Some(a), _) => {
+            let mut c = Command::new(t(&a[0]));
+            c.args(a[1..].iter().map(|x| t(x)));
             c
         }
         // both streams share one file handle, so they interleave in the order they were written
-        (None, Some(r)) => shell_command(r),
+        (_, _, None, Some(r)) => shell_command(&t(r)),
         _ => unreachable!("load() refuses a step with neither"),
     };
+    if part != Part::Check && step.shards.is_some() {
+        c.env("GATETRAIN_SHARD", i.to_string()).env("GATETRAIN_SHARDS", n.to_string());
+    }
     c.current_dir(cwd);
     let limit = step.timeout_s.unwrap_or(365.0 * 86400.0);
-    let full = out.join(format!("{}.full", step.name));
+    let full = out.join(part_file(step, part));
     let (rc, note) = match run_to_file(c, &full, limit) {
         Ok(Some(code)) => (i64::from(code), None),
         Ok(None) => (124, Some(format!("chain: timed out after {limit} s; the process tree was killed (the output above is what it wrote)"))),
@@ -173,6 +340,15 @@ fn append_line(full: &Path, line: &str) {
     }
 }
 
+fn spawn_part(step: &Step, idx: usize, part: Part, cwd: &Path, out: &Path, tx: &mpsc::Sender<Done>) {
+    let (step, cwd, out, tx) = (step.clone(), cwd.to_path_buf(), out.to_path_buf(), tx.clone());
+    std::thread::spawn(move || {
+        let full = out.join(part_file(&step, part));
+        let (rc, secs) = guarded(&full, || exec(&step, &cwd, &out, part));
+        let _ = tx.send(Done { idx, part, rc, secs });
+    });
+}
+
 fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
     let mut argv = vec!["git".to_string()];
     argv.extend(args.iter().map(|s| s.to_string()));
@@ -180,11 +356,42 @@ fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
     (o.code == 0).then(|| o.stdout.trim().to_string())
 }
 
-fn host() -> String {
-    ["COMPUTERNAME", "HOSTNAME"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty() && !v.contains(char::is_whitespace)))
-        .unwrap_or_else(|| "unknown".into())
+fn clean_host(v: &str) -> Option<String> {
+    let v = v.trim();
+    (!v.is_empty() && !v.contains(char::is_whitespace)).then(|| v.to_string())
+}
+
+/// The machine's name from the OS, not the environment (`HOSTNAME` is a shell variable that is usually not exported): the kernel's
+/// file on Linux, else the `hostname` command, else `uname -n`.
+pub fn os_hostname() -> Option<String> {
+    if let Some(h) = std::fs::read_to_string("/proc/sys/kernel/hostname").ok().and_then(|t| clean_host(&t)) {
+        return Some(h);
+    }
+    for argv in [["hostname"].as_slice(), ["uname", "-n"].as_slice()] {
+        let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+        if let Ok(o) = LocalRunner.run_argv(Path::new("."), &argv) {
+            if o.code == 0 {
+                if let Some(h) = clean_host(&o.stdout) {
+                    return Some(h);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The host name a run reports: `GATETRAIN_HOST` (set by `hold`), `COMPUTERNAME`, `HOSTNAME`, then the OS ([`os_hostname`]), else
+/// `unknown`. The two lookups are parameters so a test can show each step of the fallback.
+pub fn host_with(env: &dyn Fn(&str) -> Option<String>, os: &dyn Fn() -> Option<String>) -> String {
+    ["GATETRAIN_HOST", "COMPUTERNAME", "HOSTNAME"].iter().find_map(|k| env(k).and_then(|v| clean_host(&v))).or_else(os).unwrap_or_else(|| "unknown".into())
+}
+
+pub fn host_name() -> String {
+    host_with(&|k| std::env::var(k).ok(), &os_hostname)
+}
+
+fn round1(x: f64) -> f64 {
+    (x * 10.0).round() / 10.0
 }
 
 /// Run the plan, calling `emit` once per log-format line. Err = config error (a name in only/skip that is no step, an unusable out folder).
@@ -203,6 +410,15 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         })
         .collect();
     let par = o.par.max(1);
+    let host = o.host.as_deref().and_then(clean_host).unwrap_or_else(host_name);
+
+    // every emitted line also feeds the log digest the ledger keeps
+    let mut log_hash = Sha256::new();
+    let mut say = |l: &str| {
+        log_hash.update(l.as_bytes());
+        log_hash.update(b"\n");
+        emit(l);
+    };
 
     // the tree must be clean before AND after; the out folder is not part of the tree it proves
     let out_abs = o.out.canonicalize().unwrap_or_else(|_| o.out.clone());
@@ -216,19 +432,30 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let porcelain: Vec<&str> = porcelain.iter().map(String::as_str).collect();
     let sha = git_out(&cwd, &["rev-parse", "HEAD"]);
     let dirty_before = sha.as_ref().map(|_| git_out(&cwd, &porcelain).unwrap_or_else(|| "git status failed".into()));
+    let mut branch: Option<String> = None;
     if let Some(sha) = &sha {
-        let branch = git_out(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|| "HEAD".into());
-        emit(&format!("branch {} at {} on {}", branch.replace(char::is_whitespace, "_"), sha, host()));
+        let b = git_out(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|| "HEAD".into());
+        say(&format!("branch {} at {} on {}", b.replace(char::is_whitespace, "_"), sha, host));
+        branch = Some(b.replace(char::is_whitespace, "_"));
     }
-    emit("CHAIN_MODE preflight");
-    emit(&format!("CHAIN_PARALLEL {par}"));
+    let started_at = Ts::now_utc().iso();
+    say(&format!("CHAIN_MODE {}", o.mode));
+    say(&format!("CHAIN_PARALLEL {par}"));
+    // where the per-step `.full` files are, so `diagnose` can find them from the log alone (an unknown line to every reader)
+    say(&format!("CHAIN_OUT {}", out_abs.to_string_lossy().trim_start_matches(r"\\?\")));
 
-    let mut state = vec![St::Pending; plan.steps.len()];
+    let n_steps = plan.steps.len();
+    let mut state = vec![St::Pending; n_steps];
     let mut times: Vec<(usize, i64, f64)> = Vec::new();
     let mut reds: Vec<(String, i64)> = Vec::new();
-    let mut keys: Vec<Option<String>> = vec![None; plan.steps.len()];
-    let mut notes: Vec<Option<String>> = vec![None; plan.steps.len()];
+    let mut keys: Vec<Option<String>> = vec![None; n_steps];
+    let mut notes: Vec<Option<String>> = vec![None; n_steps];
     let mut cached: Vec<usize> = Vec::new();
+    let mut sh: Vec<Option<Sh>> = (0..n_steps).map(|_| None).collect();
+    let mut step_started: Vec<Option<String>> = vec![None; n_steps];
+    let mut recs: Vec<StepRec> = Vec::new();
+    let mut shard_recs: Vec<ShardRec> = Vec::new();
+    let mut skips: Vec<(String, String)> = Vec::new();
     let t_run = Instant::now();
     let mut fast_red = false;
     for tier in [Tier::Fast, Tier::Slow] {
@@ -239,7 +466,9 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         if tier == Tier::Slow && fast_red && !o.keep_going {
             for &i in &mine {
                 state[i] = St::Skipped;
-                emit(&format!("STEP_SKIPPED {} a fast step is red; --keep-going runs slow anyway", plan.steps[i].name));
+                let why = "a fast step is red; --keep-going runs slow anyway";
+                say(&format!("STEP_SKIPPED {} {why}", plan.steps[i].name));
+                skips.push((plan.steps[i].name.clone(), why.into()));
             }
             continue;
         }
@@ -260,16 +489,27 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                         .find(|n| plan.steps.iter().position(|s| &s.name == *n).is_some_and(|j| matches!(state[j], St::Red | St::Skipped)));
                     if let Some(n) = bad {
                         state[i] = St::Skipped;
-                        emit(&format!("STEP_SKIPPED {} needs {n}, which is not green", plan.steps[i].name));
+                        let why = format!("needs {n}, which is not green");
+                        say(&format!("STEP_SKIPPED {} {why}", plan.steps[i].name));
+                        skips.push((plan.steps[i].name.clone(), why));
                         changed = true;
                     }
                 }
             }
-            // start what is ready, in file order
+            // start what is ready, in file order: first the shards still queued for a slot, then new steps
             let mut hit = false;
             for &i in &mine {
                 if running >= par {
                     break;
+                }
+                if state[i] == St::Running {
+                    if let Some(s) = sh[i].as_mut() {
+                        while running < par && s.next <= s.n {
+                            launch_shard(&plan.steps[i], i, s, &cwd, &o.out, &tx, &mut say);
+                            running += 1;
+                        }
+                    }
+                    continue;
                 }
                 if state[i] != St::Pending {
                     continue;
@@ -289,15 +529,29 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                             Ok(k) => {
                                 let entry = (!o.no_cache_for.contains(&step.name)).then(|| read_entry(cdir, &step.name, &k)).flatten();
                                 if let Some((esha, eat)) = entry {
-                                    emit(&format!("STEP_START {} {}", step.name, Ts::now_utc().iso()));
-                                    emit(&format!("STEP_CACHED {}", step.name));
-                                    emit(&format!("STEP_TIME {} 0.0s", step.name));
-                                    emit(&format!("STEP_EXIT {} 0", step.name));
+                                    let now = Ts::now_utc().iso();
+                                    say(&format!("STEP_START {} {now}", step.name));
+                                    say(&format!("STEP_CACHED {}", step.name));
+                                    say(&format!("STEP_TIME {} 0.0s", step.name));
+                                    say(&format!("STEP_EXIT {} 0", step.name));
                                     let full = o.out.join(format!("{}.full", step.name));
                                     let _ = std::fs::write(&full, format!("cached: green at {esha} {eat}, key {k}\n"));
                                     state[i] = St::Green;
                                     times.push((i, 0, 0.0));
                                     cached.push(i);
+                                    recs.push(StepRec {
+                                        name: step.name.clone(),
+                                        tier: tier_name(step.tier),
+                                        started_at: Some(now.clone()),
+                                        ended_at: Some(now),
+                                        rc: 0,
+                                        secs: 0.0,
+                                        cached: true,
+                                        cached_from: Some(esha),
+                                        key: Some(k),
+                                        shards: i64::from(nshards(step)),
+                                        log_ref: format!("{}.full", step.name),
+                                    });
                                     hit = true;
                                     continue;
                                 }
@@ -308,13 +562,23 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     }
                 }
                 state[i] = St::Running;
-                running += 1;
-                emit(&format!("STEP_START {} {}", plan.steps[i].name, Ts::now_utc().iso()));
-                let (step, cwd, out, tx) = (plan.steps[i].clone(), cwd.clone(), o.out.clone(), tx.clone());
-                std::thread::spawn(move || {
-                    let (rc, secs) = exec(&step, &cwd, &out);
-                    let _ = tx.send(Done { idx: i, rc, secs });
-                });
+                let now = Ts::now_utc().iso();
+                say(&format!("STEP_START {} {now}", plan.steps[i].name));
+                step_started[i] = Some(now);
+                if is_sharded(&plan.steps[i]) {
+                    let n = nshards(&plan.steps[i]);
+                    let list: String = (1..=n).map(|k| format!("{}\n", part_file(&plan.steps[i], Part::Shard(k)))).collect();
+                    let _ = std::fs::write(o.out.join(format!("{}.full", plan.steps[i].name)), format!("{n} shards, each in its own file:\n{list}"));
+                    let mut s = Sh { next: 1, n, started: Instant::now(), shard_start: vec![None; n as usize], ended: vec![None; n as usize], red_noted: false, checking: false };
+                    while running < par && s.next <= s.n {
+                        launch_shard(&plan.steps[i], i, &mut s, &cwd, &o.out, &tx, &mut say);
+                        running += 1;
+                    }
+                    sh[i] = Some(s);
+                } else {
+                    running += 1;
+                    spawn_part(&plan.steps[i], i, Part::Whole, &cwd, &o.out, &tx);
+                }
             }
             if hit {
                 continue; // a cached step is green already: settle skips and start its dependents
@@ -324,36 +588,95 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             }
             let d = rx.recv_timeout(Duration::from_secs(3600 * 24 * 366)).map_err(|e| format!("chain: lost a worker: {e}"))?;
             running -= 1;
-            let name = &plan.steps[d.idx].name;
-            emit(&format!("STEP_TIME {name} {:.1}s", d.secs));
-            emit(&format!("STEP_EXIT {name} {}", d.rc));
-            times.push((d.idx, d.rc, d.secs));
+            let step = &plan.steps[d.idx];
+            let name = &step.name;
+            // `fin` = Some((rc, wall seconds)) once the logical step is over
+            let mut red_file = format!("{name}.full");
+            let fin: Option<(i64, f64)> = match d.part {
+                Part::Whole => Some((d.rc, d.secs)),
+                Part::Shard(k) => {
+                    let s = sh[d.idx].as_mut().expect("a shard of a step that is running");
+                    say(&format!("STEP_SHARD {name} {k}/{} EXIT {} {:.1}s", s.n, d.rc, d.secs));
+                    s.ended[k as usize - 1] = Some((d.rc, d.secs));
+                    shard_recs.push(ShardRec {
+                        step: name.clone(),
+                        shard: i64::from(k),
+                        of: i64::from(s.n),
+                        started_at: s.shard_start[k as usize - 1].clone().unwrap_or_default(),
+                        secs: round1(d.secs),
+                        rc: d.rc,
+                        log_ref: part_file(step, Part::Shard(k)),
+                    });
+                    if d.rc != 0 && !s.red_noted {
+                        s.red_noted = true;
+                        say(&format!("RED_NOW {name} rc={} at {} (shard {k}/{}; full output: {})", d.rc, Ts::now_utc().iso(), s.n, part_file(step, Part::Shard(k))));
+                    }
+                    if s.ended.iter().all(Option::is_some) {
+                        let lowest_red = s.ended.iter().flatten().find(|(rc, _)| *rc != 0).map(|(rc, _)| *rc);
+                        match (lowest_red, &step.shard_check) {
+                            (Some(rc), _) => Some((rc, s.started.elapsed().as_secs_f64())),
+                            (None, Some(_)) => {
+                                s.checking = true;
+                                spawn_part(step, d.idx, Part::Check, &cwd, &o.out, &tx);
+                                running += 1;
+                                None
+                            }
+                            (None, None) => Some((0, s.started.elapsed().as_secs_f64())),
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Part::Check => {
+                    red_file = part_file(step, Part::Check);
+                    Some((d.rc, sh[d.idx].as_ref().map_or(d.secs, |s| s.started.elapsed().as_secs_f64())))
+                }
+            };
+            let Some((rc, secs)) = fin else { continue };
+            say(&format!("STEP_TIME {name} {secs:.1}s"));
+            say(&format!("STEP_EXIT {name} {rc}"));
+            times.push((d.idx, rc, secs));
             if let Some(n) = &notes[d.idx] {
                 append_line(&o.out.join(format!("{name}.full")), n);
             }
-            if d.rc == 0 {
+            recs.push(StepRec {
+                name: name.clone(),
+                tier: tier_name(step.tier),
+                started_at: step_started[d.idx].clone(),
+                ended_at: Some(Ts::now_utc().iso()),
+                rc,
+                secs: round1(secs),
+                cached: false,
+                cached_from: None,
+                key: keys[d.idx].clone(),
+                shards: i64::from(nshards(step)),
+                log_ref: format!("{name}.full"),
+            });
+            if rc == 0 {
                 if let (Some(cdir), Some(k), Some(sha)) = (&o.cache, &keys[d.idx], &sha) {
-                    if let Err(e) = write_entry(cdir, name, k, sha, d.secs) {
+                    if let Err(e) = write_entry(cdir, name, k, sha, secs, &host) {
                         eprintln!("chain: cannot write the cache entry for {name}: {e}");
                     }
                 }
                 state[d.idx] = St::Green;
             } else {
                 state[d.idx] = St::Red;
-                reds.push((name.clone(), d.rc));
+                reds.push((name.clone(), rc));
                 if tier == Tier::Fast {
                     fast_red = true;
                 }
-                emit(&format!("RED_NOW {name} rc={} at {} (full output: {name}.full)", d.rc, Ts::now_utc().iso()));
+                if !sh[d.idx].as_ref().is_some_and(|s| s.red_noted) {
+                    say(&format!("RED_NOW {name} rc={rc} at {} (full output: {red_file})", Ts::now_utc().iso()));
+                }
             }
         }
     }
-    emit(&format!(
-        "RED_SUMMARY: {}",
-        if reds.is_empty() { "none".to_string() } else { summary_in_file_order(plan, &reds) }
-    ));
-    emit("GATES_DONE");
+    say(&format!("RED_SUMMARY: {}", if reds.is_empty() { "none".to_string() } else { summary_in_file_order(plan, &reds) }));
+    say("GATES_DONE");
+    let log_sha256: String = log_hash.clone().finalize().iter().map(|b| format!("{b:02x}")).collect();
 
+    let ended_at = Ts::now_utc().iso();
+    let mut stamp_text: Option<(String, String)> = None;
     let stamp = if !reds.is_empty() {
         Err("the run is red".to_string())
     } else if let (Some(sha), Some(before)) = (&sha, &dirty_before) {
@@ -364,28 +687,69 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             let steps: Vec<serde_json::Value> = times
                 .iter()
                 .map(|&(i, rc, secs)| {
-                    let tier = if plan.steps[i].tier == Tier::Fast { "fast" } else { "slow" };
-                    serde_json::json!({"name": plan.steps[i].name, "tier": tier, "rc": rc, "seconds": (secs * 10.0).round() / 10.0})
+                    let rec = recs.iter().find(|r| r.name == plan.steps[i].name);
+                    serde_json::json!({
+                        "name": plan.steps[i].name, "tier": tier_name(plan.steps[i].tier), "rc": rc, "seconds": round1(secs),
+                        "key": rec.and_then(|r| r.key.clone()), "cached_from": rec.and_then(|r| r.cached_from.clone()), "shards": nshards(&plan.steps[i]),
+                    })
                 })
                 .collect();
             let body = serde_json::json!({
-                "sha": sha, "host": host(), "at": Ts::now_utc().iso(), "mode": "preflight", "par": par,
-                "total_seconds": (t_run.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+                "v": 1, "kind": o.mode, "sha": sha, "host": host, "at": Ts::now_utc().iso(), "mode": o.mode, "par": par,
+                "total_seconds": round1(t_run.elapsed().as_secs_f64()),
                 "digest": digest, "steps": steps,
                 "cached": cached.iter().map(|&i| plan.steps[i].name.clone()).collect::<Vec<_>>(),
+                "prev": Vec::<String>::new(),
             });
+            let text = serde_json::to_string_pretty(&body).unwrap_or_default() + "\n";
             let p = o.out.join(format!("stamp-{sha}.json"));
-            std::fs::write(&p, serde_json::to_string_pretty(&body).unwrap_or_default() + "\n").map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+            std::fs::write(&p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+            // a stamp's own digest is the sha-256 of the file's bytes (engine v2 section 5.4)
+            stamp_text = Some((digest_of(&text), text));
             Ok(p)
         }
     } else {
         Err("not a git repository: no stamp written".to_string())
     };
-    Ok(Outcome { reds, stamp })
+    let record = RunRec {
+        sha,
+        branch,
+        host,
+        mode: o.mode.clone(),
+        par,
+        started_at,
+        ended_at,
+        outcome: if reds.is_empty() { "green" } else { "red" },
+        plan_digest: digest.to_string(),
+        log_sha256,
+        steps: recs,
+        shards: shard_recs,
+        skips,
+        stamp: stamp_text,
+    };
+    Ok(Outcome { reds, stamp, record })
+}
+
+fn tier_name(t: Tier) -> &'static str {
+    if t == Tier::Fast {
+        "fast"
+    } else {
+        "slow"
+    }
+}
+
+fn launch_shard(step: &Step, idx: usize, s: &mut Sh, cwd: &Path, out: &Path, tx: &mpsc::Sender<Done>, say: &mut dyn FnMut(&str)) {
+    let k = s.next;
+    s.next += 1;
+    let now = Ts::now_utc().iso();
+    say(&format!("STEP_SHARD {} {k}/{} START {now}", step.name, s.n));
+    s.shard_start[k as usize - 1] = Some(now);
+    spawn_part(step, idx, Part::Shard(k), cwd, out, tx);
 }
 
 /// The cache key of a step: sha-256 over its command, its directory relative to the repository top, salt and `git ls-files -s -- <inputs>` (mode, blob, path of every tracked
-/// input). Err(why) = this run must not use or fill the cache: a dirty input (modified or untracked), no tracked input, or git failing.
+/// input). A sharded step's key also covers `shards` and `shard_check` (one key for the logical step). Err(why) = this run must not use or fill the cache: a dirty input
+/// (modified or untracked), no tracked input, or git failing.
 fn cache_key(step: &Step, cwd: &Path) -> Result<String, String> {
     let mut spec: Vec<&str> = vec!["--"];
     spec.extend(step.inputs.iter().map(String::as_str));
@@ -412,10 +776,20 @@ fn cache_key(step: &Step, cwd: &Path) -> Result<String, String> {
         _ => String::new(),
     });
     // the directory RELATIVE to the repository top (`git rev-parse --show-prefix`), never the absolute path: two worktrees of one
-    // commit (the pre-check's and the proof's) must share a key (engine-v2 design, conflict X with this branch)
+    // commit (the pre-check's and the proof's) must share a key (engine-v2 design, conflict X1)
     let prefix = git_out(cwd, &["rev-parse", "--show-prefix"]).ok_or_else(|| "git rev-parse --show-prefix failed".to_string())?;
     part(&format!("cwd:{prefix}"));
     part(step.cache_salt.as_deref().unwrap_or(""));
+    // only a sharded step adds these, so every key an unsharded step had before stays what it was
+    if let Some(n) = step.shards {
+        part(&format!("shards:{n}"));
+        if let Some(c) = &step.shard_check {
+            part(&format!("shard_check:{}", serde_json::to_string(c).unwrap_or_default()));
+        }
+        if step.shard_env {
+            part("shard_env");
+        }
+    }
     for l in lines {
         part(l);
     }
@@ -429,10 +803,10 @@ fn read_entry(cache: &Path, step: &str, key: &str) -> Option<(String, String)> {
     (v["key"].as_str()? == key).then(|| (v["sha"].as_str().unwrap_or("unknown").to_string(), v["at"].as_str().unwrap_or("unknown").to_string()))
 }
 
-fn write_entry(cache: &Path, step: &str, key: &str, sha: &str, secs: f64) -> Result<(), String> {
+fn write_entry(cache: &Path, step: &str, key: &str, sha: &str, secs: f64, host: &str) -> Result<(), String> {
     let dir = cache.join(step);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let body = serde_json::json!({"sha": sha, "at": Ts::now_utc().iso(), "seconds": (secs * 10.0).round() / 10.0, "key": key, "host": host()});
+    let body = serde_json::json!({"sha": sha, "at": Ts::now_utc().iso(), "seconds": round1(secs), "key": key, "host": host});
     let tmp = dir.join(format!("{key}.json.tmp"));
     std::fs::write(&tmp, serde_json::to_string_pretty(&body).unwrap_or_default() + "\n").map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, dir.join(format!("{key}.json"))).map_err(|e| e.to_string())
@@ -448,4 +822,46 @@ fn summary_in_file_order(plan: &Plan, reds: &[(String, i64)]) -> String {
     let mut v: Vec<(usize, &(String, i64))> = reds.iter().map(|r| (plan.steps.iter().position(|s| s.name == r.0).unwrap_or(usize::MAX), r)).collect();
     v.sort_by_key(|(i, _)| *i);
     v.iter().map(|(_, (n, rc))| format!("{n}(rc={rc})")).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_worker_that_dies_is_rc_125_with_a_note_in_its_full_file() {
+        let d = std::env::temp_dir().join(format!("gt-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let full = d.join("t.2of4.full");
+        std::fs::write(&full, "partial output with no newline").unwrap();
+        let (rc, _) = guarded(&full, || panic!("the worker died"));
+        assert_eq!(rc, 125);
+        let text = std::fs::read_to_string(&full).unwrap();
+        assert!(text.starts_with("partial output with no newline\n") && text.contains("rc 125"), "{text}");
+        assert_eq!(guarded(&full, || (3, 1.5)), (3, 1.5), "a normal part passes through");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn host_falls_back_in_order_env_then_os_then_unknown() {
+        let none = |_: &str| None;
+        assert_eq!(host_with(&none, &|| Some("os-name".into())), "os-name");
+        assert_eq!(host_with(&none, &|| None), "unknown");
+        let env = |k: &str| match k {
+            "HOSTNAME" => Some("from-env".to_string()),
+            "GATETRAIN_HOST" => Some("from-hold".to_string()),
+            _ => None,
+        };
+        assert_eq!(host_with(&env, &|| Some("os-name".into())), "from-hold");
+        let blank = |k: &str| (k == "COMPUTERNAME").then(|| "  ".to_string());
+        assert_eq!(host_with(&blank, &|| Some("os-name".into())), "os-name", "a blank variable is not a name");
+        let spaced = |k: &str| (k == "HOSTNAME").then(|| "two words".to_string());
+        assert_eq!(host_with(&spaced, &|| Some("os-name".into())), "os-name", "a name with whitespace would break the log line");
+    }
+
+    #[test]
+    fn the_os_hostname_is_a_real_name() {
+        let h = os_hostname().expect("this machine has a host name");
+        assert!(!h.is_empty() && !h.contains(char::is_whitespace));
+    }
 }

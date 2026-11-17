@@ -45,6 +45,10 @@ enum Cmd {
         config: Option<String>,
         #[arg(long)]
         host: Option<String>,
+        /// A `chain` run's --out folder: a red step with no output in the log is read from its <step>.full (or its red shards' files).
+        /// Default: the folder the log's own CHAIN_OUT line names
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Text report of a chain log or of a run in the ledger
     Report(AnalysisArgs),
@@ -416,7 +420,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Diagnose { log, db, rules, parallel, config, host } => {
+        Cmd::Diagnose { log, db, rules, parallel, config, host, out } => {
             let parallel = configured_parallel(parallel, config.as_deref().map(Path::new), host.as_deref())?;
             let bytes = std::fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
             let text = String::from_utf8_lossy(&bytes);
@@ -433,7 +437,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
             } else {
                 diagnose::History::new()
             };
-            println!("{}", diagnose::format_findings(&diagnose::diagnose_log(&text, &p, &hist, &rs)));
+            println!("{}", diagnose::format_findings(&diagnose::diagnose_log_in(&text, &p, &hist, &rs, out.as_deref())));
             if let Some(note) = diagnose::parallelism_note(&p, parallel) {
                 println!("{note}");
             }
