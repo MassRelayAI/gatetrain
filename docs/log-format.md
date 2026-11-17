@@ -13,6 +13,7 @@ Steps may run in parallel and their lines may interleave: lines are matched to a
 | `STEP_TIME <step> <N>s` | the step's wall time in seconds; end time = `STEP_START` + `STEP_TIME` |
 | `STEP_EXIT <step> <rc>` | the step's exit code; `0` is green |
 | `STEP_CACHED <step>` | optional: the result came from the step cache, nothing ran |
+| `STEP_SKIPPED <step> <reason>` | optional: the step never ran (a step it needs is not green, or a fast step was red); it is listed apart and counts in no step total |
 | `RED_NOW <step> rc=<n> at <ISO time> (<note>)` | printed the moment a step fails, so a watcher can react before the run ends |
 | `RED_SUMMARY: <step>(rc=<n>) ... \| none` | once, at the end: every red, or `none` |
 | `GATES_DONE` | once, last: the run finished (green or red) |

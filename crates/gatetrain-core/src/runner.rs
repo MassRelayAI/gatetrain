@@ -124,8 +124,50 @@ fn kill_tree(child: &mut std::process::Child) {
     if cfg!(windows) {
         // the shell's own children (powershell, du) die with it
         let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &child.id().to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    } else {
+        // `Child::kill` signals only the direct child: `sh -c 'npm test'` would leave npm and its workers running. Collect the
+        // whole tree first (`pgrep -P`, on Linux and macOS), then kill it, so nothing is re-parented to init between the two.
+        let mut tree: Vec<u32> = Vec::new();
+        let mut todo = vec![child.id()];
+        while let Some(p) = todo.pop() {
+            if let Ok(o) = Command::new("pgrep").args(["-P", &p.to_string()]).stdin(Stdio::null()).stderr(Stdio::null()).output() {
+                for kid in String::from_utf8_lossy(&o.stdout).split_whitespace().filter_map(|x| x.parse::<u32>().ok()) {
+                    if !tree.contains(&kid) {
+                        tree.push(kid);
+                        todo.push(kid);
+                    }
+                }
+            }
+        }
+        if !tree.is_empty() {
+            let ids: Vec<String> = tree.iter().map(u32::to_string).collect();
+            let _ = Command::new("kill").arg("-KILL").args(&ids).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
     }
     let _ = child.kill();
+}
+
+/// Run a prepared command with stdout AND stderr written straight to `file` as they come (nothing is held in memory, the file can
+/// be followed while the command runs, and a timeout keeps what was written). `Ok(Some(code))` = it ended; `Ok(None)` = it ran past
+/// `timeout` seconds and its whole process tree was killed.
+pub fn run_to_file(mut c: Command, file: &Path, timeout: f64) -> Result<Option<i32>, String> {
+    let f = std::fs::File::create(file).map_err(|e| format!("cannot create {}: {e}", file.display()))?;
+    let f2 = f.try_clone().map_err(|e| e.to_string())?;
+    c.stdin(Stdio::null()).stdout(Stdio::from(f)).stderr(Stdio::from(f2));
+    let mut child = c.spawn().map_err(|e| e.to_string())?;
+    let limit = Duration::from_secs_f64(timeout.max(0.0));
+    let start = Instant::now();
+    loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            return Ok(Some(st.code().unwrap_or(-1)));
+        }
+        if start.elapsed() > limit {
+            kill_tree(&mut child);
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn exec(c: Command, shown: &str) -> Result<Output, String> {
@@ -281,9 +323,4 @@ impl FakeRunner {
 /// A shell command line as a prepared [`Command`] (cmd.exe on Windows, `/bin/sh -c` elsewhere), for callers that set their own directory.
 pub fn shell_command(cmd: &str) -> Command {
     shell(cmd)
-}
-
-/// Run a prepared command to the end with BOTH streams captured and a time limit (`None` = 60 s); `Ok(None)` = timed out, the tree is killed.
-pub fn run_cmd_full(c: Command, timeout: Option<f64>) -> Result<Option<Output>, String> {
-    spawn_wait(c, None, timeout)
 }

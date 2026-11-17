@@ -122,8 +122,8 @@ fn needs_orders_steps_and_a_red_dependency_skips_dependents() {
         + &step("free", "fast", &[], None, &["pass"]);
     let r = chain(d2.path(), &toml, &["--par", "4"]);
     assert_eq!(code(&r), 1);
-    assert!(r.stdout.contains("SKIPPED lint"), "{}", r.stdout);
-    assert!(r.stdout.contains("SKIPPED docs"), "{}", r.stdout);
+    assert!(r.stdout.contains("STEP_SKIPPED lint"), "{}", r.stdout);
+    assert!(r.stdout.contains("STEP_SKIPPED docs"), "{}", r.stdout);
     let p = parse_log(&r.stdout).unwrap();
     assert_eq!(p.red_summary.as_deref(), Some("regen(rc=2)"));
     assert!(p.steps.iter().all(|s| s.name != "lint" && s.name != "docs"));
@@ -252,4 +252,62 @@ fn only_and_skip_select_steps() {
     let r = chain(d.path(), &toml, &["--par", "2", "--skip", "b"]);
     assert_eq!(code(&r), 0);
     assert_eq!(parse_log(&r.stdout).unwrap().steps.len(), 2);
+}
+
+#[test]
+fn a_timeout_keeps_the_output_written_before_the_kill() {
+    let d = tempfile::tempdir().unwrap();
+    let r = chain(d.path(), &step("hang", "fast", &[], Some(1), &["printsleep", "BEFORE-THE-KILL", "6"]), &["--par", "1"]);
+    assert_eq!(code(&r), 1);
+    let full = std::fs::read_to_string(r.out.join("hang.full")).unwrap();
+    assert!(full.contains("BEFORE-THE-KILL"), "the partial output was lost: {full:?}");
+    assert!(full.contains("timed out"), "the timeout note is missing: {full:?}");
+}
+
+#[test]
+fn a_full_file_grows_while_the_step_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let toml = step("live", "fast", &[], None, &["printsleep", "LIVE-LINE", "3"]);
+    let f = d.path().join("steps.toml");
+    std::fs::write(&f, toml).unwrap();
+    let out = d.path().join("out");
+    let mut c = Command::new(env!("CARGO_BIN_EXE_gatetrain"))
+        .args(["chain", "--steps", f.to_str().unwrap(), "--out", out.to_str().unwrap(), "--par", "1"])
+        .current_dir(d.path())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let mid = std::fs::read_to_string(out.join("live.full")).unwrap_or_default();
+    let _ = c.wait();
+    assert!(mid.contains("LIVE-LINE"), "the .full file was empty while the step ran: {mid:?}");
+}
+
+#[test]
+fn a_skipped_step_is_a_parsed_marker() {
+    let d = tempfile::tempdir().unwrap();
+    let toml = step("regen", "fast", &[], None, &["exit", "2"]) + &step("lint", "fast", &["regen"], None, &["pass"]) + &step("api", "slow", &[], None, &["pass"]);
+    let r = chain(d.path(), &toml, &["--par", "2"]);
+    assert_eq!(code(&r), 1);
+    let p = parse_log(&r.stdout).unwrap();
+    let names: Vec<&str> = p.skipped.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["lint", "api"], "{}", r.stdout);
+    assert!(p.steps.iter().all(|s| s.name != "lint" && s.name != "api"), "a skipped step is not a step that ran");
+}
+
+#[test]
+fn a_relative_cwd_resolves_against_the_steps_file() {
+    let d = tempfile::tempdir().unwrap();
+    let sub = d.path().join("conf");
+    std::fs::create_dir_all(sub.join("work")).unwrap();
+    std::fs::write(sub.join("work").join("here.txt"), "x").unwrap();
+    let f = sub.join("steps.toml");
+    std::fs::write(&f, format!("cwd = 'work'\n{}", step("look", "fast", &[], None, &["exists", "here.txt"]))).unwrap();
+    let out = d.path().join("out");
+    let o = Command::new(env!("CARGO_BIN_EXE_gatetrain"))
+        .args(["chain", "--steps", f.to_str().unwrap(), "--out", out.to_str().unwrap()])
+        .current_dir(d.path())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stdout));
 }

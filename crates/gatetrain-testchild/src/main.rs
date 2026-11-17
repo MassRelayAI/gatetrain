@@ -32,6 +32,14 @@ fn main() {
             std::thread::sleep(Duration::from_secs_f64(arg(2).parse().unwrap_or(0.0)));
         }
         "sleep" => std::thread::sleep(Duration::from_secs_f64(arg(1).parse().unwrap_or(0.0))),
+        // `printsleep TEXT SECS`: print TEXT and flush, then sleep (output written before a timeout kill)
+        "printsleep" => {
+            println!("{}", arg(1));
+            let _ = std::io::stdout().flush();
+            std::thread::sleep(Duration::from_secs_f64(arg(2).parse().unwrap_or(0.0)));
+        }
+        // `exists FILE`: exit 0 when FILE exists relative to the working directory, else 1
+        "exists" => std::process::exit(if std::path::Path::new(arg(1)).exists() { 0 } else { 1 }),
         // a grandchild that holds our stdout for as long as we do
         "grandchild" => {
             let me = std::env::current_exe().unwrap();

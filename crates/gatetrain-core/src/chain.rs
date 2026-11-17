@@ -1,12 +1,13 @@
 //! `gatetrain chain`: the step runner (docs/log-format.md is what it prints).
 //!
 //! A steps file lists `[[step]]`s, each `fast` or `slow`. A tier runs its steps in parallel up to `par`, in file order, a step
-//! starting only when every step it `needs` is green. A step whose need went red (or was skipped) is not run: it prints a
-//! `SKIPPED <step> (...)` line, which is not a log-format marker and so is ignored by the parser (`STEP_EXIT <step> skipped` would
-//! not parse: the exit marker takes an integer). Every step of a started tier runs to the end; `slow` starts only when `fast` was
-//! green, or with `keep_going`. Commands go through [`crate::runner`] (its timeout kills the process tree).
+//! starting only when every step it `needs` is green. A step whose need went red (or was skipped) is not run: it prints
+//! `STEP_SKIPPED <step> <reason>` (parsed into `ParsedLog::skipped`, never into the steps that ran). Every step of a started tier
+//! runs to the end; `slow` starts only when `fast` was green, or with `keep_going`. A step's stdout and stderr go straight to
+//! `<out>/<step>.full` as they are written ([`crate::runner::run_to_file`]: nothing held in memory, the file can be followed, a
+//! timeout keeps the partial output and kills the whole process tree).
 use crate::logfmt::Ts;
-use crate::runner::{run_cmd_full, shell_command, LocalRunner, Runner};
+use crate::runner::{run_to_file, shell_command, LocalRunner, Runner};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -133,24 +134,34 @@ fn exec(step: &Step, cwd: &Path, out: &Path) -> (i64, f64) {
             c.args(&a[1..]);
             c
         }
-        // one stream: the group's stderr is folded into stdout
-        (None, Some(r)) => shell_command(&format!("( {r} ) 2>&1")),
+        // both streams share one file handle, so they interleave in the order they were written
+        (None, Some(r)) => shell_command(r),
         _ => unreachable!("load() refuses a step with neither"),
     };
     c.current_dir(cwd);
-    let limit = step.timeout_s.unwrap_or(365.0 * 86400.0); // the runner's own default is 60 s
-    let (rc, mut text) = match run_cmd_full(c, Some(limit)) {
-        Ok(Some(o)) => (i64::from(o.code), if o.stderr.is_empty() { o.stdout } else { format!("{}{}", o.stdout, o.stderr) }),
-        Ok(None) => (124, format!("chain: timed out after {limit} s; the process tree was killed (its output so far is lost)\n")),
-        Err(e) => (127, format!("chain: cannot start: {e}\n")),
+    let limit = step.timeout_s.unwrap_or(365.0 * 86400.0);
+    let full = out.join(format!("{}.full", step.name));
+    let (rc, note) = match run_to_file(c, &full, limit) {
+        Ok(Some(code)) => (i64::from(code), None),
+        Ok(None) => (124, Some(format!("chain: timed out after {limit} s; the process tree was killed (the output above is what it wrote)"))),
+        Err(e) => (127, Some(format!("chain: cannot start: {e}"))),
     };
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    if let Err(e) = std::fs::write(out.join(format!("{}.full", step.name)), text) {
-        eprintln!("chain: cannot write {}.full: {e}", step.name);
+    if let Some(n) = note {
+        append_line(&full, &n);
     }
     (rc, t0.elapsed().as_secs_f64())
+}
+
+/// Append one line to a step's `.full`, starting a new line when the step's own output did not end with one.
+fn append_line(full: &Path, line: &str) {
+    use std::io::Write;
+    let ends_nl = std::fs::read(full).ok().is_none_or(|b| b.is_empty() || b.ends_with(b"\n"));
+    match std::fs::OpenOptions::new().create(true).append(true).open(full) {
+        Ok(mut f) => {
+            let _ = writeln!(f, "{}{line}", if ends_nl { "" } else { "\n" });
+        }
+        Err(e) => eprintln!("chain: cannot write {}: {e}", full.display()),
+    }
 }
 
 fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -216,7 +227,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         if tier == Tier::Slow && fast_red && !o.keep_going {
             for &i in &mine {
                 state[i] = St::Skipped;
-                emit(&format!("SKIPPED {} (a fast step is red; --keep-going runs slow anyway)", plan.steps[i].name));
+                emit(&format!("STEP_SKIPPED {} a fast step is red; --keep-going runs slow anyway", plan.steps[i].name));
             }
             continue;
         }
@@ -237,7 +248,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                         .find(|n| plan.steps.iter().position(|s| &s.name == *n).is_some_and(|j| matches!(state[j], St::Red | St::Skipped)));
                     if let Some(n) = bad {
                         state[i] = St::Skipped;
-                        emit(&format!("SKIPPED {} (needs {n}, which is not green)", plan.steps[i].name));
+                        emit(&format!("STEP_SKIPPED {} needs {n}, which is not green", plan.steps[i].name));
                         changed = true;
                     }
                 }

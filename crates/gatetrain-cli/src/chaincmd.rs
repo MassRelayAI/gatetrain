@@ -35,13 +35,18 @@ pub fn run(a: ChainArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let plan = match load(&text) {
+    let mut plan = match load(&text) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("chain: {e}");
             return ExitCode::from(2);
         }
     };
+    // a relative `cwd` is the steps file's own, so the file means the same thing from wherever it is run (no cwd = the caller's)
+    if let Some(c) = plan.cwd.as_ref().filter(|c| std::path::Path::new(c).is_relative()) {
+        let base = a.steps.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+        plan.cwd = Some(base.join(c).to_string_lossy().into_owned());
+    }
     if a.par == 0 {
         eprintln!("chain: --par must be at least 1");
         return ExitCode::from(2);

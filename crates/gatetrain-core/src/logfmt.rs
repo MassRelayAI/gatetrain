@@ -232,6 +232,8 @@ pub struct ParsedLog {
     pub red_summary: Option<String>,
     pub gates_done: bool,
     pub parallel: Option<i64>,
+    /// `STEP_SKIPPED <step> <reason>`: a step that never ran (its need went red, or a fast step was red). Kept apart from `steps`, which ran.
+    pub skipped: Vec<(String, String)>,
 }
 
 impl ParsedLog {
@@ -282,6 +284,10 @@ impl ParsedLog {
         m.insert("last_ts".into(), json!(self.last_ts().map(|t| t.iso())));
         m.insert("steps".into(), Value::Array(steps));
         m.insert("red_now".into(), Value::Array(red_now));
+        if !self.skipped.is_empty() {
+            // only when present, so every log without the marker prints exactly what it printed before
+            m.insert("skipped".into(), Value::Array(self.skipped.iter().map(|(n, w)| json!({"step": n, "reason": w})).collect()));
+        }
         Value::Object(m)
     }
 }
@@ -371,6 +377,12 @@ pub fn parse_log(text: &str) -> Result<ParsedLog> {
         } else if line.starts_with("STEP_CACHED") {
             if let Some(m) = r.cached.captures(line) {
                 step(&mut p, &mut by, &m[1]).cached = true;
+            }
+        } else if let Some(rest) = line.strip_prefix("STEP_SKIPPED ") {
+            // `STEP_SKIPPED <step> <reason>`: never ran, so it is no Step (no start, no exit) and counts in no total
+            let (name, why) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            if !name.is_empty() {
+                p.skipped.push((name.to_string(), why.trim().to_string()));
             }
         } else if line.starts_with("RED_NOW") {
             if let Some(m) = r.red.captures(line) {
