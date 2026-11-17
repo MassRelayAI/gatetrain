@@ -2462,3 +2462,28 @@ fn ma3_unknown_after_a_tidy_is_not_still_below_and_never_escalates() {
     assert!(!outcomes.iter().any(|o| o == "still-below"), "a disk that could not be measured is not measured below its floor: {outcomes:?}");
     assert!(fx.rows("host.disk-escalation").is_empty(), "no founder escalation without a measured shortfall");
 }
+
+#[test]
+fn minor4_a_branch_that_moves_between_the_plan_and_the_action_is_kept() {
+    // judged at one sha, at another a moment later: the item is refused, never deleted at the new sha
+    closes_with("tidy.unreadable", |e| { e.sha_moves.insert(OWN.into(), "sha-NEW-COMMIT".into()); }, OWN);
+}
+
+#[test]
+fn minor2_an_escalation_already_on_record_for_the_batch_is_not_written_again() {
+    let mut fx = Fx::new("");
+    fx.cfg.tidy_auto = true;
+    for id in ["b1", "b2"] {
+        fx.open(id);
+        fx.step(id, "stacked");
+        fx.step(id, "settled");
+    }
+    let mk = || CloseAdm::floor(vec![Some(("host.refuse-disk", "low")), Some(("host.refuse-disk", "still low"))]);
+    fx.adv_with("b1", &mk());
+    // b2 already carries an escalation (written by a person, or before its tidy row): the engine does not repeat it
+    let e = gatetrain_core::declog::NewEntry { at: "2026-11-17T00:00:00Z".into(), actor: "human:me".into(), kind: "escalation".into(), batch: Some("b2".into()), rule: Some("host.disk-escalation".into()), outcome: "founder".into(), reason: "raised by hand".into(), ..Default::default() };
+    gatetrain_core::declog::append(&mut fx.ledger, &e).unwrap();
+    fx.adv_with("b2", &mk());
+    assert_eq!(fx.rows("tidy.auto-disk").len(), 2, "both batches tidied once");
+    assert_eq!(fx.rows("host.disk-escalation").len(), 1, "one escalation for b2, not two");
+}

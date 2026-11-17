@@ -595,6 +595,9 @@ pub struct FakeCloseEnv {
     /// `dispose` says ok and removes nothing.
     pub ghost: std::collections::HashSet<String>,
     pub locked: std::collections::HashSet<String>,
+    /// `resolve_branch(branch)` answers this sha from the second call on: a commit lands between the plan and the action.
+    pub sha_moves: std::collections::HashMap<String, String>,
+    pub resolve_calls: std::cell::RefCell<std::collections::HashMap<String, usize>>,
 }
 
 #[cfg(any(test, feature = "test-fakes"))]
@@ -667,6 +670,15 @@ impl CloseEnv for FakeCloseEnv {
         Ok(Some(!self.unmerged.contains(branch)))
     }
     fn resolve_branch(&self, branch: &str) -> Result<Option<String>> {
+        let n = {
+            let mut c = self.resolve_calls.borrow_mut();
+            let n = c.entry(branch.to_string()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        if let (true, Some(s)) = (n >= 2, self.sha_moves.get(branch)) {
+            return Ok(Some(s.clone()));
+        }
         Ok(Some(self.branch_sha.get(branch).cloned().unwrap_or_else(|| format!("sha-{branch}"))))
     }
     fn merged_sha(&self, sha: &str) -> Result<Option<bool>> {
