@@ -773,3 +773,9 @@ fn ma4_a_tidy_auto_that_ran_and_left_the_disk_below_its_threshold_ran() {
     let note = gatetrain_core::tidy::tidy_auto_note(&o, "h1").expect("it ran");
     assert!(note.contains("reclaimed"), "{note}");
 }
+
+#[test]
+fn minor5_a_tidy_auto_that_ran_and_was_then_stopped_by_a_guard_is_not_a_run() {
+    let o = gatetrain_core::tidy::CliOut { stdout: "h1: 10 MB reclaimed".into(), stderr: "guard violation on h1: x".into(), rc: 3, ran: gatetrain_core::tidy::TidyRun::Ran { failed: 0, breaches: 0 } };
+    assert!(gatetrain_core::tidy::tidy_auto_note(&o, "h1").is_err());
+}

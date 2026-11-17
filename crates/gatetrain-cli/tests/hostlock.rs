@@ -235,3 +235,26 @@ reach = \"ssh builder\"");
     let (rule, _) = a.admit_rule("light", "b").unwrap().expect("a pre-flight has a floor that is not measured here");
     assert_eq!(rule, "host.disk-unknown");
 }
+
+#[test]
+fn minor5_a_hosts_file_that_cannot_be_read_is_an_unknown_floor() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "chain", "0");
+    a.hosts = Some((d.path().join("no-such-hosts.toml"), "host-a".into()));
+    let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
+    assert_eq!(rule, "host.disk-unknown");
+    assert!(why.contains("could not be read"), "{why}");
+}
+
+#[test]
+fn minor5_a_target_dir_on_a_disk_that_cannot_be_read_is_unknown_not_low() {
+    // the floor is off; the target-dir budget still judges the disk that holds the chain's target folder
+    let d = tempfile::tempdir().unwrap();
+    let mut a = floor_adm(d.path(), "chain", "0");
+    a.disk_floor = false;
+    let text = std::fs::read_to_string(d.path().join("hosts-floor.toml")).unwrap().replace(&d.path().to_string_lossy().replace('\\', "/"), "/definitely/not/a/disk");
+    std::fs::write(d.path().join("hosts-floor.toml"), text).unwrap();
+    a.target_dirs = vec![std::path::PathBuf::from("/definitely/not/a/disk/target")];
+    let (rule, why) = a.admit_rule("proof", "b").unwrap().expect("refused");
+    assert_eq!(rule, "host.disk-unknown", "{why}");
+}
