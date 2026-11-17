@@ -417,7 +417,7 @@ fn to_state(tr: &str) -> &'static str {
         "T1" => "stacked",
         "T2" => "settled",
         "T3" => "preflighted",
-        "T4" => "proving",
+        "T4" | "T6a" => "proving",
         "T7" => "merged",
         "T8a" => "deploying",
         _ => "open",
@@ -430,6 +430,7 @@ fn from_state(tr: &str) -> &'static str {
         "T2" => "stacked",
         "T3" => "settled",
         "T4" => "preflighted",
+        "T6a" => "red",
         "T7" => "proven",
         "T8a" => "merged",
         _ => "",
@@ -634,6 +635,72 @@ impl<'a> Engine<'a> {
         self.side(id, "abandon", "abandoned", "abandon.person", reason)
     }
 
+    /// Runs of this batch that reached a verdict or are still running: every launch (T4, T6a) minus the stopped ones (T5s).
+    /// A stopped run is infrastructure and is not a full run (design 3.4, 5.3).
+    fn full_runs(&self, id: &str) -> Result<usize> {
+        let ev = self.events(id)?;
+        let n = |t: &str| ev.iter().filter(|e| e.transition == t && e.phase == "done").count();
+        Ok((n("T4") + n("T6a")).saturating_sub(n("T5s")))
+    }
+
+    /// `budget.full-runs`: refuses the launch that would be run N+1 of `[chain] max_full_runs_per_batch`.
+    fn full_run_budget(&self, id: &str) -> Result<Option<Planned>> {
+        let Some(max) = self.cfg.max_full_runs_per_batch else { return Ok(None) };
+        let used = self.full_runs(id)?;
+        Ok((used >= max).then(|| Planned::Refuse("budget.full-runs".into(), format!("the batch has used {used} of {max} full proof runs ([chain] max_full_runs_per_batch); a person must raise the budget or abandon the batch"))))
+    }
+
+    /// The run number of the next launch: T4 and T6a share one sequence so a retry never reuses a run id or a log file.
+    fn next_run_no(&self, f: &Folded) -> i64 {
+        f.max_attempt.get("T4").copied().unwrap_or(0) + f.max_attempt.get("T6a").copied().unwrap_or(0) + 1
+    }
+
+    /// Retry a red proof (T6a, red -> proving): a full rerun, refused while a cause of the red run is open (`retry.causes-open`).
+    /// A cause is addressed when the batch tip moved past the tested commit, or a person recorded the run's red as a flake or
+    /// infrastructure with a reason (`note_cause`).
+    pub fn retry(&mut self, id: &str) -> Result<Outcome> {
+        let f = self.fold(id)?;
+        if let Some(p) = f.pending.clone() {
+            return self.resume(id, &f, p);
+        }
+        if f.state != "red" {
+            return Ok(Outcome::Idle(format!("batch {id} is {}, not red", f.state)));
+        }
+        self.go(id, &f, "T6a")
+    }
+
+    /// A person records that the cause of the last red run is a `flake` or `infra`, with a reason. It is a decision-log override
+    /// (`retry.cause-noted`) naming the red run; it covers that run only, and it leaves the state alone.
+    pub fn note_cause(&mut self, id: &str, class: &str, reason: &str) -> Result<Outcome> {
+        let f = self.fold(id)?;
+        if f.state != "red" {
+            return Ok(Outcome::Idle(format!("batch {id} is {}, not red: nothing to note", f.state)));
+        }
+        if !matches!(class, "flake" | "infra") {
+            return Err(Error::Batch(format!("a cause is noted as `flake` or `infra`, not `{class}`")));
+        }
+        if reason.trim().is_empty() {
+            return Err(Error::Batch("a cause note needs a reason".into()));
+        }
+        let (run, tested) = (f.need("run_id")?, f.need("tested_sha")?);
+        self.decide("override", id, Some(tested.clone()), "retry.cause-noted", "recorded", format!("{class}: {}", reason.trim()), Some(json!({"run_id": run, "class": class, "tested_sha": tested})))?;
+        Ok(Outcome::Idle(format!("noted: the red of run {run} is a {class}")))
+    }
+
+    /// Is the red of `run` covered by a recorded note?
+    fn cause_noted(&self, id: &str, run: &str) -> Result<bool> {
+        let mut st = self.ledger.conn.prepare("SELECT evidence FROM decisions WHERE batch=? AND kind='override' AND rule='retry.cause-noted'")?;
+        let rows = st.query_map([id], |r| r.get::<_, Option<String>>(0))?;
+        for ev in rows {
+            if let Some(v) = ev?.and_then(|e| serde_json::from_str::<Value>(&e).ok()) {
+                if v["run_id"].as_str() == Some(run) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     // ------------------------------------------------------------ advance
 
     /// One step: resume a pending intent, else take the transition the state allows, or refuse naming the rule.
@@ -770,7 +837,7 @@ impl<'a> Engine<'a> {
                     Probe::NotHappened
                 }
             }
-            "T4" => {
+            "T4" | "T6a" => {
                 if self.lock.names_run(plan.run_id.as_deref().unwrap_or_default())? {
                     Probe::Happened(None)
                 } else {
@@ -803,6 +870,20 @@ impl<'a> Engine<'a> {
         git(&wd, &["rev-parse", &format!("refs/heads/{}", f.need("branch")?)])
     }
 
+    /// Lanes of the batch whose tip has no lane stamp (`stamp-<tip>.json` written by `gatetrain chain`, naming that sha).
+    fn lanes_without_stamp(&self, f: &Folded, wd: &Path) -> Vec<String> {
+        let dir = self.cfg.lane_stamp_dir.as_deref().map(Path::new).map(|d| if d.is_absolute() { d.to_path_buf() } else { wd.join(d) }).unwrap_or_default();
+        let mut missing = vec![];
+        for l in f.facts.get("lanes").and_then(|l| l.as_array()).cloned().unwrap_or_default() {
+            let tip = l["tip"].as_str().unwrap_or_default();
+            let ok = std::fs::read_to_string(dir.join(format!("stamp-{tip}.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["sha"].as_str() == Some(tip));
+            if !ok {
+                missing.push(format!("{} ({})", l["ref"].as_str().unwrap_or("?"), short(tip)));
+            }
+        }
+        missing
+    }
+
     fn plan(&mut self, tr: &str, id: &str, f: &Folded, attempt: i64) -> Result<Planned> {
         let wd = PathBuf::from(f.need("workdir")?);
         let mk = |input: Option<String>, run: Option<String>, detail: Value| Planned::Go(Plan { tr: tr.into(), to: to_state(tr).into(), input_sha: input, run_id: run, attempt, detail });
@@ -814,6 +895,12 @@ impl<'a> Engine<'a> {
                     let (anc, _, _) = git_raw(&wd, &["merge-base", "--is-ancestor", &base, tip])?;
                     if !anc {
                         return Ok(Planned::Refuse("stack.base-ancestor".into(), format!("the base {} is not an ancestor of lane {}", short(&base), l["ref"].as_str().unwrap_or("?"))));
+                    }
+                }
+                if self.cfg.require_lane_stamp {
+                    let missing = self.lanes_without_stamp(f, &wd);
+                    if !missing.is_empty() {
+                        return Ok(Planned::Refuse("stack.lane-stamp".into(), format!("no green lane stamp ([lanes] require_stamp) for: {}", missing.join(", "))));
                     }
                 }
                 Ok(mk(Some(base), None, json!({"branch": format!("batch/{id}/s{attempt}"), "stack_attempt": attempt})))
@@ -866,9 +953,40 @@ impl<'a> Engine<'a> {
                 if let Some((rule, why)) = self.adm.admit_rule("proof", id)? {
                     return Ok(Planned::Refuse(rule, why));
                 }
-                let run = format!("{id}-p{attempt}");
+                if let Some(r) = self.full_run_budget(id)? {
+                    return Ok(r);
+                }
+                let run = format!("{id}-p{}", self.next_run_no(f));
                 let log = self.state_dir.join("logs").join(format!("{run}.log"));
                 Ok(mk(Some(tip.clone()), Some(run.clone()), json!({"run_id": run, "log": log.to_string_lossy(), "tested_sha": tip})))
+            }
+            "T6a" => {
+                let tip = self.tip(f)?;
+                let (run0, tested) = (f.need("run_id")?, f.need("tested_sha")?);
+                if tip == tested && !self.cause_noted(id, &run0)? {
+                    return Ok(Planned::Refuse("retry.causes-open".into(), format!("run {run0} was red on {} and the batch tip has not moved; commit a fix, or record the cause as a flake or infrastructure with a reason", short(&tested))));
+                }
+                if let Some(r) = self.full_run_budget(id)? {
+                    return Ok(r);
+                }
+                if !self.stamp_path(&tip).exists() {
+                    return Ok(Planned::Refuse("preflight.stamp-for-sha".into(), format!("no green preflight stamp for {}", short(&tip))));
+                }
+                let dirty = dirty_paths(&wd)?;
+                if !dirty.is_empty() {
+                    let shown: Vec<&str> = dirty.iter().take(5).map(String::as_str).collect();
+                    return Ok(Planned::Refuse("floor.clean-tree".into(), format!("the checkout has uncommitted paths ({}); the chain would test files that are not in the sha that is merged", shown.join(", "))));
+                }
+                if self.cfg.chain_command.is_empty() {
+                    return Ok(Planned::Refuse("config.chain-command".into(), "gatetrain.toml has no [chain] command".into()));
+                }
+                if let Some((rule, why)) = self.adm.admit_rule("proof", id)? {
+                    return Ok(Planned::Refuse(rule, why));
+                }
+                let run = format!("{id}-p{}", self.next_run_no(f));
+                let log = self.state_dir.join("logs").join(format!("{run}.log"));
+                // settled_tip follows the tip: a stopped retry returns to `preflighted`, whose launch guard compares it
+                Ok(mk(Some(tip.clone()), Some(run.clone()), json!({"run_id": run, "log": log.to_string_lossy(), "tested_sha": tip, "settled_tip": tip})))
             }
             "T7" => {
                 let tip = self.tip(f)?;
@@ -1034,7 +1152,7 @@ impl<'a> Engine<'a> {
                 std::fs::write(&p, format!("{sha}\n"))?;
                 Ok(Ok(Done { output: Some(sha.clone()), extra: json!({"stamp": p.to_string_lossy()}) }))
             }
-            "T4" => {
+            "T4" | "T6a" => {
                 let run = plan.run_id.clone().unwrap_or_default();
                 let log = PathBuf::from(plan.detail["log"].as_str().unwrap_or_default());
                 std::fs::create_dir_all(log.parent().unwrap())?;

@@ -53,6 +53,12 @@ pub struct BatchConfig {
     pub chain_repo_root: Option<String>,
     /// `[batch] doctor` (default true): the host must pass `doctor` before a preflight or a chain starts when `--hosts` is given.
     pub doctor: bool,
+    /// `[lanes] require_stamp` (default false): a lane is stacked only when `<stamp_dir>/stamp-<lane tip sha>.json` exists (`stack.lane-stamp`).
+    pub require_lane_stamp: bool,
+    /// `[lanes] stamp_dir`: where `gatetrain chain` wrote the lane stamps; relative to the batch checkout when not absolute.
+    pub lane_stamp_dir: Option<String>,
+    /// `[chain] max_full_runs_per_batch` (default: unlimited): the most full proof runs one batch may start (`budget.full-runs`).
+    pub max_full_runs_per_batch: Option<usize>,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -75,6 +81,9 @@ impl Default for BatchConfig {
             chain_target_dirs: vec![],
             chain_repo_root: None,
             doctor: true,
+            require_lane_stamp: false,
+            lane_stamp_dir: None,
+            max_full_runs_per_batch: None,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -118,6 +127,16 @@ impl BatchConfig {
         c.chain_repo_root = v.get("chain").and_then(|p| p.get("repo_root")).and_then(|r| r.as_str()).map(String::from);
         if let Some(d) = v.get("batch").and_then(|b| b.get("doctor")).and_then(|d| d.as_bool()) {
             c.doctor = d;
+        }
+        if let Some(n) = v.get("chain").and_then(|c| c.get("max_full_runs_per_batch")).and_then(|n| n.as_integer()) {
+            c.max_full_runs_per_batch = Some(n.max(0) as usize);
+        }
+        if let Some(l) = v.get("lanes") {
+            c.require_lane_stamp = l.get("require_stamp").and_then(|b| b.as_bool()).unwrap_or(false);
+            c.lane_stamp_dir = l.get("stamp_dir").and_then(|d| d.as_str()).filter(|d| !d.is_empty()).map(String::from);
+            if c.require_lane_stamp && c.lane_stamp_dir.is_none() {
+                return Err(Error::Batch("gatetrain.toml: [lanes] require_stamp = true needs a stamp_dir".into()));
+            }
         }
         if let Some(p) = v.get("postmerge") {
             c.postmerge_command = argv(p.get("command"));

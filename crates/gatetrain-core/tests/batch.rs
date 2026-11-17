@@ -800,3 +800,272 @@ fn a_staged_rename_into_the_generated_dir_is_a_deletion_outside_it_and_is_refuse
     // and the deletion was never committed
     assert_eq!(g(&fx.repo, &["rev-parse", "HEAD"]), g(&fx.repo, &["rev-parse", "batch/b1/s1"]));
 }
+
+// ---------------------------------------------------------------- governance: lane stamp (stack.lane-stamp) and cause-gated rerun
+
+const RED_LOG: &str = "STEP_START a 2026-11-11T09:00:00Z\nSTEP_TIME a 1s\nSTEP_EXIT a 1\nRED_NOW a rc=1\nRED_SUMMARY: a\nGATES_DONE\n";
+
+impl Fx {
+    fn retry(&mut self, id: &str) -> Outcome {
+        let adm = AllowAll;
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        e.retry(id).unwrap()
+    }
+
+    fn note(&mut self, id: &str, class: &str, reason: &str) {
+        let adm = AllowAll;
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "human:me".into(), crash_after_effect: None };
+        e.note_cause(id, class, reason).unwrap();
+    }
+
+    fn red(&mut self, id: &str) {
+        self.drive_to_proving(id);
+        self.write_log(RED_LOG);
+        self.step(id, "red");
+    }
+
+    /// A new commit on the batch branch, with the preflight stamp the launch guard asks for.
+    fn commit_and_stamp(&mut self, name: &str) -> String {
+        std::fs::write(self.repo.join(name), "fix\n").unwrap();
+        g(&self.repo, &["add", "--", name]);
+        g(&self.repo, &["commit", "-q", "-m", &format!("fix: {name}")]);
+        let tip = g(&self.repo, &["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(self.state.join("stamps")).unwrap();
+        std::fs::write(self.state.join("stamps").join(format!("{tip}.stamp")), format!("{tip}\n")).unwrap();
+        tip
+    }
+
+    fn refusals(&self, rule: &str) -> usize {
+        self.decisions().iter().filter(|(k, r, o)| k == "refusal" && r.as_deref() == Some(rule) && o == "refused").count()
+    }
+
+    fn retry_to_proving(&mut self, id: &str) {
+        let o = self.retry(id);
+        assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "proving"), "{o:?}");
+    }
+}
+
+fn stamp_cfg(dir: &Path) -> String {
+    format!("[lanes]\nrequire_stamp = true\nstamp_dir = \"{}\"\n", fwd(dir))
+}
+
+fn write_lane_stamp(dir: &Path, sha: &str) {
+    std::fs::write(dir.join(format!("stamp-{sha}.json")), format!("{{\"sha\": \"{sha}\", \"steps\": [], \"digest\": \"d\"}}\n")).unwrap();
+}
+
+#[test]
+fn a_lane_without_a_stamp_is_refused_and_named() {
+    let sd = tempfile::tempdir().unwrap();
+    let mut fx = Fx::new(&stamp_cfg(sd.path()));
+    fx.open("b1");
+    let (t1, t2) = (g(&fx.repo, &["rev-parse", "lane1"]), g(&fx.repo, &["rev-parse", "lane2"]));
+    write_lane_stamp(sd.path(), &t1); // lane1 is stamped, lane2 is not
+    match fx.adv("b1").unwrap() {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "stack.lane-stamp");
+            assert!(because.contains("lane2") && because.contains(&t2[..9]), "{because}");
+            assert!(!because.contains("lane1"), "a stamped lane is not named: {because}");
+        }
+        x => panic!("{x:?}"),
+    }
+    assert_eq!(fx.state("b1"), "open");
+    assert_eq!(fx.refusals("stack.lane-stamp"), 1, "recorded as a refusal in the decision log");
+    assert!(g(&fx.repo, &["branch", "--list", "batch/b1/s1"]).is_empty(), "nothing was stacked");
+    assert!(declog::verify(&fx.ledger).unwrap().is_ok());
+}
+
+#[test]
+fn every_unstamped_lane_is_named() {
+    let sd = tempfile::tempdir().unwrap();
+    let mut fx = Fx::new(&stamp_cfg(sd.path()));
+    fx.open("b1");
+    match fx.adv("b1").unwrap() {
+        Outcome::Refused { because, .. } => assert!(because.contains("lane1") && because.contains("lane2"), "{because}"),
+        x => panic!("{x:?}"),
+    }
+}
+
+#[test]
+fn stamps_for_every_lane_let_the_stack_through() {
+    let sd = tempfile::tempdir().unwrap();
+    let mut fx = Fx::new(&stamp_cfg(sd.path()));
+    fx.open("b1");
+    for l in ["lane1", "lane2"] {
+        write_lane_stamp(sd.path(), &g(&fx.repo, &["rev-parse", l]));
+    }
+    fx.step("b1", "stacked");
+}
+
+#[test]
+fn a_stamp_for_another_sha_does_not_count() {
+    let sd = tempfile::tempdir().unwrap();
+    let mut fx = Fx::new(&stamp_cfg(sd.path()));
+    fx.open("b1");
+    let t1 = g(&fx.repo, &["rev-parse", "lane1"]);
+    let t2 = g(&fx.repo, &["rev-parse", "lane2"]);
+    write_lane_stamp(sd.path(), &t1);
+    // lane2's file name carries the right sha but the body names another commit: not a stamp for this tip
+    std::fs::write(sd.path().join(format!("stamp-{t2}.json")), "{\"sha\": \"deadbeef\", \"steps\": [], \"digest\": \"d\"}").unwrap();
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "stack.lane-stamp"));
+}
+
+#[test]
+fn the_lane_stamp_setting_off_behaves_as_before() {
+    let mut fx = Fx::new(""); // no [lanes] table: no stamps exist and the stack goes through
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    let sd = tempfile::tempdir().unwrap();
+    let mut fx2 = Fx::new(&format!("[lanes]\nrequire_stamp = false\nstamp_dir = \"{}\"\n", fwd(sd.path())));
+    fx2.open("b2");
+    fx2.step("b2", "stacked");
+}
+
+#[test]
+fn require_stamp_without_a_stamp_dir_is_a_config_error() {
+    assert!(BatchConfig::parse("[lanes]\nrequire_stamp = true\n").is_err());
+}
+
+#[test]
+fn a_retry_on_an_unmoved_tip_after_a_red_run_is_refused() {
+    let mut fx = Fx::new("");
+    fx.red("b1");
+    let o = fx.retry("b1");
+    assert_eq!(o.exit_code(), 3);
+    match o {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "retry.causes-open");
+            assert!(because.contains("b1-p1"), "names the red run: {because}");
+        }
+        x => panic!("{x:?}"),
+    }
+    assert_eq!(fx.state("b1"), "red");
+    assert_eq!(fx.lock.launches.lock().unwrap().len(), 1, "no second chain was launched");
+    assert_eq!(fx.refusals("retry.causes-open"), 1, "recorded in the decision log");
+    fx.retry("b1");
+    assert_eq!(fx.refusals("retry.causes-open"), 1, "an identical repeat is not logged twice");
+}
+
+#[test]
+fn a_retry_is_allowed_after_a_new_commit() {
+    let mut fx = Fx::new("");
+    fx.red("b1");
+    fx.commit_and_stamp("fix.txt");
+    let o = fx.retry("b1");
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "proving"), "{o:?}");
+    assert_eq!(fx.state("b1"), "proving");
+    let l = fx.lock.launches.lock().unwrap();
+    assert_eq!(l.len(), 2);
+    assert_eq!(l[1].run_id, "b1-p2", "a new run id and a new log");
+    assert_eq!(l[1].sha, g(&fx.repo, &["rev-parse", "HEAD"]), "the new tip is what runs");
+}
+
+#[test]
+fn a_retry_in_a_state_other_than_red_is_idle() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1");
+    assert!(matches!(fx.retry("b1"), Outcome::Idle(_)));
+}
+
+#[test]
+fn a_recorded_flake_or_infra_note_allows_the_retry_on_the_same_tip() {
+    for class in ["flake", "infra"] {
+        let mut fx = Fx::new("");
+        fx.red("b1");
+        assert!(matches!(fx.retry("b1"), Outcome::Refused { .. }));
+        fx.note("b1", class, "the registry timed out, unrelated to the code");
+        let o = fx.retry("b1");
+        assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "proving"), "{class}: {o:?}");
+        let l = fx.lock.launches.lock().unwrap();
+        assert_eq!(l[1].sha, l[0].sha, "same sha: that is what a flake rerun means");
+        // the note is in the decision log with its reason, as an override by a person
+        let n: i64 = fx.ledger.conn.query_row("SELECT count(*) FROM decisions WHERE kind='override' AND rule='retry.cause-noted' AND actor='human:me' AND reason LIKE '%registry%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        assert!(declog::verify(&fx.ledger).unwrap().is_ok());
+    }
+}
+
+#[test]
+fn a_note_is_for_one_red_run_only_and_needs_a_reason_and_a_known_class() {
+    let mut fx = Fx::new("");
+    fx.red("b1");
+    {
+        let adm = AllowAll;
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), crash_after_effect: None };
+        assert!(e.note_cause("b1", "flake", "  ").is_err(), "no reason, no note");
+        assert!(e.note_cause("b1", "bug", "it is fine").is_err(), "only flake or infra");
+    }
+    fx.note("b1", "flake", "network blip");
+    fx.retry_to_proving("b1");
+    // the second run is red as well: the old note does not cover it
+    fx.write_log(RED_LOG);
+    fx.step("b1", "red");
+    assert!(matches!(fx.retry("b1"), Outcome::Refused { rule, .. } if rule == "retry.causes-open"));
+}
+
+#[test]
+fn the_full_run_budget_refuses_run_n_plus_one() {
+    let mut fx = Fx::new("max_full_runs_per_batch = 2\n");
+    fx.red("b1"); // run 1
+    fx.commit_and_stamp("f1.txt");
+    fx.retry_to_proving("b1"); // run 2
+    fx.write_log(RED_LOG);
+    fx.step("b1", "red");
+    fx.commit_and_stamp("f2.txt"); // the cause gate would pass; the budget does not
+    match fx.retry("b1") {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "budget.full-runs");
+            assert!(because.contains('2'), "{because}");
+        }
+        x => panic!("{x:?}"),
+    }
+    assert_eq!(fx.lock.launches.lock().unwrap().len(), 2);
+    assert_eq!(fx.refusals("budget.full-runs"), 1);
+}
+
+#[test]
+fn a_stopped_run_does_not_spend_the_full_run_budget() {
+    let mut fx = Fx::new("max_full_runs_per_batch = 1\n");
+    fx.drive_to_proving("b1");
+    fx.lock.named.lock().unwrap().clear(); // the holder is gone: stopped, not a finished run
+    fx.step("b1", "preflighted");
+    fx.step("b1", "proving"); // the relaunch is still run 1 of 1
+    fx.write_log(RED_LOG);
+    fx.step("b1", "red");
+    fx.commit_and_stamp("f1.txt");
+    assert!(matches!(fx.retry("b1"), Outcome::Refused { rule, .. } if rule == "budget.full-runs"));
+}
+
+#[test]
+fn the_budget_guards_the_launch_of_a_second_proof_from_preflighted() {
+    // a budget of 0 means no full run at all: the very first launch is refused
+    let mut fx = Fx::new("max_full_runs_per_batch = 0\n");
+    fx.open("b1");
+    for s in ["stacked", "settled", "preflighted"] {
+        fx.step("b1", s);
+    }
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "budget.full-runs"));
+    assert_eq!(fx.state("b1"), "preflighted");
+}
+
+#[test]
+fn no_budget_set_means_no_limit() {
+    let mut fx = Fx::new("");
+    fx.red("b1");
+    for i in 0..4 {
+        fx.commit_and_stamp(&format!("f{i}.txt"));
+        fx.retry_to_proving("b1");
+        fx.write_log(RED_LOG);
+        fx.step("b1", "red");
+    }
+}
+
+#[test]
+fn a_green_retry_proves_and_merges_like_any_proof() {
+    let mut fx = Fx::new("");
+    fx.red("b1");
+    fx.commit_and_stamp("fix.txt");
+    fx.retry_to_proving("b1");
+    fx.write_log(GREEN);
+    fx.step("b1", "proven");
+    fx.step("b1", "merged");
+}
