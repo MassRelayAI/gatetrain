@@ -2496,3 +2496,8 @@ fn ma7_a_prefix_root_needs_a_folder_and_a_non_empty_name_prefix() {
     assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"prefix:/app-wt-\"]\n").is_err(), "a prefix in a file-system root");
     assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"prefix:app-wt-\"]\n").is_err(), "no folder");
 }
+
+#[test]
+fn minor1_a_folder_that_sits_elsewhere_at_the_action_than_at_the_plan_is_kept() {
+    closes_with("tidy.unreadable", |e| { e.located_moves.insert(TGT.into(), "/build/elsewhere".into()); }, TGT);
+}

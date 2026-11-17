@@ -304,3 +304,12 @@ fn ma7_a_prefix_that_matches_the_main_checkouts_own_name_owns_nothing() {
     assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned"), "{rep:?}");
     assert!(sim.s().has("/repo/main-wt-x"));
 }
+
+#[test]
+fn ma7_a_prefix_root_owns_only_the_entries_of_its_folder_not_what_is_below_them() {
+    let (sim, h, t) = sibling_sim();
+    sim.s().dir("/repo/main-wt-x/out", 10 * 86400);
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&prefix_set(&[("target", "/repo/main-wt-x/out")], "prefix:/repo/main-wt-"), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned"), "{rep:?}");
+}

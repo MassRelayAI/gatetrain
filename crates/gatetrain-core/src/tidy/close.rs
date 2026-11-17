@@ -733,6 +733,9 @@ pub struct FakeCloseEnv {
     /// `resolve_branch(branch)` answers this sha from the second call on: a commit lands between the plan and the action.
     pub sha_moves: std::collections::HashMap<String, String>,
     pub resolve_calls: std::cell::RefCell<std::collections::HashMap<String, usize>>,
+    /// `located(path)` answers this from the second call on: the folder sits elsewhere at the action than at the plan.
+    pub located_moves: std::collections::HashMap<String, String>,
+    pub located_calls: std::cell::RefCell<std::collections::HashMap<String, usize>>,
 }
 
 #[cfg(any(test, feature = "test-fakes"))]
@@ -776,6 +779,18 @@ impl CloseEnv for FakeCloseEnv {
     }
     fn contains_worktree(&self, path: &str) -> Result<bool> {
         Ok(self.wt_branch.keys().any(|w| self.registered(w) && norm(w) != norm(path) && at_or_under(w, path)))
+    }
+    fn located(&self, path: &str) -> Result<String> {
+        let n = {
+            let mut c = self.located_calls.borrow_mut();
+            let n = c.entry(path.to_string()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        Ok(match (n >= 2, self.located_moves.get(path)) {
+            (true, Some(p)) => p.clone(),
+            _ => path.to_string(),
+        })
     }
     fn holds_main_checkout(&self, path: &str) -> Result<bool> {
         Ok(self.main_checkout.as_deref().is_some_and(|m| match parse_root(path) {

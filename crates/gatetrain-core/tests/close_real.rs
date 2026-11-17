@@ -324,4 +324,33 @@ fn minor1_the_move_acts_on_the_folder_that_was_judged_not_where_a_link_leads_now
     assert!(rt.probes.get() >= 2, "the second judgement made its idle probe ({} probes)", rt.probes.get());
     assert!(f.main.join("shared/keep.txt").exists(), "the link was retargeted into main after the judgement and main's folder moved: {rep:?}, trash {:?}", f.trash());
     assert!(!real.join("shared").exists(), "the judged folder is the one that went: {rep:?}");
+    assert!(rep.residue.is_empty(), "the check looks where the move acted, not where the link leads now: {rep:?}");
+}
+
+#[test]
+fn bl3_a_clean_tracked_folder_of_a_worktree_is_not_moved() {
+    // nothing uncommitted: `ls-files` alone shows it is the worktree's
+    let f = fx();
+    let wt = live_worktree(&f);
+    write(wt.join("docs/a.md"), "doc
+");
+    git(&wt, &["add", "docs"]);
+    git(&wt, &["commit", "-q", "-m", "docs"]);
+    age(&wt);
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/docs"), &[fwd(&f.build)]);
+    assert!(wt.join("docs/a.md").exists(), "{rep:?}");
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}
+
+#[test]
+fn bl3_a_folder_of_a_worktree_with_only_an_untracked_file_is_not_moved() {
+    // nothing tracked: `status --porcelain` alone shows the work
+    let f = fx();
+    let wt = live_worktree(&f);
+    write(wt.join("notes/todo.txt"), "not yet added
+");
+    age(&wt);
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/notes"), &[fwd(&f.build)]);
+    assert!(wt.join("notes/todo.txt").exists(), "{rep:?}");
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
 }
