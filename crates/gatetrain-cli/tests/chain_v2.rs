@@ -335,9 +335,13 @@ fn the_exit_code_is_the_lowest_numbered_red_shard() {
 fn shards_overlap_take_one_par_slot_each_and_the_step_time_is_the_wall_time() {
     let (run, _r, _w) = chain(&shard_step(3, "", &["printsleep", "s{shard}", "1.2"]), &["--par", "3"]);
     assert_eq!(code(&run), 0, "{}", run.stdout);
+    // the shards overlap: every shard START comes before the first shard EXIT (the log's order, not a wall-clock bound that a loaded host stretches)
+    let first_exit = run.stdout.lines().position(|l| l.contains(" EXIT ") && l.starts_with("STEP_SHARD")).unwrap();
+    assert_eq!(run.stdout.lines().take(first_exit).filter(|l| l.starts_with("STEP_SHARD") && l.contains(" START ")).count(), 3, "{}", run.stdout);
+    // STEP_TIME is the step's wall time (first shard start to last shard end): it is at least one shard's sleep and the log says one step
     let p = parse_log(&run.stdout).unwrap();
     let d = p.steps[0].duration.unwrap();
-    assert!((1.1..3.2).contains(&d), "STEP_TIME is the wall time of the step, not the sum (3.6 s): {d}");
+    assert!(d >= 1.1 && p.steps.len() == 1, "{d}");
     // par 2 with 4 shards of 1.0 s: two waves
     let (run, _r, _w) = chain(&shard_step(4, "", &["printsleep", "s{shard}", "1.0"]), &["--par", "2"]);
     let d = parse_log(&run.stdout).unwrap().steps[0].duration.unwrap();

@@ -50,11 +50,13 @@ fn code(r: &Run) -> i32 {
 fn two_fast_steps_overlap_in_time() {
     let d = tempfile::tempdir().unwrap();
     let toml = step("a", "fast", &[], None, &["sleep", "1.5"]) + &step("b", "fast", &[], None, &["sleep", "1.5"]);
-    let t0 = Instant::now();
     let r = chain(d.path(), &toml, &["--par", "2"]);
-    let took = t0.elapsed().as_secs_f64();
     assert_eq!(code(&r), 0, "{}", r.stdout);
-    assert!(took < 2.9, "two 1.5 s steps with --par 2 took {took:.1} s: they did not overlap");
+    // overlap is read from the log's own order, never from a wall-clock bound (a loaded host stretches wall time, not the order):
+    // both STEP_START lines come before the first STEP_EXIT
+    let first_exit = r.stdout.lines().position(|l| l.starts_with("STEP_EXIT")).unwrap();
+    let starts_before = r.stdout.lines().take(first_exit).filter(|l| l.starts_with("STEP_START")).count();
+    assert_eq!(starts_before, 2, "the second step started only after the first ended: {}", r.stdout);
     let p = parse_log(&r.stdout).unwrap();
     let (a, b) = (&p.steps[0], &p.steps[1]);
     assert!(b.start.as_ref().unwrap().instant_us() < a.end().unwrap().instant_us(), "b started after a ended");
