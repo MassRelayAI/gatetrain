@@ -12,6 +12,7 @@ pub mod evidence;
 pub mod doctor;
 pub mod history;
 pub mod hold;
+pub mod hw;
 pub mod hostlock;
 pub mod lanes;
 pub mod ledger;
