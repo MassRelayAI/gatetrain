@@ -130,3 +130,66 @@ fn the_owned_env_answers_like_the_ops_env() {
     assert!(owned.is_main_checkout("/repo/main").unwrap());
     assert_eq!(owned.dirty("/repo/wt/lane-d").unwrap(), Some(true));
 }
+
+// ---- review round 2
+
+fn env_for<'a>(ops: &'a Ops<'a>, t: &'a gatetrain_core::tidy::config::TidyCfg) -> OpsEnv<'a> {
+    OpsEnv { ops, cfg: t, reference_prefixes: vec![] }
+}
+
+#[test]
+fn bl2_a_worktree_of_a_kept_lane_is_protected_and_its_branch_stays() {
+    // keep_lanes compares without case, as tidy's own planner does
+    let (sim, h, t) = setup(json!({"keep_lanes": ["LANE-A"]}));
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("worktree", "/repo/wt/lane-a"), ("branch", "line/lane-a")], &["line/lane-a"]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.protected" && r.key == "/repo/wt/lane-a"), "{rep:?}");
+    assert!(sim.s().has("/repo/wt/lane-a"));
+    assert!(sim.s().deleted_branches.is_empty(), "{:?}", sim.s().deleted_branches);
+}
+
+#[test]
+fn bl2_a_worktree_on_a_kept_branch_is_protected() {
+    let (sim, h, t) = setup(json!({"keep_branches": ["line/lane-a"]}));
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("worktree", "/repo/wt/lane-a")], &["line/lane-a"]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.protected"), "{rep:?}");
+    assert!(sim.s().has("/repo/wt/lane-a"));
+    assert!(sim.s().deleted_branches.is_empty(), "{:?}", sim.s().deleted_branches);
+}
+
+#[test]
+fn bl2_a_kept_branch_is_never_deleted() {
+    let (sim, h, t) = setup(json!({"keep_branches": ["line/solo"]}));
+    sim.s().branches.push("line/solo".into());
+    sim.s().ancestors.insert("line/solo".into());
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("branch", "line/solo")], &["line/solo"]), &env_for(&ops, &t));
+    assert!(rep.refusals.iter().any(|r| r.code == "tidy.protected" && r.key == "line/solo"), "{rep:?}");
+    assert!(sim.s().deleted_branches.is_empty(), "{:?}", sim.s().deleted_branches);
+    assert!(sim.s().tags.is_empty(), "not even archived: {:?}", sim.s().tags);
+}
+
+#[test]
+fn bl1_a_path_that_cannot_be_resolved_is_unreadable_and_stays() {
+    let (sim, h, t) = setup(json!({}));
+    sim.s().realpath_fails.push("/build/targets/lane-a".into());
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("target", "/build/targets/lane-a")], &[]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.unreadable"), "{rep:?}");
+    assert!(sim.s().has("/build/targets/lane-a/debug/big.o"));
+}
+
+#[test]
+fn minor3_an_archive_tag_that_lands_on_another_commit_keeps_the_branch() {
+    // `git tag` reports success but the tag reads back at another sha: the branch is not deleted
+    let (sim, h, t) = setup(json!({}));
+    sim.s().branches.push("line/solo".into());
+    sim.s().ancestors.insert("line/solo".into());
+    sim.s().wrong_tag_sha = Some("sha-SOMETHING-ELSE".into());
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("branch", "line/solo")], &["line/solo"]), &env_for(&ops, &t));
+    assert!(rep.refusals.iter().any(|r| r.code == "tidy.no-archive-tag"), "{rep:?}");
+    assert!(sim.s().branches.contains(&"line/solo".to_string()));
+    assert!(sim.s().deleted_branches.is_empty(), "{:?}", sim.s().deleted_branches);
+}

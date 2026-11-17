@@ -86,6 +86,8 @@ pub struct SimState {
     pub save_zero: bool,
     /// archived tar path to the image row it holds, so `docker load -i` can bring it back
     pub saved: HashMap<String, String>,
+    /// a path at or below one of these cannot be resolved (`realpath` fails)
+    pub realpath_fails: Vec<String>,
 }
 
 impl SimState {
@@ -372,6 +374,9 @@ impl Sim {
         let m = re(r"^realpath -m -- (.+)$").captures(&c).or_else(|| re(r"^powershell .*GetFullPath.*;GtReal (.+)$").captures(&c));
         if let Some(m) = m {
             let p = n(&m[1]);
+            if st.realpath_fails.iter().any(|f| p == n(f) || p.starts_with(&format!("{}/", n(f)))) {
+                return RunOut::done(1, "");
+            }
             let mut ks: Vec<&(String, Entry)> = st.fs.iter().collect();
             ks.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
             for (k, e) in ks {
