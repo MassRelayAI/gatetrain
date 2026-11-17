@@ -552,7 +552,7 @@ impl CloseEnv for OpsEnv<'_> {
         let Some(worktree) = inside_of else { return Ok(WtOverlap::None) };
         // asked from the folder itself (`.`), so no relative path is rebuilt from a normalised spelling
         let mut work = Some(false);
-        for a in [&["ls-files", "--", "."][..], &["status", "--porcelain", "--", "."][..]] {
+        for a in [&["ls-files", "--", "."][..], &["status", "--porcelain", "--untracked-files=all", "--", "."][..]] {
             let c = self.ops.git(path, a).map_err(e)?;
             if !c.ok() {
                 work = None;

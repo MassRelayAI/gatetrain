@@ -604,7 +604,8 @@ impl<'a> Ops<'a> {
     pub fn snapshot_main(&self) -> R<Option<Snapshot>> {
         let Some(m) = &self.cfg.main_checkout else { return Ok(None) };
         let files = self.git(m, &["ls-files"])?;
-        let st = self.git(m, &["status", "--porcelain"])?;
+        // untracked files are listed whatever `status.showUntrackedFiles` says (BL4)
+        let st = self.git(m, &["status", "--porcelain", "--untracked-files=all"])?;
         if !files.ok() || !st.ok() {
             return guard(format!("cannot read the main checkout {m}"));
         }
@@ -688,7 +689,8 @@ impl<'a> Ops<'a> {
     }
 
     pub fn dirty(&self, path: &str) -> R<Option<bool>> {
-        let c = self.git(path, &["status", "--porcelain"])?;
+        // `status.showUntrackedFiles = no` must never make untracked work look clean (BL4)
+        let c = self.git(path, &["status", "--porcelain", "--untracked-files=all"])?;
         Ok(if !c.ok() { None } else { Some(!strip(&c.out).is_empty()) })
     }
 
