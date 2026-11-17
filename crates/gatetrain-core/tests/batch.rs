@@ -1842,6 +1842,7 @@ fn live_fx() -> Fx {
     let mut fx = Fx::new("[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n");
     fx.cfg.close_tidy = true;
     fx.cfg.close_roots = vec!["/build".into(), "/tmp".into(), "/wt".into()];
+    fx.cfg.chain_target_dirs = vec![SHARED.into()]; // the shared chain target sits under a root: only the shared-target rule keeps it
     // lanes the way the adopter names them
     g(&fx.repo, &["branch", "line/l1", "lane1"]);
     g(&fx.repo, &["branch", "line/l2", "lane2"]);
@@ -2406,4 +2407,26 @@ fn ma1_close_with_residue_writes_a_row_for_everything_it_removed_and_refused() {
     assert_eq!(fx.rows("tidy.moved").len(), gone.len(), "one tidy.moved row per removed item");
     assert_eq!(fx.rows("tidy.uncommitted"), vec![("refusal".to_string(), "refused".to_string())]);
     assert_eq!(fx.rows("tidy.in-use"), vec![("refusal".to_string(), "refused".to_string())]);
+}
+
+#[test]
+fn ma2_a_recorded_target_that_is_contains_or_sits_inside_a_shared_chain_target_is_not_owned() {
+    let mut fx = live_fx();
+    fx.cfg.chain_target_dirs = vec!["/build/chain/shared".into()];
+    let recorded = ["/build/chain", "/build/chain/shared", "/build/chain/shared/debug"];
+    std::fs::write(fx.state.join("targets").join("b1-p1.txt"), format!("{TGT}
+{}
+", recorded.join("
+"))).unwrap();
+    let env = full_env();
+    for r in recorded {
+        env.present.borrow_mut().insert(("target".into(), r.into()));
+    }
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "tidy.not-owned"), "{o:?}");
+    for r in recorded {
+        assert!(!touched(&adm, r), "{r} overlaps the shared [chain] target_dirs: {:?}", adm.env.disposed.borrow());
+    }
+    assert_eq!(fx.rows("tidy.not-owned").len(), 3);
+    assert!(touched(&adm, TGT), "the run's own target still goes");
 }
