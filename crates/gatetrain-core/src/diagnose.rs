@@ -560,4 +560,66 @@ mod tests {
         let v: Value = serde_json::json!([{"cls": "x", "pattern": "p", "remedy": "r"}]);
         assert!(rules_from_value(&v).is_err());
     }
+
+    fn panic_step<'a>(thread: &'a str, pid: &'a str, msg: &'a str, time: &'a str) -> Vec<String> {
+        vec![
+            format!("---- {thread} stdout ----"),
+            format!("thread '{thread}' ({pid}) panicked at crates/mr-control/tests/rw4b_db.rs:104:33:"),
+            msg.to_string(),
+            "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace".to_string(),
+            format!("test result: FAILED. 0 passed; 6 failed; 0 ignored; finished in {time}s"),
+        ]
+    }
+
+    fn mk_panics(msgs: &[&str]) -> String {
+        let owned: Vec<(String, Vec<String>)> = msgs
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (format!("s{i}"), panic_step(&format!("t_{i}"), &format!("{}", 1474191 + i * 7), m, &format!("0.{i}4"))))
+            .collect();
+        let rows: Vec<(&str, u32, u32, i32, Vec<&str>)> =
+            owned.iter().enumerate().map(|(i, (n, l))| (n.as_str(), i as u32 * 10, 5, 101, l.iter().map(|s| s.as_str()).collect())).collect();
+        let refs: Vec<(&str, u32, u32, i32, &[&str])> = rows.iter().map(|(n, a, b, c, l)| (*n, *a, *b, *c, l.as_slice())).collect();
+        mklog(&refs)
+    }
+
+    const PG: &str = "applying 0000_baseline.sql: error returned from database: syntax error at or near \"(\"";
+
+    #[test]
+    fn three_steps_with_one_panic_message_form_one_cause() {
+        let t = format_findings(&diag(&mk_panics(&[PG, PG, PG])));
+        assert!(t.starts_with("causes:\n"), "{t}");
+        assert!(t.contains(&format!("3 steps: {PG}")), "{t}");
+        assert!(t.contains("3 red steps from 1 cause (1 cause explains 3)"), "{t}");
+    }
+
+    #[test]
+    fn two_different_messages_form_two_causes() {
+        let a = "left: 1 right: 2 mismatch alpha";
+        let t = format_findings(&diag(&mk_panics(&[PG, PG, a, a])));
+        assert!(t.contains("2 steps: ") && t.contains(a) && t.contains(PG), "{t}");
+        assert!(t.contains("4 red steps from 2 causes (1 cause explains 2)"), "{t}");
+    }
+
+    #[test]
+    fn a_panic_blocks_evidence_is_the_message_not_the_summary() {
+        let fs = diag(&mk_panics(&[PG]));
+        assert_eq!(fs[0].evidence, PG, "{fs:?}");
+    }
+
+    #[test]
+    fn duplicate_blocks_inside_one_step_collapse() {
+        let one: Vec<String> = vec!["FAIL  src/a.test.ts > x".into(), "AssertionError: boom".into()];
+        let mut lines: Vec<&str> = one.iter().map(|s| s.as_str()).collect();
+        lines.extend(one.iter().map(|s| s.as_str()));
+        let fs = diag(&mklog(&[("unit", 0, 5, 1, &lines)]));
+        assert_eq!(fs.len(), 1, "{fs:?}");
+    }
+
+    #[test]
+    fn one_red_step_prints_no_causes_section() {
+        let t = format_findings(&diag(&mk_panics(&[PG])));
+        assert!(!t.contains("causes:") && !t.contains("from 1 cause"), "{t}");
+        assert!(t.starts_with("s0: real (rc=101, 1 block(s))"), "{t}");
+    }
 }
