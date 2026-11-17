@@ -310,7 +310,7 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
     };
     if let Some(s) = &sampling {
         if let Ok(text) = std::fs::read_to_string(&s.file) {
-            let _ = Ledger::open(&a.db).and_then(|l| Ok(l.record_samples_for(&text, Some(&run_id))?));
+            let _ = Ledger::open(&a.db).and_then(|l| l.record_samples_for(&text, Some(&run_id)));
         }
     }
     if let Some((mb, source)) = peak {

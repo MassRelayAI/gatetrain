@@ -110,6 +110,7 @@ pub struct Advice {
     pub confidence: &'static str,
 }
 
+#[allow(clippy::ptr_arg)] // callers pass a temporary built by `collect()`, which needs the Vec type to be named
 fn median(v: &mut Vec<f64>) -> Option<f64> {
     if v.is_empty() {
         return None;
@@ -119,6 +120,7 @@ fn median(v: &mut Vec<f64>) -> Option<f64> {
     Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
 }
 
+#[allow(clippy::ptr_arg)]
 fn pctile(v: &mut Vec<f64>, p: f64) -> Option<f64> {
     if v.is_empty() {
         return None;
@@ -498,6 +500,7 @@ pub fn close_loop(l: &Ledger, host: &str, current_hash: &str, now_at: &str) -> c
 
 /// Fill [`Inputs`] from the ledger: the newest `n_runs` finished chain runs of `host`, the samples of their window, the newest probe of
 /// every configured disk, and the median build-folder growth. `cfg` and `reclaim` come from the caller (the config file, `docker`).
+#[allow(clippy::too_many_arguments)]
 pub fn gather(l: &Ledger, host: &str, cfg: Option<&crate::config::Host>, n_runs: usize, now_epoch_us: i64, reclaim: Vec<ReclaimInfo>, split_steps: Vec<String>, config_hash: String) -> crate::Result<Inputs> {
     let ids: Vec<String> = {
         let mut st = l.conn.prepare("SELECT id FROM runs WHERE host=? AND kind='chain' AND outcome IN ('green','red') ORDER BY started_at DESC LIMIT ?")?;
