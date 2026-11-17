@@ -339,6 +339,40 @@ fn mk(step: &Step, cls: &str, evidence: String, remedy: &str, rerun: bool, rule:
 /// any block, on a slow step, is one `flake-load` finding. A block no rule explains is `real`.
 pub fn classify(idx: usize, lines: &[String], steps: &[Step], history: &History, rules: &[Rule]) -> Vec<Finding> {
     let step = &steps[idx];
+    // a third-party advisory (cargo-deny, cargo-audit) is its own class: it is not this batch's defect, and a person decides
+    // what to do with it. It is reported with its ids and never ignored or retried by gatetrain.
+    let mut advisory: Option<Finding> = None;
+    if let Some(r) = rules.iter().find(|r| r.id == "advisory") {
+        let hit = lines.iter().find(|l| r.pattern.is_match(l));
+        if let Some(first) = hit {
+            static ID: OnceLock<Regex> = OnceLock::new();
+            let id = ID.get_or_init(|| Regex::new(r"(?:RUSTSEC-\d{4}-\d{4}|GHSA(?:-[0-9a-z]{4}){3})").unwrap());
+            let mut ids: Vec<String> = Vec::new();
+            for l in lines {
+                for m in id.find_iter(l) {
+                    if !ids.iter().any(|x| x == m.as_str()) {
+                        ids.push(m.as_str().to_string());
+                    }
+                }
+            }
+            let ev = if ids.is_empty() { py_strip(first).to_string() } else { ids.join(", ") };
+            advisory = Some(mk(step, &r.cls, ev, &r.remedy, r.rerun, &r.id, cap100(py_strip(first))));
+            if !lines.iter().any(|l| is_start(l)) {
+                return vec![advisory.unwrap()];
+            }
+        }
+    }
+    // the advisory row has been applied above; the block loop must not match it again
+    let others: Vec<Rule> = rules.iter().filter(|r| r.id != "advisory").cloned().collect();
+    let mut found = classify_blocks(idx, lines, steps, history, &others);
+    if let Some(a) = advisory {
+        found.insert(0, a);
+    }
+    found
+}
+
+fn classify_blocks(idx: usize, lines: &[String], steps: &[Step], history: &History, rules: &[Rule]) -> Vec<Finding> {
+    let step = &steps[idx];
     let mut blocks = failure_blocks(lines);
     let mut seen: Vec<Vec<String>> = Vec::new();
     blocks.retain(|b| !seen.contains(b) && { seen.push(b.clone()); true });
@@ -555,7 +589,9 @@ pub fn format_findings(findings: &[Finding]) -> String {
             l.push(format!("    remedy: {}", f.remedy));
             l.push(format!(
                 "    full rerun needed: {}",
-                if f.rerun {
+                if f.cls == "advisory" {
+                    "no (a rerun will not change a published advisory; a person decides, nothing is ignored automatically)"
+                } else if f.rerun {
                     "yes (no lane defect found; a green run under the zero-red merge rule is still required)"
                 } else {
                     "after the fix, the lane's defect comes first"
@@ -595,6 +631,41 @@ mod tests {
         out.join("\n") + "\n"
     }
 
+    const DENY: [&str; 9] = [
+        "error[vulnerability]: Vulnerability detected",
+        "   ┌─ Cargo.lock:12:1",
+        "   = ID: RUSTSEC-2026-0001",
+        "error[unmaintained]: crate is unmaintained",
+        "   = ID: RUSTSEC-2026-0007",
+        "error[vulnerability]: Vulnerability detected",
+        "   = ID: RUSTSEC-2026-0001",
+        "advisories FAILED, bans ok, licenses ok, sources ok",
+        "error: 3 advisories found",
+    ];
+
+    #[test]
+    fn a_third_party_advisory_is_its_own_class_with_its_ids_and_nothing_is_ignored() {
+        let f = diag(&mklog(&[("deny", 0, 5, 1, &DENY)]));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!((f[0].cls.as_str(), f[0].rule.as_str(), f[0].rerun), ("advisory", "advisory", false));
+        assert_eq!(f[0].evidence, "RUSTSEC-2026-0001, RUSTSEC-2026-0007", "each id once, in order of appearance");
+        assert!(f[0].remedy.contains("a person decides") && f[0].remedy.contains("never"), "{}", f[0].remedy);
+        let text = format_findings(&f);
+        assert!(text.contains("[advisory]") && text.contains("RUSTSEC-2026-0007"), "{text}");
+        assert!(!text.contains("real step(s)") || text.contains("0 real"), "{text}");
+        // not an advisory: an ordinary error line is still `real`
+        let g = diag(&mklog(&[("deny", 0, 5, 1, &["error: could not compile", "error[E0308]: mismatched types"])]));
+        assert!(g.iter().all(|x| x.cls != "advisory"), "{g:?}");
+    }
+
+    #[test]
+    fn an_advisory_next_to_a_real_failure_reports_both() {
+        let mut lines: Vec<&str> = vec!["---- t stdout ----", "assertion failed: left == right"];
+        lines.extend(DENY);
+        let f = diag(&mklog(&[("both", 0, 5, 1, &lines)]));
+        assert!(f.iter().any(|x| x.cls == "advisory") && f.iter().any(|x| x.cls == "real"), "{f:?}");
+    }
+
     fn diag(text: &str) -> Vec<Finding> {
         let p = parse_log(text).unwrap();
         diagnose_log(text, &p, &History::new(), builtin_rules())
@@ -604,14 +675,15 @@ mod tests {
     const SHRINK: [&str; 2] = ["FAIL  src/f.test.ts > frozen > only shrinks", "AssertionError: these routes now reach gates - delete their FROZEN entries: expected [ 'x' ] to deeply equal []"];
 
     #[test]
-    fn builtin_table_loads_fifteen_rules_in_order() {
+    fn builtin_table_loads_its_rules_in_order() {
         let ids: Vec<&str> = builtin_rules().iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids[0], "out-of-memory", "the infra-memory row comes first, as the extra file used to be tried first");
         assert_eq!(ids[1], "port-collision");
-        assert_eq!(ids.len(), 15);
+        assert_eq!(ids.len(), 16);
         assert_eq!(ids[7], "load-flake");
         // the seven environment classes (audit rows 41, 66, 68, 69, 70, 96, 106) sit behind the original eight
-        assert_eq!(&ids[8..], ["build-folder-missing", "service-never-came-up", "cache-server-died", "packages-not-built", "windows-linker", "generated-stale", "browser-timeout"]);
+        assert_eq!(ids[15], "advisory", "the advisory row is applied by its own pre-pass, so it sits last");
+        assert_eq!(&ids[8..15], ["build-folder-missing", "service-never-came-up", "cache-server-died", "packages-not-built", "windows-linker", "generated-stale", "browser-timeout"]);
     }
 
     #[test]

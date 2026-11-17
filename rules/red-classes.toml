@@ -123,3 +123,10 @@ absent = '''AssertionError|^\s*Tests\s(?:.*?\D)?[1-9]\d* failed'''
 when = "slow"
 remedy = "a browser-suite timeout with no failed assertion on a slow, loaded step: raise the suite timeout for the loaded host or reduce the step's parallel neighbours. Under a zero-red merge rule it still needs a full green rerun"
 rerun = true
+
+[[rule]]
+id = "advisory"
+cls = "advisory"
+pattern = '''error\[(?:vulnerability|unmaintained|unsound)\]|^\s*ID:\s*RUSTSEC-\d{4}-\d{4}'''
+remedy = "a security advisory published by a third party (cargo-deny or cargo-audit), not this batch's own defect: a person decides whether to upgrade the crate, wait, or record an ignore with a reason in deny.toml; gatetrain never ignores or retries an advisory by itself"
+rerun = false
