@@ -268,6 +268,68 @@ fn cap100(s: &str) -> String {
     s.chars().take(100).collect()
 }
 
+/// The most specific line of a failure block: the message after a Rust `panicked at file:l:c:` line, then an `Error:` or
+/// `AssertionError` line, an `error returned from database:` line, a `FAILED —` line, any other line that names an error,
+/// and only last a `test result: FAILED` summary. `None` when the block has no such line.
+fn best_evidence(blk: &[String]) -> Option<String> {
+    static PANIC: OnceLock<Regex> = OnceLock::new();
+    static ERRWORD: OnceLock<Regex> = OnceLock::new();
+    let panic = PANIC.get_or_init(|| Regex::new(r"panicked at \S+:\d+:\d+:?\s*$").unwrap());
+    let errword = ERRWORD.get_or_init(|| Regex::new(r"Error|assert|panick|expected|FAIL|fail").unwrap());
+    let lines: Vec<&str> = blk.iter().map(|x| py_strip(x)).collect();
+    let is_summary = |x: &str| x.starts_with("test result:");
+    if let Some(i) = lines.iter().position(|x| panic.is_match(x)) {
+        if let Some(m) = lines[i + 1..].iter().find(|x| !x.is_empty()) {
+            return Some(m.to_string());
+        }
+    }
+    let pick = |f: &dyn Fn(&str) -> bool| lines.iter().find(|x| !is_summary(x) && f(x)).map(|x| x.to_string());
+    pick(&|x| x.starts_with("Error:") || x.contains("AssertionError"))
+        .or_else(|| pick(&|x| x.contains("error returned from database:")))
+        .or_else(|| pick(&|x| x.contains("FAILED —")))
+        .or_else(|| pick(&|x| errword.is_match(x)))
+        .or_else(|| lines.iter().find(|x| errword.is_match(x)).map(|x| x.to_string()))
+}
+
+/// The key two reds share when they have one cause: the evidence with counts, times, ids, hex and the head of every absolute
+/// path removed, whitespace collapsed, quoted SQL and error text kept.
+pub fn cause_key(evidence: &str) -> String {
+    static PATH: OnceLock<Regex> = OnceLock::new();
+    static HEX: OnceLock<Regex> = OnceLock::new();
+    static NUM: OnceLock<Regex> = OnceLock::new();
+    let path = PATH.get_or_init(|| Regex::new(r#"(^|[\s"'(=])((?:[A-Za-z]:)?[/\\][\w.\-/\\]+)"#).unwrap());
+    let hex = HEX.get_or_init(|| Regex::new(r"\b(?:0x[0-9a-fA-F]+|[0-9a-f]{7,})\b").unwrap());
+    let num = NUM.get_or_init(|| Regex::new(r"\b\d+(?:\.\d+)?(?:ms|us|ns|s|m|h|KB|MB|GB|B)?\b").unwrap());
+    let s = path.replace_all(evidence, |c: &regex::Captures| {
+        let segs: Vec<&str> = c[2].split(['/', '\\']).filter(|x| !x.is_empty()).collect();
+        format!("{}{}", &c[1], segs[segs.len().saturating_sub(2)..].join("/"))
+    });
+    let s = hex.replace_all(&s, "#");
+    let s = num.replace_all(&s, "#");
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Red steps that share a cause key: (evidence of the first, step names in order), most steps first, two or more steps only.
+/// Also the number of distinct causes among all red blocks.
+pub fn shared_causes(findings: &[Finding]) -> (Vec<(String, Vec<String>)>, usize) {
+    let mut order: Vec<String> = Vec::new();
+    let mut by: HashMap<String, (String, Vec<String>)> = HashMap::new();
+    for f in findings {
+        let k = cause_key(&f.evidence);
+        let e = by.entry(k.clone()).or_insert_with(|| {
+            order.push(k.clone());
+            (f.evidence.clone(), Vec::new())
+        });
+        if !e.1.contains(&f.step) {
+            e.1.push(f.step.clone());
+        }
+    }
+    let total = order.len();
+    let mut v: Vec<(String, Vec<String>)> = order.into_iter().map(|k| by.remove(&k).unwrap()).filter(|(_, s)| s.len() >= 2).collect();
+    v.sort_by_key(|a| std::cmp::Reverse(a.1.len())); // stable: ties keep first-seen order
+    (v, total)
+}
+
 fn mk(step: &Step, cls: &str, evidence: String, remedy: &str, rerun: bool, rule: &str, block: String) -> Finding {
     Finding { step: step.name.clone(), rc: step.exit_code, cls: cls.into(), evidence, remedy: remedy.into(), rerun, rule: rule.into(), block }
 }
@@ -276,11 +338,11 @@ fn mk(step: &Step, cls: &str, evidence: String, remedy: &str, rerun: bool, rule:
 /// any block, on a slow step, is one `flake-load` finding. A block no rule explains is `real`.
 pub fn classify(idx: usize, lines: &[String], steps: &[Step], history: &History, rules: &[Rule]) -> Vec<Finding> {
     let step = &steps[idx];
-    let blocks = failure_blocks(lines);
+    let mut blocks = failure_blocks(lines);
+    let mut seen: Vec<Vec<String>> = Vec::new();
+    blocks.retain(|b| !seen.contains(b) && { seen.push(b.clone()); true });
     let mut out: Vec<Option<Finding>> = Vec::new();
     let mut timeouts: Vec<(usize, &Rule, usize, String)> = Vec::new(); // (block index, rule, match start, body)
-    static ERRWORD: OnceLock<Regex> = OnceLock::new();
-    let errword = ERRWORD.get_or_init(|| Regex::new(r"Error|assert|panick|expected|FAIL|fail").unwrap());
     for (bi, blk) in blocks.iter().enumerate() {
         let body = blk.join("\n");
         let hit = rules.iter().find_map(|r| rule_match(&body, r).map(|s| (r, s)));
@@ -292,9 +354,9 @@ pub fn classify(idx: usize, lines: &[String], steps: &[Step], history: &History,
             }
             Some((r, s)) => out.push(Some(mk(step, &r.cls, line_of(&body, s).to_string(), &r.remedy, r.rerun, &r.id, title))),
             None => {
-                let ev = blk.iter().find(|x| errword.is_match(x)).map(|x| py_strip(x)).unwrap_or(&title);
-                let ev = if ev.is_empty() { "(no output captured)" } else { ev };
-                out.push(Some(mk(step, "real", ev.to_string(), REAL_REMEDY, false, "default", title)));
+                let ev = best_evidence(blk).unwrap_or_else(|| title.clone());
+                let ev = if ev.is_empty() { "(no output captured)".to_string() } else { ev };
+                out.push(Some(mk(step, "real", ev, REAL_REMEDY, false, "default", title)));
             }
         }
     }
@@ -402,6 +464,17 @@ pub fn format_findings(findings: &[Finding]) -> String {
         by.entry(&f.step).or_default().push(f);
     }
     let mut l: Vec<String> = Vec::new();
+    let (shared, total) = shared_causes(findings);
+    if !shared.is_empty() {
+        l.push("causes:".into());
+        for (ev, steps) in &shared {
+            let head = steps.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+            let more = if steps.len() > 3 { format!(", +{} more", steps.len() - 3) } else { String::new() };
+            l.push(format!("  {} steps: {ev} ({head}{more})", steps.len()));
+        }
+        let plural = if total == 1 { "cause" } else { "causes" };
+        l.push(format!("{} red steps from {total} {plural} (1 cause explains {})", order.len(), shared[0].1.len()));
+    }
     for name in &order {
         let fs = &by[name];
         let verdict = if fs.iter().any(|f| f.cls == "real") {

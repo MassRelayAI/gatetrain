@@ -1,10 +1,10 @@
 unit-001: real (rc=1, 2 block(s))
   [real] FAIL  src/a.test.ts > a
-    evidence: FAIL  src/a.test.ts > a
+    evidence: Error: missing: gen/x.json
     remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane
     full rerun needed: after the fix, the lane's defect comes first
   [real] FAIL  src/b.test.ts > b
-    evidence: FAIL  src/b.test.ts > b
+    evidence: Error: on-disk output differs
     remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane
     full rerun needed: after the fix, the lane's defect comes first
 1 red steps: 1 real step(s), 0 flake or infrastructure, 0 baseline

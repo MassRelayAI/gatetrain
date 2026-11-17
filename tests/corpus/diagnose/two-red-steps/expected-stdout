@@ -1,6 +1,6 @@
 unit-001: real (rc=1, 1 block(s))
   [real] FAIL  src/golden.test.ts > golden > matches the stored output
-    evidence: FAIL  src/golden.test.ts > golden > matches the stored output
+    evidence: AssertionError: expected { a: 1 } to deeply equal { a: 2 }
     remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane
     full rerun needed: after the fix, the lane's defect comes first
 db-gate-002: infra-port (rc=2, 1 block(s))
