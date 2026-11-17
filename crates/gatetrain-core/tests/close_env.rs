@@ -231,3 +231,24 @@ fn bl3_a_target_inside_a_worktree_whose_content_cannot_be_read_is_unreadable() {
     assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.unreadable"), "{rep:?}");
     assert!(sim.s().has("/repo/wt/lane-a/target"));
 }
+
+#[test]
+fn ma6_a_kept_lane_keeps_its_branch_when_no_worktree_is_on_it() {
+    let (sim, h, t) = setup(json!({"keep_lanes": ["LANE-A"]}));
+    sim.s().worktrees.retain(|w| w.1 != "line/lane-a");
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("branch", "line/lane-a")], &["line/lane-a"]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.protected"), "{rep:?}");
+    assert!(sim.s().deleted_branches.is_empty(), "{:?}", sim.s().deleted_branches);
+}
+
+#[test]
+fn ma6_a_kept_lane_keeps_its_target_and_temp_folder() {
+    let (sim, h, t) = setup(json!({"keep_lanes": ["lane-a"]}));
+    sim.s().dir("/build/tmp", 10 * 86400);
+    sim.s().dir("/build/tmp/lane-a", 10 * 86400);
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("target", "/build/targets/lane-a"), ("tmp", "/build/tmp/lane-a")], &[]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().filter(|r| r.code == "tidy.protected").count() == 2, "{rep:?}");
+    assert!(sim.s().has("/build/targets/lane-a/debug/big.o") && sim.s().has("/build/tmp/lane-a"));
+}
