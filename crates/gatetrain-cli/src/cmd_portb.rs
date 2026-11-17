@@ -8,7 +8,7 @@ fn code(n: i32) -> ExitCode {
     ExitCode::from(n.clamp(0, 255) as u8)
 }
 
-pub fn doctor_cmd(config: &str, host: Option<&str>, json: bool) -> ExitCode {
+pub fn doctor_cmd(config: &str, host: Option<&str>, json: bool, db: Option<&Path>) -> ExitCode {
     let cfg = match config::load(Path::new(config)) {
         Ok(c) => c,
         Err(e) => {
@@ -17,7 +17,22 @@ pub fn doctor_cmd(config: &str, host: Option<&str>, json: bool) -> ExitCode {
         }
     };
     let res = match doctor::run_doctor(&cfg, host, &|h| doctor::make_runner(h)) {
-        Ok(r) => r,
+        Ok(mut r) => {
+            if let Some(db) = db.filter(|d| d.exists()) {
+                if let Ok(l) = gatetrain_core::ledger::Ledger::open(db) {
+                    for h in cfg.hosts.iter().filter(|h| host.is_none_or(|o| h.name == o)) {
+                        let disks: Vec<(String, bool)> = h.disks.iter().map(|d| (d.path.clone(), d.fast)).collect();
+                        let p95: Vec<(String, f64)> = h
+                            .disks
+                            .iter()
+                            .filter_map(|d| l.conn.query_row("SELECT fsync_p95_ms FROM disk_probes WHERE host=? AND path=? AND fsync_p95_ms IS NOT NULL ORDER BY at DESC LIMIT 1", rusqlite::params![h.name, d.path], |r| r.get::<_, f64>(0)).ok().map(|v| (d.path.clone(), v)))
+                            .collect();
+                        r.extend(doctor::measured_speed_checks(&h.name, &disks, &p95, 5.0));
+                    }
+                }
+            }
+            r
+        }
         Err(m) => {
             eprintln!("{m}");
             return code(1);

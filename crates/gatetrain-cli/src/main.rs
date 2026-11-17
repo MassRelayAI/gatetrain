@@ -188,6 +188,9 @@ enum Cmd {
         host: Option<String>,
         #[arg(long)]
         json: bool,
+        /// a ledger with `probe` results: a disk flagged `fast` that the probe measured more than 5x slower than the best disk is a WARN
+        #[arg(long)]
+        db: Option<PathBuf>,
     },
     /// Pre-stack collision radar over lane refs
     Lanes {
@@ -413,7 +416,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
             println!("{}", config::dump_line(&file));
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Doctor { config, host, json } => Ok(cmd_portb::doctor_cmd(&config, host.as_deref(), json)),
+        Cmd::Doctor { config, host, json, db } => Ok(cmd_portb::doctor_cmd(&config, host.as_deref(), json, db.as_deref())),
         Cmd::Lanes { repo, main, lane_ref, json, shared_files, resource_regex, baseline_files, new_item_regex } => {
             Ok(cmd_portb::lanes_cmd(cmd_portb::LanesArgs { repo, main, refs: lane_ref, json, shared_files, resource_regex, baseline_files, new_item_regex }))
         }

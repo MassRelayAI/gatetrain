@@ -617,3 +617,25 @@ pub fn exit_code(results: &[DResult]) -> i32 {
 pub fn to_json(results: &[DResult]) -> J {
     J::Arr(results.iter().map(|r| r.as_json()).collect())
 }
+
+/// Compare each disk's `fast` flag with the newest probe (engine v2 10.1): a flagged disk whose p95 durable write is more than
+/// `slow_factor` times the best p95 on the host gets a WARN `disk-speed-measured` naming both figures. Disks never probed are
+/// unknown, never a warning. `disks` are (path, fast flag); `p95` are (path, ms). The flag is not changed.
+pub fn measured_speed_checks(host: &str, disks: &[(String, bool)], p95: &[(String, f64)], slow_factor: f64) -> Vec<DResult> {
+    let Some((best_path, best)) = p95.iter().filter(|(_, v)| *v > 0.0).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (path, _) in disks.iter().filter(|(_, f)| *f) {
+        let Some((_, mine)) = p95.iter().find(|(p, _)| p == path) else { continue };
+        if path != best_path && *mine > best * slow_factor {
+            out.push(DResult::new(
+                host,
+                "disk-speed-measured",
+                "WARN",
+                &[],
+                format!("disk {path} is flagged fast but its durable write p95 is {mine:.1} ms; the best disk on the host ({best_path}) measured {best:.1} ms"),
+                "correct `fast` in hosts.toml or fix the disk; `gatetrain probe` measures again",
+            ));
+        }
+    }
+    out
+}

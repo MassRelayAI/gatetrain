@@ -346,7 +346,7 @@ pub fn classify(idx: usize, lines: &[String], steps: &[Step], history: &History,
         let hit = lines.iter().find(|l| r.pattern.is_match(l));
         if let Some(first) = hit {
             static ID: OnceLock<Regex> = OnceLock::new();
-            let id = ID.get_or_init(|| Regex::new(r"(?:RUSTSEC-\d{4}-\d{4}|GHSA(?:-[0-9a-z]{4}){3})").unwrap());
+            let id = ID.get_or_init(|| Regex::new(r"\b(?:RUSTSEC-\d{4}-\d{4}|GHSA(?:-[0-9a-z]{4}){3})\b").unwrap());
             let mut ids: Vec<String> = Vec::new();
             for l in lines {
                 for m in id.find_iter(l) {

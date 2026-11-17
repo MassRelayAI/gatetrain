@@ -157,3 +157,27 @@ fn advise_without_a_ledger_says_nothing_has_been_measured() {
     assert_eq!(o.status.code(), Some(1));
     assert!(out(&o).contains("nothing has been measured"), "{}", out(&o));
 }
+
+#[test]
+fn doctor_with_a_db_warns_when_a_fast_flag_contradicts_the_probe_and_without_one_is_unchanged() {
+    let d = tempfile::tempdir().unwrap();
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let cfg = d.path().join("hosts.toml");
+    std::fs::write(
+        &cfg,
+        format!("[[hosts]]\nname = \"h\"\nkind = \"local\"\nroles = [\"chain\"]\nreach = \"local\"\n[[hosts.disks]]\npath = '{}'\nmin_free_gb = 1\nfast = true\nuse = [\"chain\"]\n[[hosts.disks]]\npath = '{}'\nmin_free_gb = 1\nuse = [\"cache\"]\n", a.path().display(), b.path().display()),
+    )
+    .unwrap();
+    let db = d.path().join("l.db");
+    let mut l = gatetrain_core::ledger::Ledger::open(&db).unwrap();
+    l.migrate().unwrap();
+    for (p, ms) in [(a.path(), 60.0), (b.path(), 2.0)] {
+        l.conn.execute("INSERT INTO disk_probes(host,at,path,fsync_p95_ms) VALUES('h','2026-11-17T10:00:00+00:00',?,?)", rusqlite::params![p.to_string_lossy(), ms]).unwrap();
+    }
+    let plain = gt(d.path()).args(["doctor", "--config", cfg.to_str().unwrap(), "--host", "h"]).output().unwrap();
+    assert!(!out(&plain).contains("disk-speed-measured"), "without --db nothing changes: {}", out(&plain));
+    let o = gt(d.path()).args(["doctor", "--config", cfg.to_str().unwrap(), "--host", "h", "--db", db.to_str().unwrap()]).output().unwrap();
+    let t = out(&o);
+    assert!(t.contains("disk-speed-measured") && t.contains("60.0 ms") && t.contains("2.0 ms"), "{t}");
+    assert!(std::fs::read_to_string(&cfg).unwrap().contains("fast = true"), "the flag is not changed");
+}
