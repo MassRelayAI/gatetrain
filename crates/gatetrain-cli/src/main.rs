@@ -7,6 +7,7 @@ use gatetrain_core::batch::{system_now, Engine, Outcome};
 use gatetrain_core::batchcfg::BatchConfig;
 use gatetrain_core::hostlock::{MemoryAdmission, RealLock};
 use gatetrain_core::{analysis, config, declog, diagnose, history, ledger::Ledger, logfmt, predict};
+mod chaincmd;
 mod holdcmd;
 mod tidycmd;
 use std::path::{Path, PathBuf};
@@ -87,6 +88,8 @@ enum Cmd {
     Check(tidycmd::CheckArgs),
     /// Clean the leftovers `check` finds (dry run unless --apply or --auto)
     Tidy(tidycmd::TidyArgs),
+    /// Run a steps file: fast then slow tier in parallel, full output per step, log-format lines on stdout, a stamp when green and clean
+    Chain(chaincmd::ChainArgs),
     /// Fail when any file of a repository holds a word on its hashed deny-list `.privacy-denylist` (a hit names the file and line, never the word)
     PrivacyCheck {
         /// the repository to check (default: the current folder)
@@ -459,6 +462,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Batch { db, config, lock, hosts, host, cmd } => run_batch(&db, &config, lock, hosts.zip(host), cmd),
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
+        Cmd::Chain(a) => Ok(chaincmd::run(a)),
         Cmd::PrivacyCheck { root, hash } => Ok(ExitCode::from(gatetrain_core::privacy::run(&root, hash.as_deref()) as u8)),
         Cmd::Watch { config, now } => {
             let cfg = match gatetrain_core::watch::load_cfg(&config) {

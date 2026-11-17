@@ -3,6 +3,7 @@ pub mod analysis;
 pub mod batch;
 pub mod batchcfg;
 pub mod canon;
+pub mod chain;
 pub mod config;
 pub mod declog;
 pub mod diagnose;

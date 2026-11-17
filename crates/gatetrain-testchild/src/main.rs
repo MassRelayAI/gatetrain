@@ -12,6 +12,25 @@ fn main() {
         "print" => println!("{}", arg(1)),
         "exit" => std::process::exit(arg(1).parse().unwrap_or(1)),
         "pass" => {}
+        // `lines N`: print N numbered lines (one process, no shell)
+        "lines" => {
+            let out = std::io::stdout();
+            let mut w = std::io::BufWriter::new(out.lock());
+            for i in 0..arg(1).parse::<u64>().unwrap_or(0) {
+                let _ = writeln!(w, "line {i}");
+            }
+        }
+        // `marker FILE SECS`: sleep, then write FILE (proves the process was not killed)
+        "marker" => {
+            std::thread::sleep(Duration::from_secs_f64(arg(2).parse().unwrap_or(0.0)));
+            std::fs::write(arg(1), "alive").unwrap();
+        }
+        // `gcmarker FILE SECS`: start a `marker` grandchild, then sleep as long as it does
+        "gcmarker" => {
+            let me = std::env::current_exe().unwrap();
+            let _ = Command::new(me).args(["marker", arg(1), arg(2)]).spawn();
+            std::thread::sleep(Duration::from_secs_f64(arg(2).parse().unwrap_or(0.0)));
+        }
         "sleep" => std::thread::sleep(Duration::from_secs_f64(arg(1).parse().unwrap_or(0.0))),
         // a grandchild that holds our stdout for as long as we do
         "grandchild" => {
