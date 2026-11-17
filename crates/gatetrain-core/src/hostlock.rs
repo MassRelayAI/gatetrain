@@ -119,7 +119,11 @@ impl MemoryAdmission {
         let v: toml::Value = text.parse().map_err(|e: toml::de::Error| Error::Batch(format!("hosts.toml: {e}")))?;
         let uses = if role == "light" { "preflight" } else { "chain" };
         let h = v.get("hosts").and_then(|h| h.as_array()).and_then(|a| a.iter().find(|h| h.get("name").and_then(|n| n.as_str()) == Some(host)));
-        let Some(h) = h else { return Ok(None) };
+        let Some(h) = h else { return Ok(Some(format!("host {host} is not in the hosts file; the disk floor cannot be judged, refused"))) };
+        let reach = h.get("reach").and_then(|r| r.as_str()).unwrap_or("local");
+        if reach.trim_start().starts_with("ssh") {
+            return Ok(Some(format!("host {host} is reached over ssh ({reach}): its free space is not measured here and is unknown, refused")));
+        }
         let needs = if role == "light" { self.needs_preflight_gb } else { self.needs_chain_gb };
         for d in h.get("disks").and_then(|d| d.as_array()).into_iter().flatten() {
             let covers = d.get("use").and_then(|u| u.as_array()).is_some_and(|u| u.iter().any(|x| x.as_str() == Some(uses)));
@@ -176,6 +180,22 @@ impl Admission for MemoryAdmission {
             }
         }
         let hist = if self.db.exists() { Ledger::open(&self.db)?.step_memory_history()? } else { Default::default() };
+        // the disk floor is judged first and fails closed: a hosts file that cannot be read, a host that is not in it, a remote host whose
+        // free space is not measured here, and a disk that cannot be read all refuse
+        if self.disk_floor && (role == "light" || role == "proof") {
+            if let Some(err) = &self.floor_error {
+                return refuse("host.refuse-disk", format!("the disk floor cannot be judged: {err}"));
+            }
+            if let Some((hosts, host)) = &self.hosts {
+                let why = match std::fs::read_to_string(hosts) {
+                    Ok(text) => self.floor_problem(&text, host, role, &hist)?,
+                    Err(e) => Some(format!("the hosts file {} could not be read ({e}); the disk floor cannot be judged", hosts.display())),
+                };
+                if let Some(why) = why {
+                    return refuse("host.refuse-disk", why);
+                }
+            }
+        }
         if let Some((hosts, host)) = &self.hosts {
             let text = std::fs::read_to_string(hosts)?;
             let m = MemoryModel::from_hosts_toml(&text, host)?;
@@ -202,14 +222,6 @@ impl Admission for MemoryAdmission {
         if role == "proof" {
             if let State::Held(i) = hold::status(&self.lock)? {
                 return refuse("host.refuse", format!("host lock held by {} (pid {}) since {}", i.run_id, i.pid, i.started_at));
-            }
-        }
-        if self.disk_floor && (role == "light" || role == "proof") {
-            if let Some((hosts, host)) = &self.hosts {
-                let text = std::fs::read_to_string(hosts)?;
-                if let Some(why) = self.floor_problem(&text, host, role, &hist)? {
-                    return refuse("host.refuse-disk", why);
-                }
             }
         }
         // a pre-flight, a lane run or a probe must not slow a proof down (lesson L26); the host may say otherwise (`light_while_proving`)

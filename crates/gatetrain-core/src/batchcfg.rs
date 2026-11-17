@@ -240,6 +240,9 @@ impl BatchConfig {
             c.close_roots = argv(cl.get("roots"));
             c.close_own_workdir = cl.get("own_workdir").and_then(|b| b.as_bool()).unwrap_or(false);
             c.close_protected_container_prefixes = argv(cl.get("protected_container_prefixes"));
+            if c.close_tidy && c.close_roots.is_empty() {
+                return Err(Error::Batch("gatetrain.toml: [close] tidy = true needs [close] roots (the folders a batch may tidy inside); without them nothing is owned".into()));
+            }
         }
         c.tidy_auto = v.get("disk").and_then(|d| d.get("tidy_auto")).and_then(|b| b.as_bool()).unwrap_or(false);
         c.legacy_stamp_command = argv(v.get("preflight").and_then(|p| p.get("legacy_stamp_command")));

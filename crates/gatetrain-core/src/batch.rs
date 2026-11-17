@@ -939,7 +939,20 @@ impl<'a> Engine<'a> {
         if rule != "host.refuse-disk" || !self.cfg.tidy_auto {
             return Ok(first);
         }
-        let Some(note) = self.adm.tidy_auto(role)? else { return Ok(first) };
+        // once per batch: a second refusal of the same batch is a refusal, not another tidy
+        let ran: i64 = self.ledger.conn.query_row("SELECT COUNT(*) FROM decisions WHERE rule='tidy.auto-disk' AND batch=?", [id], |r| r.get(0)).unwrap_or(0);
+        if ran > 0 {
+            return Ok(first);
+        }
+        let note = match self.adm.tidy_auto(role) {
+            Ok(Some(n)) => n,
+            Ok(None) => return Ok(first),
+            Err(e) => {
+                // a tidy that failed is a row and the original refusal, never an engine error
+                self.decide("tidy", id, None, "tidy.auto-disk", "failed", format!("tidy --auto could not run: {e}"), Some(json!({"role": role})))?;
+                return Ok(first);
+            }
+        };
         let again = self.adm.admit_rule(role, id)?;
         let prev: Option<String> = self.ledger.conn.query_row("SELECT outcome FROM decisions WHERE rule='tidy.auto-disk' AND batch<>? ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).ok();
         let outcome = if again.is_some() { "still-below" } else { "recovered" };
@@ -1131,7 +1144,7 @@ impl<'a> Engine<'a> {
                 }
                 let run = format!("{id}-p{}", self.next_run_no(f));
                 let log = self.state_dir.join("logs").join(format!("{run}.log"));
-                Ok(mk(Some(tip.clone()), Some(run.clone()), json!({"run_id": run, "log": log.to_string_lossy(), "tested_sha": tip, "target_dirs": self.cfg.chain_target_dirs})))
+                Ok(mk(Some(tip.clone()), Some(run.clone()), json!({"run_id": run, "log": log.to_string_lossy(), "tested_sha": tip})))
             }
             "T6a" => {
                 let tip = self.tip(f)?;
@@ -1732,27 +1745,30 @@ impl<'a> Engine<'a> {
             set.items.push(OwnedItem::new("worktree", &wd));
         }
         for w in env.worktrees_on(&set.branches)? {
-            if !set.items.iter().any(|i| i.key == w) {
-                set.items.push(OwnedItem::new("worktree", &w));
+            // the batch's own checkout is its owned set only on request: the lane worktrees are looked up by branch, and that lookup finds it
+            let is_wd = !wd.is_empty() && crate::tidy::ops::norm(&w) == crate::tidy::ops::norm(&wd);
+            if (is_wd && !self.cfg.close_own_workdir) || set.items.iter().any(|i| i.key == w) {
+                continue;
             }
-        }
-        for t in f.facts.get("target_dirs").and_then(|t| t.as_array()).cloned().unwrap_or_default() {
-            if let Some(t) = t.as_str() {
-                set.items.push(OwnedItem::new("target", t));
-            }
+            set.items.push(OwnedItem::new("worktree", &w));
         }
         for r in &runs {
-            for (sub, kind) in [("containers", "container"), ("tmpdirs", "tmp")] {
+            // recorded by the run, one per line; the shared `[chain] target_dirs` are never the batch's to move
+            for (sub, kind) in [("targets", "target"), ("containers", "container"), ("tmpdirs", "tmp")] {
                 let file = self.state_dir.join(sub).join(format!("{r}.txt"));
                 for l in std::fs::read_to_string(&file).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()) {
                     set.items.push(OwnedItem::new(kind, l));
                 }
             }
         }
+        // the branches the batch is made of: its lane refs under line/ and the stack branches the engine itself recorded; none is derived by name
         let mut branches: Vec<String> = lanes.iter().filter(|l| l.starts_with("line/")).cloned().collect();
-        branches.push(format!("line/batch-{id}"));
+        branches.extend(set.branches.iter().filter(|b| b.starts_with(&format!("batch/{id}/"))).cloned());
+        branches.dedup();
         for b in branches {
-            set.items.push(OwnedItem::new("branch", &b));
+            if !set.items.iter().any(|i| i.kind == "branch" && i.key == b) {
+                set.items.push(OwnedItem::new("branch", &b));
+            }
         }
         Ok(set)
     }

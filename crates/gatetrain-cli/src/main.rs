@@ -574,14 +574,17 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
     if let Some((h, n)) = &hosts {
         let text = std::fs::read_to_string(h)?;
         adm.light_while_proving = gatetrain_core::hostlock::host_flag(&text, n, "light_while_proving");
-        if let Ok(hc) = config::load(h) {
-            adm.disk_floor = true;
+        adm.disk_floor = true;
+        match config::load(h) {
+            Err(e) => adm.floor_error = Some(format!("{e}")),
+            Ok(hc) => {
             adm.needs_preflight_gb = Some(hc.needs.preflight_gb.f());
             adm.needs_chain_gb = Some(hc.needs.chain_gb.f());
             if let Some(host) = hc.hosts.iter().find(|x| x.name == *n) {
                 if let (Some(r), Ok(t)) = (gatetrain_core::runner::for_reach(&host.reach), gatetrain_core::tidy::config::build_cfg(&hc, host)) {
                     adm.close = Some(Box::new(gatetrain_core::tidy::close::OwnedEnv { host: host.clone(), runner: r, cfg: t, reference_prefixes: cfg.close_protected_container_prefixes.clone() }));
                 }
+            }
             }
         }
         if cfg.tidy_auto {

@@ -1937,13 +1937,31 @@ fn a_worktree_whose_lane_is_not_proven_on_main_is_a_live_lane() {
 }
 
 #[test]
-fn the_main_checkout_is_never_tidied() {
-    closes_with("tidy.main-checkout", |e| e.main_checkout = Some("/wt/lane1".into()), "/wt/lane1");
+fn the_main_checkout_is_never_tidied_even_when_it_is_the_batch_workdir() {
+    let mut fx = live_fx();
+    fx.cfg.close_own_workdir = true;
+    let wd = fx.repo.to_string_lossy().to_string(); // the spelling the engine recorded
+    let mut env = full_env();
+    env.present.borrow_mut().insert(("worktree".into(), wd.clone()));
+    env.wt_branch.insert(wd.clone(), OWN.into());
+    env.main_checkout = Some(wd.clone());
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "tidy.main-checkout"), "{o:?}");
+    assert!(!touched(&adm, &wd));
 }
 
 #[test]
-fn a_worktree_on_a_branch_the_batch_does_not_own_is_not_owned() {
-    closes_with("tidy.not-owned", |e| { e.wt_branch.insert("/wt/lane1".into(), "someone-elses".into()); }, "/wt/lane1");
+fn a_batch_checkout_on_a_branch_the_batch_does_not_own_is_not_owned() {
+    let mut fx = live_fx();
+    fx.cfg.close_own_workdir = true;
+    let wd = fx.repo.to_string_lossy().to_string(); // the spelling the engine recorded
+    fx.cfg.close_roots.push(wd.clone());
+    let mut env = full_env();
+    env.present.borrow_mut().insert(("worktree".into(), wd.clone()));
+    env.wt_branch.insert(wd.clone(), "someone-elses".into());
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "tidy.not-owned"), "{o:?}");
+    assert!(!touched(&adm, &wd));
 }
 
 #[test]
@@ -2173,7 +2191,7 @@ fn b3_a_path_outside_every_root_is_not_owned() {
 #[test]
 fn b4a_the_shared_chain_target_is_never_moved_only_the_runs_own_recorded_folder() {
     let mut fx = live_fx();
-    let mut env = full_env();
+    let env = full_env();
     env.present.borrow_mut().insert(("target".into(), SHARED.into()));
     let (o, adm) = run_closed(&mut fx, env);
     assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
@@ -2198,6 +2216,7 @@ fn b4b_a_line_batch_branch_is_not_derived_by_name_and_the_recorded_stack_branch_
 fn b4c_the_batch_checkout_is_left_alone_unless_own_workdir_is_set() {
     let mut fx = live_fx();
     let wd = fwd(&fx.repo);
+    fx.cfg.close_roots.push(wd.clone()); // inside a root, so only the own_workdir rule keeps it out
     let mut env = full_env();
     env.present.borrow_mut().insert(("worktree".into(), wd.clone()));
     env.wt_branch.insert(wd.clone(), OWN.into());
