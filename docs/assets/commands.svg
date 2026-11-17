@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="The gatetrain commands in five groups: read a run (ingest, report, trace, eta, next-tick, status, flaky, diagnose), guard the host (doctor, hold, running, memory, stop), plan the stack (lanes, generated, batch), keep the disk clean (check, tidy), and look at the repository (watch). One binary, one ledger file.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="The gatetrain commands in six groups: read a run, guard the host, plan the stack (lanes, generated, batch new, status, advance, hold, release, abandon), run the steps (chain), keep the disk clean, and look at the repository (watch, ledger migrate, log verify, privacy-check). One binary, one ledger file.">
   <style>
     .bg{fill:#F6F5F1}.box{fill:#FFFFFF;stroke:#1F2226}.ink{fill:#1F2226}.sub{fill:#5A5F66}.acc{fill:#2E6F69}.band{fill:#E6EFEE}.ln{stroke:#1F2226;fill:none}
     .t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.s{font:400 13px Inter,Segoe UI,Helvetica,Arial,sans-serif}.m{font:500 14px Consolas,Menlo,monospace}
@@ -30,22 +30,32 @@
     <rect class="band" x="648" y="86" width="280" height="30" rx="8"/>
     <text class="t ink" x="664" y="107">plan the stack</text>
     <text class="m ink" x="664" y="140">lanes  generated</text>
-    <text class="m ink" x="664" y="162">batch</text>
-    <text class="s sub" x="664" y="210">collisions before the train starts</text>
+    <text class="m ink" x="664" y="162">batch new  status  advance</text>
+    <text class="m ink" x="664" y="184">batch hold  release  abandon</text>
+    <text class="s sub" x="664" y="210">collisions first, then the batch</text>
   </g>
   <g>
-    <rect class="box" x="32" y="246" width="440" height="110" rx="8"/>
-    <rect class="band" x="32" y="246" width="440" height="30" rx="8"/>
-    <text class="t ink" x="48" y="267">keep the disk clean</text>
-    <text class="m ink" x="48" y="300">check  tidy  tidy --apply  tidy --auto</text>
-    <text class="s sub" x="48" y="330">a dry run first; archive tags, links unlinked first</text>
+    <rect class="box" x="32" y="246" width="280" height="110" rx="8"/>
+    <rect class="band" x="32" y="246" width="280" height="30" rx="8"/>
+    <text class="t ink" x="48" y="267">run the steps</text>
+    <text class="m ink" x="48" y="300">chain</text>
+    <text class="s sub" x="48" y="330">fast tier, every red, a stamp</text>
   </g>
   <g>
-    <rect class="box" x="488" y="246" width="440" height="110" rx="8"/>
-    <rect class="band" x="488" y="246" width="440" height="30" rx="8"/>
-    <text class="t ink" x="504" y="267">look at the repository</text>
-    <text class="m ink" x="504" y="300">watch  log verify  ledger migrate</text>
-    <text class="s sub" x="504" y="330">lanes and next assignments, read only</text>
+    <rect class="box" x="340" y="246" width="280" height="110" rx="8"/>
+    <rect class="band" x="340" y="246" width="280" height="30" rx="8"/>
+    <text class="t ink" x="356" y="267">keep the disk clean</text>
+    <text class="m ink" x="356" y="294">check  tidy</text>
+    <text class="m ink" x="356" y="314">tidy --apply  --auto</text>
+    <text class="s sub" x="356" y="338">a dry run first, archive tags</text>
+  </g>
+  <g>
+    <rect class="box" x="648" y="246" width="280" height="110" rx="8"/>
+    <rect class="band" x="648" y="246" width="280" height="30" rx="8"/>
+    <text class="t ink" x="664" y="267">the repository and ledger</text>
+    <text class="m ink" x="664" y="294">watch  privacy-check</text>
+    <text class="m ink" x="664" y="314">log verify  ledger migrate</text>
+    <text class="s sub" x="664" y="338">read only, except migrate</text>
   </g>
   <text class="s sub" x="32" y="384">Run gatetrain --help for the list, and gatetrain COMMAND --help for its options.</text>
 </svg>

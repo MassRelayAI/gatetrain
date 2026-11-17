@@ -13,10 +13,12 @@ Answers: critical path and waiting time per batch, flaky steps (L13), cost per b
 | `trace <log> \| --run ID` | Chrome Trace Event JSON on stdout; open it in ui.perfetto.dev or chrome://tracing. Overlapping steps get different `tid` lanes (greedy packing); reds `terrible`, others `good` |
 | `eta <log> [--now ISO]` | prediction for a running chain, see [tick](tick.md) |
 | `next-tick [--log] [--min 5] [--max 60]` | when to look next, see [tick](tick.md) |
+| `chain --db FILE [--run-id ID]` | at its end, `gatetrain chain` writes the run into the ledger itself: `runs`, `steps`, `step_shards` (one row per shard of a sharded step), `step_skips` (steps that never ran, with the reason) and `stamps` (the green, clean-tree stamp). The file is created or migrated forward. Run id defaults to `chain-<UTC time>-<commit>`. No hand `ingest` is needed. |
+| `ledger migrate [--db FILE]` | bring a ledger file to the version this binary writes (now 5), forward only. A v3 ledger: run this once; any `--db` write also migrates. A file newer than the binary is refused. |
 | `flaky` | steps red in one finished run and green in another on the same commit (view `flaky_steps`) |
 
 Notes: a run is `green` only when `GATES_DONE` printed and no step is red. `steps.started_at` is NULL when the log never printed
 `STEP_START` (unknown, not invented); `steps.duration_sec` holds the logged time. The `flaky_steps` view was corrected to ignore
 unfinished steps and to count green and red runs explicitly.
 
-Status: `ingest`, `report`, `trace`, `flaky` built; hand-backs and host samples are tables only. See docs/method.md and docs/lessons.md for the rules this module carries.
+Status: `ingest`, `report`, `trace`, `flaky` and the `chain --db` writer (ledger versions 4 and 5, engine-v2 slices E1 and E2) built; hand-backs and host samples are tables only. See docs/method.md and docs/lessons.md for the rules this module carries.

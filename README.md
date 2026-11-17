@@ -296,7 +296,7 @@ run on a clean tree writes `stamp-<sha>.json`. A step with `inputs` can be skipp
 
 `gatetrain chain --cache <dir>` skips a step whose inputs have not changed since it last passed. A step opts in with `inputs = ["apps/web/**", "package-lock.json"]` (git pathspecs, relative to the plan's `cwd`) and may add `cache_salt = "..."` to invalidate its entries. A step without `inputs` always runs.
 
-The key is a sha-256 over the step's command, `cwd`, salt and `git ls-files -s -- <inputs>`. A dirty or untracked input means the step runs and writes no entry (its `.full` says why). A hit prints `STEP_START`, `STEP_CACHED <step>`, `STEP_TIME <step> 0.0s`, `STEP_EXIT <step> 0` and runs nothing; `needs` treat it as green. Only a green run writes an entry. `--no-cache-for a,b` forces steps to run, and the stamp lists the cached steps in `"cached"`. The cache folder is per host and your choice; nothing is shared implicitly. A proof run must not pass `--cache` (`batch` already refuses cached steps as proof). The key is taken relative to the repository top, so a pre-check and a later run in two worktrees of one commit share an entry.
+The key is a sha-256 over the step's command, `cwd`, salt and `git ls-files -s -- <inputs>`. A dirty or untracked input means the step runs and writes no entry (its `.full` says why). A hit prints `STEP_START`, `STEP_CACHED <step>`, `STEP_TIME <step> 0.0s`, `STEP_EXIT <step> 0` and runs nothing; `needs` treat it as green. Only a green run writes an entry. `--no-cache-for a,b` forces steps to run, and the stamp lists the cached steps in `"cached"`. The cache folder is per host and your choice; nothing is shared implicitly. A proof run must not pass `--cache` (`batch` accepts a cached step in a proof only under its evidence rule, below). The key is taken relative to the repository top, so a pre-check and a later run in two worktrees of one commit share an entry.
 
 ### Diagnose groups reds by cause
 
@@ -318,15 +318,42 @@ db-gate-1: real (rc=1, 1 block(s))
 
 A run with a single red prints no `causes:` section.
 
+### Shards, the ledger and `diagnose --out`
+
+`shards = 4` (with `{shard}` and `{shards}`, 1-based; `shards = 1` is an ordinary run) splits one long step into parallel shards and reports it as one step; `shard_check` and `shard_env` complete it. `chain --db gatetrain.db [--run-id ID --mode --host]` writes the run into the ledger itself, and `diagnose` reads a red step's output from the `.full` files the log's `CHAIN_OUT` line names (or `--out DIR`). **A v3 ledger needs `gatetrain ledger migrate` once.** The details, with real output, are in [`docs/chain.md`](docs/chain.md).
+
 ### Governance rules for a batch
 
-Three rules in the batch engine keep a red from costing a whole round (design: [ADR 002](docs/design/adr-002-lane-stamp-and-cause-gated-rerun.md)). All are off until configured, so an existing config behaves as before.
+Rules in the batch engine keep a red from costing a whole round (design: [ADR 002](docs/design/adr-002-lane-stamp-and-cause-gated-rerun.md) and [engine v2](docs/design/engine-v2.md)). Each is off or neutral until configured, so an existing config behaves as before.
 
 - **Lane stamp.** `[lanes] require_stamp = true` and `stamp_dir`: stacking is refused (`stack.lane-stamp`) unless every lane tip has the `stamp-<sha>.json` that `chain` writes after a green run on a clean tree. The refusal names each lane without one.
 - **Cause-gated retry.** A red batch is retried only when its tip moved (a new commit addresses the causes), or when a person recorded the red as a `flake` or `infra` with a reason; otherwise `retry.causes-open` refuses. A blind rerun is a lottery ticket that hides the red.
 - **Full-run budget.** `[chain] max_full_runs_per_batch` caps full proofs per batch (`budget.full-runs`); absent means unlimited. A run that was stopped is not charged.
 
 The command-line verbs for the retry and the cause note are not wired yet; the rules are in the engine and tested.
+
+### Evidence, the launched pre-flight and pipelining (`gatetrain.toml`)
+
+One evidence rule decides whether a proof may accept a step result it did not run: the result must be for the same commit, carry the key
+the proof host computes, come from a stamped run of the same steps file, and from a host whose role is accepted. The log shows it as a
+keyed `STEP_CACHED`, and the engine checks it against its own stamps. A cache key must show shadow would-hits with no defect before it counts.
+
+| key | meaning |
+|---|---|
+| `[merge] allow_cached_steps` | `verified` (default) or `never`: `never` refuses every proof that holds a cached step |
+| `[proof] accept_roles` | host roles whose portable results may count on another host (default `["proof"]`) |
+| `[proof.host_roles]` | host name to role, so a result's host is judged by its role |
+| `[proof] max_age_hours` | a result older than this is refused; unset means no limit |
+| `[proof] shadow_min` | would-hits without a defect a key must show first (default 3) |
+| `[proof] host`, `host_class` | the proof host's name and class, used when evidence is selected at launch |
+| `[chain] steps_file` | the chain's steps file; its sha-256 is the digest a source stamp must equal |
+| `[evidence] stamp_dirs` | folders of `stamp-*.json` the engine reads step results from |
+| `[preflight] chain_command` | launches the pre-flight as a run under the holder on a light host (state `preflighting`); needs `stamp_dir` |
+| `[preflight] steps_file`, `stamp_dir` | the pre-flight's steps file, and where its stamp is written |
+| `[pipeline] max_ahead` | unmerged batches a new batch may be stacked on (default 1) |
+| `[pipeline] prove_ahead` | prove before the base is proven (default false) |
+
+The older `[preflight] command` and the engine's own `<sha>.stamp` still work. A light run is refused on a host whose proof lock is held. `gatetrain batch new --base <batch>` stacks a batch on another; the guard `pipeline.base-not-merged` refuses to merge it before its base is merged. Details and the deviations from the design are in [engine v2](docs/design/engine-v2.md) (section 14).
 
 ### Tests
 
@@ -349,7 +376,7 @@ Work is cut into **lanes**. A lane is one branch, one worktree, one owner and a 
 
 Finished lanes are **stacked** into a **batch**. The batch gets a cheap **pre-flight**: `gatetrain chain` runs the fast checks in parallel, reports every red at once and stops short of the slow tier when one is red. Then one **chain** (the full verification run) proves it on the builder. Only a chain that is green on exactly the tested commit **merges**.
 
-<p align="center"><img src="docs/assets/pipeline.svg" alt="Lane stamp, stack, pre-flight on a light host, proof on a proof host, merge; the next batch pre-flights while one proves (planned)" width="100%"></p>
+<p align="center"><img src="docs/assets/pipeline.svg" alt="Lane stamp, stack, pre-flight on a light host, proof on a proof host, merge; the next batch pre-flights while one proves" width="100%"></p>
 
 A cheap recurring **tick** watches every machine, chain, lane and disk. It acts only where a written rule covers it, and it reports in a few lines. Everything is a row in the **ledger**. Every failure that happened twice becomes a **lesson**: a rule plus a test that proves it.
 
@@ -586,16 +613,17 @@ Done:
 - [x] The input-keyed step cache for pre-flight (`--cache`)
 - [x] `diagnose` causes: red steps grouped by shared message
 - [x] Batch governance: lane stamp, cause-gated retry, the full-run budget (ADR 002)
+- [x] E1: `chain` feeds the ledger (`--db`, `--mode`, `--host`, `--run-id`, `CHAIN_OUT`); `diagnose --out`; ledger v4
+- [x] E2: shards (`shards`, `shard_check`, `shard_env`, `STEP_SHARD`); ledger v5
+- [x] E3 (batch side): one evidence rule, shadow before hits, the evidence file at launch
+- [x] E5: the launched pre-flight (state `preflighting`), a light run refused on a proving host, batch pipelining
 
 Next, in the order of [engine v2](docs/design/engine-v2.md) (a design; nothing below is built):
 
-- [ ] E1: `chain` feeds the ledger (`--mode`, `--host`, `--db`); `diagnose` reads the `.full` files
-- [ ] E2: shards, one slow step split across slots
-- [ ] E3: evidence, so a proof may accept a verified result it did not run (`key_cmd`, shadow mode)
-- [ ] E5: the pre-flight as a launched run, and pipelining the next batch while one proves
-- [ ] E9: multi-host: a detached holder, `reach = "wsl"`, the fast tier off the proof host
 - [ ] E6, E7, E8: `probe` (measure a disk), the sampler, `advise` (read-only advice from the ledger)
+- [ ] E9: multi-host: a detached holder, `reach = "wsl"`, the fast tier off the proof host
 - [ ] E10: `tick`, one pass that advances the batches and prints a few lines
+- [ ] T9 and the disk floor
 
 Not scheduled: `gatetrain stack` with base detection and artefact repair, `gatetrain plan` (owned files, hidden coupling, critical path), ledger views for cost per batch and an agent scorecard, cloud adapters for the `budget` and `speed` profiles.
 

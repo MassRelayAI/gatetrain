@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-label="The batch pipeline: lane stamp, stack, pre-flight on a light host, proof on a proof host, merge; the next batch pre-flights while one proves, which is planned and not built">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-label="The batch pipeline: lane stamp, stack, pre-flight on a light host, proof on a proof host, merge; the next batch pre-flights while one proves, built in engine-v2 slice E5">
   <style>
     .bg{fill:#F6F5F1}.ink{fill:#1F2226}.sub{fill:#5A5F66}.run{fill:#D9D6CE}.pre{fill:#2E6F69}.red{fill:#C2553A}.ok{fill:#2E6F69}.axis{stroke:#C9C6BE}.box{fill:#FFFFFF;stroke:#1F2226}.dash{fill:none;stroke:#5A5F66;stroke-dasharray:6 5}.arrow{stroke:#5A5F66;fill:none}.gate{stroke:#1F2226}.wh{fill:#FFFFFF}
     .t{font:600 15px Inter,Segoe UI,Helvetica,Arial,sans-serif}.s{font:400 13px Inter,Segoe UI,Helvetica,Arial,sans-serif}.m{font:400 13px ui-monospace,Consolas,Menlo,monospace}
@@ -15,13 +15,13 @@
   <rect class="box" x="838" y="86" width="90" height="44" rx="10"/><text class="t ink" x="852" y="107">merge</text><text class="s sub" x="852" y="123">same sha</text>
   <path class="arrow" d="M240 108 H262 M372 108 H394 M564 108 H586 M816 108 H838" stroke-width="2"/>
   <text class="s sub" x="32" y="214">batch N+1</text>
-  <rect class="dash" x="110" y="196" width="260" height="44" rx="10"/><text class="s sub" x="124" y="222">lane stamp, stack on N</text>
-  <rect class="dash" x="394" y="196" width="170" height="44" rx="10"/><text class="s sub" x="408" y="216">pre-flight</text><text class="s sub" x="408" y="232">while N proves</text>
-  <rect class="dash" x="586" y="196" width="230" height="44" rx="10"/><text class="s sub" x="600" y="222">proof, after N is proven</text>
+  <rect class="box" x="110" y="196" width="260" height="44" rx="10"/><text class="s ink" x="124" y="222">lane stamp, stack on N</text>
+  <rect class="box" x="394" y="196" width="170" height="44" rx="10"/><text class="s ink" x="408" y="216">pre-flight</text><text class="s ink" x="408" y="232">while N proves</text>
+  <rect class="box" x="586" y="196" width="230" height="44" rx="10"/><text class="s ink" x="600" y="222">proof, after N is proven</text>
   <path class="arrow" d="M370 218 H394 M564 218 H586" stroke-width="2"/>
   <line class="axis" x1="394" y1="150" x2="816" y2="150" stroke-width="2"/>
   <text class="s sub" x="404" y="174">overlap: the next pre-flight waits for no proof</text>
   <rect class="dash" x="32" y="274" width="896" height="64" rx="10"/>
-  <text class="t ink" x="48" y="300">Built</text><text class="s sub" x="116" y="300">lane stamp gate, chain pre-flight, step cache, cause-gated retry, full-run budget.</text>
-  <text class="t ink" x="48" y="324">Coming</text><text class="s sub" x="116" y="324">the dashed row: pipelining (engine-v2, slice E5), a batch stacked on the previous one and proved after it.</text>
+  <text class="t ink" x="48" y="300">Built</text><text class="s sub" x="116" y="300">lane stamp, chain pre-flight, step cache, cause-gated retry, budget, evidence, pipelining.</text>
+  <text class="t ink" x="48" y="324">Coming</text><text class="s sub" x="116" y="324">a proof host that runs only what the light host could not (E9), the tick (E10), the disk probe (E6 to E8).</text>
 </svg>

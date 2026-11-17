@@ -6,8 +6,7 @@ kept in its own file. A green run on a clean git tree writes a **stamp** that sa
 
 <p align="center"><img src="assets/tiers.svg" alt="The fast tier runs in parallel, a red stops the slow tier, every red is reported" width="100%"></p>
 
-It is built for the cheap run before the expensive one (the pre-flight of [the method](method.md)). A proof run (`CHAIN_MODE full`) is
-not what `chain` produces today: it always prints `CHAIN_MODE preflight` and stamps `mode: preflight`.
+It is built for the cheap run before the expensive one (the pre-flight of [the method](method.md)). The default mode is `preflight`; `--mode` can claim `lane` or `full` (not with `--only` or `--skip`).
 
 ## A minimal example
 
@@ -114,6 +113,9 @@ TOML. Unknown keys are refused (exit 2).
 | `needs` | step, optional | names of steps that must be green first. A step whose need is red or skipped is skipped. Unknown names and cycles are refused. A fast step may not need a slow one. |
 | `timeout_s` | step, optional | a positive number of seconds. On expiry the whole process tree is killed (Linux and Windows) and the step is red with exit 124; the output so far is kept. |
 | `inputs` | step, optional | git pathspecs, relative to `cwd`, that the step reads. With `--cache`, a step whose inputs are unchanged since it last passed is not run again. No `inputs`: never cached. |
+| `shards` | step, optional | 1 to 64. Run the command that many times at once and report ONE logical step. `{shard}` and `{shards}` in `run` or `argv` are replaced, **1-based** (shard 1 of N is the first). `shards = 1` is an ordinary single run. `{shard}` without `shards`, or `shards > 1` with no placeholder (unless `shard_env`), is a config error. |
+| `shard_check` | step, optional | an argv run once after every shard is green, with `GATETRAIN_SHARD_OUT` naming the shard output files (an OS path list). A non-zero exit makes the step red. Needs `shards`. |
+| `shard_env` | step, optional | `true` when the command reads `GATETRAIN_SHARD` and `GATETRAIN_SHARDS` from its environment instead of using placeholders. Needs `shards`. |
 | `cache_salt` | step, optional | a string mixed into the cache key. Change it to invalidate the step's entries (a tool version, an environment the inputs do not show). |
 
 On Windows a `run` string goes to the Windows shell, so use `argv` (for example `["sh", "-c", "..."]`) for anything with shell syntax.
@@ -126,6 +128,73 @@ On Windows a `run` string goes to the Windows shell, so use `argv` (for example 
 - `--only a,b` runs just those steps, `--skip c` leaves steps out. A name that is no step is refused. A step that needs a step outside the
   selection does not wait for it.
 
+## Shards
+
+A slow step that is one long suite can be split: `shards = 4` runs the command four times at once, each with its own `{shard}` of
+`{shards}`. The shards queue for `--par` slots, one slot each, so with `--par 4` they run side by side. The log still shows one step:
+
+```toml
+[[step]]
+name = "unit"
+tier = "slow"
+shards = 3
+argv = ["sh", "-c", "echo running shard {shard} of {shards}"]
+shard_check = ["sh", "-c", "test -n \"$GATETRAIN_SHARD_OUT\""]
+```
+
+Real output (the host name is replaced by `builder-1` and the folder by `/work/out`):
+
+```text
+$ gatetrain chain --steps shard.toml --out out --db gatetrain.db --run-id demo-2
+branch master at e27a827e0f0734c186099e6295b460a3e206b4bc on builder-1
+CHAIN_MODE preflight
+CHAIN_PARALLEL 4
+CHAIN_OUT /work/out
+STEP_START lint 2026-11-17T14:11:28.165081+00:00
+STEP_TIME lint 0.1s
+STEP_EXIT lint 0
+STEP_START unit 2026-11-17T14:11:28.218801+00:00
+STEP_SHARD unit 1/3 START 2026-11-17T14:11:28.220419+00:00
+STEP_SHARD unit 2/3 START 2026-11-17T14:11:28.220497+00:00
+STEP_SHARD unit 3/3 START 2026-11-17T14:11:28.220537+00:00
+STEP_SHARD unit 2/3 EXIT 0 0.1s
+STEP_SHARD unit 3/3 EXIT 0 0.1s
+STEP_SHARD unit 1/3 EXIT 0 0.1s
+STEP_TIME unit 0.1s
+STEP_EXIT unit 0
+RED_SUMMARY: none
+GATES_DONE
+chain: ledger gatetrain.db: run demo-2
+```
+
+(The tree was dirty in that demo, so no stamp was written; the last lines say so.) Each shard's output is `<step>.<i>of<n>.full`, the
+`shard_check`'s is `<step>.check.full`. `STEP_TIME` runs from the first shard's start to the last shard's end. The step's `STEP_EXIT` is 0
+only when every shard and the check are 0, otherwise the exit code of the lowest-numbered red shard. `RED_NOW` is printed once per
+logical step, at its first red shard. A reader that does not know `STEP_SHARD` skips the line.
+
+## The ledger and `diagnose --out`
+
+`--db FILE` writes the run into the ledger at the end: the run, its steps, shards, skips and stamp. `--run-id ID` names it (default
+`chain-<UTC time>-<commit>`), `--mode preflight|lane|full` says what the run claims to be (default `preflight`; `full` with `--only` or
+`--skip` is refused, exit 2) and `--host NAME` names the host as `hosts.toml` does (default `$GATETRAIN_HOST`, which `hold` sets, then the
+environment). The ledger file is created, or migrated forward. **A ledger made before this version (v3) needs `gatetrain ledger migrate`
+once**; the current version is 5.
+
+The log carries a `CHAIN_OUT <folder>` line, so `gatetrain diagnose run.log` reads a red step's evidence from its `.full` files (or its red
+shards' files) with no banner in the log. For a log copied to another machine, `gatetrain diagnose run.log --out <folder>` names the
+folder. Real output, a sharded step with one red shard:
+
+```text
+$ gatetrain diagnose red.log
+unit: real (rc=1, 1 block(s))
+  [real] FAIL: shard 2 of 3: expected 3 to equal 4
+    evidence: FAIL: shard 2 of 3: expected 3 to equal 4
+    remedy: a real failure until shown otherwise: read the evidence, write a failing test, fix it on the lane
+    full rerun needed: after the fix, the lane's defect comes first
+1 red steps: 1 real step(s), 0 flake or infrastructure, 0 baseline
+1 blocks: 1 real, 0 flake or infrastructure, 0 baseline
+```
+
 ## The step cache (pre-flight only)
 
 `--cache <dir>` skips a step whose inputs have not changed since it last passed.
@@ -136,7 +205,7 @@ On Windows a `run` string goes to the Windows shell, so use `argv` (for example 
 - **Only a green run writes an entry.** A red is never cached.
 - A hit prints `STEP_START`, `STEP_CACHED <step>`, `STEP_TIME <step> 0.0s`, `STEP_EXIT <step> 0`, runs nothing, and counts as green for `needs`.
 - `--no-cache-for a,b` forces those steps to run.
-- The cache folder is per host and your choice; nothing is shared implicitly. **A proof run must not pass `--cache`**: `batch` refuses cached steps as proof.
+- The cache folder is per host and your choice; nothing is shared implicitly. **A proof run must not pass `--cache`**: the batch engine accepts a cached step in a proof only under its own evidence rule (same commit, verified key, stamped source run), otherwise it refuses it.
 
 ## The stamp
 
@@ -159,7 +228,7 @@ Inside `.full` and `STEP_EXIT`, a timeout is 124 and a step that could not be st
 ## Options
 
 `gatetrain chain --help` is the source of truth: `--steps` and `--out` (required), `--par`, `--keep-going`, `--only`, `--skip`, `--cache`,
-`--no-cache-for`.
+`--no-cache-for`, `--mode`, `--host`, `--db`, `--run-id`.
 
 ## Read the result
 
@@ -169,6 +238,5 @@ gatetrain diagnose run.log                                    # causes, then eve
 gatetrain ingest run.log --db gatetrain.db                    # into the ledger
 ```
 
-`diagnose` reads a step's output only between a `=== <step>` banner and the next marker in the log. A `chain` log carries no banner, because
-the output is in the `.full` files, so a red from `chain` reaches the classifier without evidence lines. Feeding the `.full` files to
-`diagnose` is planned (engine-v2, slice E1).
+`diagnose` reads a step's output between a `=== <step>` banner and the next marker, and, for a `chain` log, from the `.full` files named by
+`CHAIN_OUT` (or `--out`). See above.

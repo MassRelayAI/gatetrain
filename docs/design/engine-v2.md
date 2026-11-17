@@ -1,6 +1,6 @@
 # Engine v2: one structured run, measured hardware, less waiting
 
-Design, 2026-11-17. Status: proposed, nothing here is built. Base: `main` at `88bf73b`. It extends
+Design, 2026-11-17. Status: partly built. On `main` at `22b71d2`: slices E1, E2, E3 (batch side) and E5, plus the earlier D, C and G (section 14 marks each). The rest is proposed. Base: `main` at `88bf73b`. It extends
 [`engine-and-governance.md`](engine-and-governance.md) (the state machine and the floor rules stay as written there) and changes nothing
 in [`adr-001-decision-log.md`](adr-001-decision-log.md).
 
@@ -111,13 +111,14 @@ All are optional keys of `[[step]]` unless noted. `Step` denies unknown fields (
 | `cache_salt` | string | part of the key (branch `feat/chain-cache`) | C |
 | `key_cmd` | argv | its stdout is hashed into the key: tool versions, an image id, anything outside git the step depends on | E3 |
 | `portable` | bool, default false | the author states the step does not depend on the host beyond its class (section 7.2). Only a portable step's result may be evidence on another host. | E9 |
-| `shards` | integer 1 to 64 | run the command N times at once with `{shard}` and `{shards}` replaced; one logical step (section 6) | E2 |
-| `shard_check` | argv | runs after all shards are green, with `GATETRAIN_SHARD_OUT` naming the shard output files; non-zero makes the step red. For a check that every shard ran something. | E2 |
+| `shards` | integer 1 to 64 | run the command N times at once with `{shard}` and `{shards}` replaced (1-based: shard 1 of N is the first); one logical step (section 6). `shards = 1` is an ordinary single run (the placeholders read 1 and 1). **Built.** | E2 |
+| `shard_check` | argv | runs after all shards are green, with `GATETRAIN_SHARD_OUT` naming the shard output files (an OS path list); non-zero makes the step red. Its output is `<step>.check.full`. For a check that every shard ran something. **Built.** | E2 |
+| `shard_env` | bool, default false | the command reads `GATETRAIN_SHARD` and `GATETRAIN_SHARDS` itself, so it needs no `{shard}` placeholder. **Built.** | E2 |
 | `excl` | list of strings | steps that share a string never run at once (a fixed port, a container name) | E12 |
 | `slots` | integer, default 1 | how many of the `--par` slots the step takes (a step that uses many cores); clamped to `--par` | E12 |
 | top-level `step_tmp` | bool, default false | each step (and each shard) gets its own empty folder `<out>/tmp/<step>[.<i>]`, exported as `GATETRAIN_STEP_TMP`, `TMPDIR`, `TMP` and `TEMP` | E0 |
 
-Rules: `{shard}` in a step without `shards` is a config error; `shards > 1` without `{shard}` in `run` or `argv` is a config error
+Built (E2): each shard writes `<step>.<i>of<n>.full`; shards queue for `--par` slots, one slot each; `STEP_SHARD` lines carry each shard's start and exit; the step's exit code is 0 only when every shard and the `shard_check` are 0, else that of the lowest-numbered red shard. Rules: `{shard}` in a step without `shards` is a config error; `shards > 1` without `{shard}` in `run` or `argv` is a config error
 unless `shard_env = true` says the command reads `GATETRAIN_SHARD` and `GATETRAIN_SHARDS`. `step_tmp` is the fix for two checks racing
 on one scratch folder.
 
@@ -125,14 +126,17 @@ on one scratch folder.
 
 | flag | meaning | slice |
 |---|---|---|
-| `--mode preflight\|lane\|full` | what the run claims to be; default `preflight` (today's fixed value, F1). `full` with `--only` or `--skip` is refused, exit 2. | E1 |
-| `--host NAME` | the name in `hosts.toml`; replaces the environment guess (F3). Under `hold` it comes from `GATETRAIN_HOST`. | E1 |
-| `--db FILE` | at the end, write the run, its steps, shards, skips and stamp into the ledger; without it nothing changes | E1 |
+| `--mode preflight\|lane\|full` | what the run claims to be; default `preflight` (today's fixed value, F1). `full` with `--only` or `--skip` is refused, exit 2. **Built.** | E1 |
+| `--host NAME` | the name in `hosts.toml`; replaces the environment guess (F3). Under `hold` it comes from `GATETRAIN_HOST`. **Built.** | E1 |
+| `--db FILE` | at the end, write the run, its steps, shards, skips and stamp into the ledger; without it nothing changes. The file is created or migrated forward. **Built.** | E1 |
+| `--run-id ID` | the run's id in the ledger; default `chain-<UTC time>-<commit>`. **Built.** | E1 |
 | `--cache DIR`, `--no-cache-for a,b` | the step cache (branch `feat/chain-cache`) | C |
 | `--cache-shadow` | compute keys, store green results, run every step anyway, print `STEP_CACHE_SHADOW` (section 6) | E3 |
 | `--evidence FILE` | a list of step results the engine is willing to accept for this sha (section 7.3) | E3 |
 | `--embedded` | print only step lines: no header, no `RED_SUMMARY`, no `GATES_DONE`. For use as one phase inside an adopter's own chain script. | E3 |
 | `--samples N` | sample the host every N seconds into `<out>/samples.jsonl` (default 10; 0 = off; off when a holder already samples) | E7 |
+
+Also built in E1: the log gains one `CHAIN_OUT <folder>` line (the absolute `--out` folder) after `CHAIN_PARALLEL`, and `diagnose --out DIR` reads a red step's output from its `.full` files (or its red shards' files), by default from the folder `CHAIN_OUT` names. That closes F2.
 
 `--embedded` exists because a nested full run would otherwise print `GATES_DONE` before the outer chain ends, and the parser takes the
 first `GATES_DONE` it sees as the end of the run (`logfmt.rs:394-395`).
@@ -220,7 +224,7 @@ with the one existing code and a `why`:
 |---|---|---|
 | 1 | the result's sha is S | `evidence-sha` |
 | 2 | the result's key equals the key the proof host computed for the step on S | `evidence-key` |
-| 3 | the result's host is H, or the step is `portable` and the result's host class equals H's class and policy lists that host's role in `proof.accept_roles` (`engine-and-governance.md:326`) | `evidence-class` |
+| 3 | the result's host is H, or the step is `portable` and the result's host class equals H's class and policy lists that host's role in `proof.accept_roles` (`engine-and-governance.md:326`); the source host's role is read from `[proof.host_roles]` (host name to role), built in E3 | `evidence-class` |
 | 4 | the source run has a stamp (green, tree clean before and after) and its steps-file digest equals the proof's | `evidence-stamp` |
 | 5 | in the source run every step the result's step `needs` was green or itself accepted (F14: `--only` can skip a need) | `evidence-partial` |
 | 6 | the result is no older than `proof.max_age_hours` (`engine-and-governance.md:327`) | `evidence-stale` |
@@ -291,7 +295,7 @@ the new tip (a new sha), and its pre-flight reuses, by key, every step whose inp
 
 - N+1 may not start **proving** before N is `proven`, unless policy says `[pipeline] prove_ahead = true` (a proof on an unproven base
   may be wasted; that is a budget decision).
-- N+1 may not **merge** before its base is on the protected branch; the fast-forward check already refuses it (`batch.rs:883`).
+- N+1 may not **merge** before its base is on the protected branch. **Correction (built in E5):** the fast-forward check does not refuse this. N+1 descends from N's tip, so a fast-forward to N+1's tip would carry N's commits unproven. The refusal is a new guard at T7, `pipeline.base-not-merged`: the base batch's tip must already be an ancestor of the protected branch. (The earlier text cited `batch.rs:883`; that line is the pre-flight stamp check and has no bearing on this.)
 - Depth is limited: `[pipeline] max_ahead = 1` by default.
 
 **Estimate of what it saves.** One pre-flight wall time per batch in elapsed time (56m38s today, less after slice E0), because it
@@ -464,7 +468,7 @@ For chain B today `advise` could not choose between `advise.plan-shape` (the hos
 
 ## 11. Data model
 
-The ledger is at version 3 (`ledger.rs:103`): the base schema, run snapshots and decisions, step memory, batch events
+The ledger was at version 3 when this was written (`ledger.rs:103`); E1 and E2 have since raised it to 5, and a v3 file is brought forward by `gatetrain ledger migrate` (or by any `--db` write): the base schema, run snapshots and decisions, step memory, batch events
 (`ledger.rs:13-100`). Migration is one transaction of `if from < N` blocks and refuses a file newer than the binary
 (`ledger.rs:121-128`, `ledger.rs:139-161`). That stays. Every new table is insert-only with the two triggers the existing ones carry
 (`ledger.rs:29-32`). Columns are only ever added. NULL means unknown.
@@ -474,8 +478,8 @@ One version per slice, so each slice ships alone. **The numbers are assigned her
 
 | version | slice | adds |
 |---|---|---|
-| 4 | E1 | columns on `runs`: `mode`, `par`, `plan_digest`, `log_sha256`, `config_hash`, `host_class`, `gatetrain_version`. Columns on `steps`: `tier`, `input_key`, `cached_from`, `shards`. Tables `step_skips`, `stamps`, `stamp_links`. |
-| 5 | E2 | table `step_shards` |
+| 4 | E1 (built) | columns on `runs`: `mode`, `par`, `plan_digest`, `log_sha256`, `config_hash`, `host_class`, `gatetrain_version`. Columns on `steps`: `tier`, `input_key`, `cached_from`, `shards`. Tables `step_skips`, `stamps`, `stamp_links`. |
+| 5 | E2 (built) | table `step_shards` |
 | 6 | E4 | tables `findings`, `causes` |
 | 7 | E3 | tables `step_results`, `proof_evidence`, `cache_shadow` |
 | 8 | E6 | tables `host_probes`, `disk_probes` |
@@ -579,13 +583,13 @@ D, C and G.
 |---|---|---|---|---|---|---|
 | E0 | T | **the pre-check as a steps file** (adopter config) plus `step_tmp` | the adopter's 27 checks as `[[step]]` rows, compound checks split; `step_tmp` in `chain` | two steps writing one file name under `TMPDIR` collide without `step_tmp` and not with it; a compound fixture hides a red, the split one shows both | wall from 3398 s towards max(longest check, 3398 / par): 425 s at par 8 if no check is longer (**estimate**; per-check times in this setting are unmeasured). A red is printed when it happens instead of up to 31 minutes later. Removes the hidden-red and scratch-race rounds of batch A. | wall and busy of 3 pre-checks; seconds from a red's end to its `RED_NOW`; rounds per batch |
 | D | T | **`feat/diagnose-causes`** | reds grouped by cause, better evidence | on the branch (5 tests) | 440 reds read as 1 cause | causes per red run; share of reds explained by the top cause |
-| E1 | T | **`chain` feeds the ledger**; `--mode`, `--host`, `--db`; ledger 4; `diagnose --out DIR` reads `.full` files | F1, F2, F3, F9 closed | a green and a red `chain --db` run leave runs, steps, skips and a stamp row; `--mode full --only x` exits 2; a red `chain` step is classified from its `.full` by a fixture rule; migration 3 to 4 from each older version | nothing by itself: it makes every later number come from the tool | runs in the ledger per day, with zero hand ingests |
+| E1 (built) | T | **`chain` feeds the ledger**; `--mode`, `--host`, `--db`; ledger 4; `diagnose --out DIR` reads `.full` files | F1, F2, F3, F9 closed | a green and a red `chain --db` run leave runs, steps, skips and a stamp row; `--mode full --only x` exits 2; a red `chain` step is classified from its `.full` by a fixture rule; migration 3 to 4 from each older version | nothing by itself: it makes every later number come from the tool | runs in the ledger per day, with zero hand ingests |
 | C | T | **`feat/chain-cache`** | `inputs`, the key, `--cache`, `STEP_CACHED` | on the branch (10 tests) | repeat pre-checks and lane runs skip unchanged steps | hits and misses per run; minutes not run |
-| E2 | T | **shards**; ledger 5 | `shards`, `{shard}`, `STEP_SHARD` lines, `step_shards`, `shard_check` | a 4-shard fixture prints one `STEP_EXIT`; one red shard gives one `RED_NOW` and a red step; old fixtures parse to the same JSON; a missing shard exit is exit 125; `{shard}` without `shards` is a config error | test-api 2484 s towards 621 s at 4 shards (**estimate**: even split, no added contention). The chain's longest step becomes cargo-test, 1845 s. | the step's wall and its summed shard time; the run's wall; average parallelism from `step_shards` |
+| E2 (built) | T | **shards**; ledger 5 | `shards`, `{shard}`, `STEP_SHARD` lines, `step_shards`, `shard_check` | a 4-shard fixture prints one `STEP_EXIT`; one red shard gives one `RED_NOW` and a red step; old fixtures parse to the same JSON; a missing shard exit is exit 125; `{shard}` without `shards` is a config error | test-api 2484 s towards 621 s at 4 shards (**estimate**: even split, no added contention). The chain's longest step becomes cargo-test, 1845 s. | the step's wall and its summed shard time; the run's wall; average parallelism from `step_shards` |
 | E4 | T | **findings and causes in the ledger**; ledger 6 | T5r runs `diagnose` over the log and the `.full` files and stores findings and causes; `batch status` prints the causes | a red fixture run leaves one cause row for three steps with one message; a rerun of the fold gives the same fingerprints; an unmatched red is stored as `real` | the read of a red run: 1 line per cause instead of 1 per step | causes per red run in the ledger, with zero hand reads of a log |
 | G | T | **`feat/batch-governance`** | `lane.stamp`, `retry.cause-unchanged`, `budget.full-chains` | per rule: a violating fixture refused with its code | a red lane no longer costs a batch round; a blind rerun (a full chain, 2h29m) is refused | refusals per code; full chains per merged batch |
-| E3 | T | **evidence**: `key_cmd`, `--cache-shadow`, `--evidence`, `--embedded`, repository-relative working directory in the key; engine verification; ledger 7 | section 7 | one test per row of 7.2, each refused with `proof.cached-unverified` and its `why`; the shadow defect fixture; an embedded run prints no `GATES_DONE`; a hit not in the ledger is refused | at least 3997 s of busy time per chain; packing bound 4657 s (**estimate**) | busy time of a proof; hits accepted and refused by `why`; shadow defects (must be 0) |
-| E5 | T | **the pre-flight as a launched run; pipelining** | state `preflighting`, light admission, `--base <batch>`, one stamp format | a crash after launch resumes by adopting the run; a pre-flight on a proving host is refused; batch N+1 on N's tip proves at once after N's fast-forward; N+1 is restacked when N's tip moves; N+1 does not prove before N is proven | one pre-flight wall per batch in elapsed time; the gap between a merge and the next proof goes to one tick | minutes from "N merged" to "N+1 proving"; merged batches per day |
+| E3 (built, batch side) | T | **evidence**: `key_cmd`, `--cache-shadow`, `--evidence`, `--embedded`, repository-relative working directory in the key; engine verification; ledger 7 | section 7 | one test per row of 7.2, each refused with `proof.cached-unverified` and its `why`; the shadow defect fixture; an embedded run prints no `GATES_DONE`; a hit not in the ledger is refused | at least 3997 s of busy time per chain; packing bound 4657 s (**estimate**) | busy time of a proof; hits accepted and refused by `why`; shadow defects (must be 0) |
+| E5 (built) | T | **the pre-flight as a launched run; pipelining** | state `preflighting`, light admission, `--base <batch>`, one stamp format | a crash after launch resumes by adopting the run; a pre-flight on a proving host is refused; batch N+1 on N's tip proves at once after N's fast-forward; N+1 is restacked when N's tip moves; N+1 does not prove before N is proven | one pre-flight wall per batch in elapsed time; the gap between a merge and the next proof goes to one tick | minutes from "N merged" to "N+1 proving"; merged batches per day |
 | E6 | H | **`probe`**; ledger 8; `doctor` compares | section 10.1 | refused while a lock is held; stops at its budget and reports `unknown: budget`; leaves no file; a link path is refused; a fake `/sys` tree gives rotational 1, 0 and unknown; a flag that contradicts a probe is a WARN | nothing by itself; it replaces a typed flag by a figure | probe rows per host; the latency ratio between the proof host's disks |
 | E7 | H | **the sampler**; ledger 9 | section 10.2 | fixture `/proc` files give the expected figures; a platform without a source writes null and the reason; the file is ingested with its log; no process is left after the run | nothing by itself; it answers whether the proof host is full at 6.7 or the plan is serial | per run: CPU busy p50, I/O stall, the busiest disk, free memory p05 |
 | E8 | H | **`advise`**; ledger 10 | section 10.3 | per rule: a ledger fixture that fires it and one that does not; an unknown input gives `minutes: unknown`; config hashes and batch events are equal before and after | per advice, as printed. For B, `plan-shape` bounds the gain at 3950 s if the host has room | each advice's predicted range against the measured change after the move |
@@ -596,6 +600,14 @@ D, C and G.
 
 Order within T: E0, then D, E1, C in any order, then E2, E4, G, E3, E5, E9, E10, E12, E11. Track H: E6, E7, E8, at any time after E1
 (they need the ledger version order of section 11).
+
+### Deviations from this design, as built (2026-11-17, `main` at `22b71d2`)
+
+- **The old pre-flight keys and file stay for now.** E5 adds `[preflight] chain_command`, `steps_file` and `stamp_dir` (a launched pre-flight in state `preflighting`), but the earlier `[preflight] command` and the engine's own `<sha>.stamp` are not retired yet; section 5.4 said slice E5 would retire the stamp file. Both forms work: a chain stamp for the tip with the steps file's digest, or the old stamp.
+- **Condition 3 of section 7.2** reads the source host's role from `[proof.host_roles]` (host name to role), not from the host list.
+- **The guard `pipeline.base-not-merged`** is at T7 (section 8, correction).
+- **`--run-id`** is a flag of `chain` with a default, `chain-<UTC time>-<commit>`; section 5.3 had not listed it.
+- **E3 is built on the batch side only.** The new keys are `[merge] allow_cached_steps` (`verified` or `never`), `[proof] accept_roles`, `host_roles`, `max_age_hours`, `shadow_min`, `host`, `host_class`, `[chain] steps_file` and `[evidence] stamp_dirs`. The `chain` flags `--cache-shadow`, `--evidence` and `--embedded`, and the step key `key_cmd` of section 5, are not built.
 
 ### Conflicts with the branches in progress
 
