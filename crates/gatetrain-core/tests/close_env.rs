@@ -313,3 +313,22 @@ fn ma7_a_prefix_root_owns_only_the_entries_of_its_folder_not_what_is_below_them(
     let rep = run_close(&prefix_set(&[("target", "/repo/main-wt-x/out")], "prefix:/repo/main-wt-"), &env_for(&ops, &t));
     assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned"), "{rep:?}");
 }
+
+#[test]
+fn minor5_a_worktree_registered_under_a_linked_spelling_is_seen_inside_its_folder() {
+    // git on some hosts records the spelling it was given: /build/lnkwts/holder/wt1, where /build/lnkwts leads to /build/wts
+    let (sim, h, t) = setup(json!({}));
+    {
+        let mut s = sim.s();
+        s.dir("/build/wts", 10 * 86400);
+        s.dir("/build/wts/holder", 10 * 86400);
+        s.dir("/build/wts/holder/wt1", 10 * 86400);
+        s.file("/build/wts/holder/wt1/src.rs", 5, 10 * 86400);
+        s.link("/build/lnkwts", "/build/wts");
+        s.worktrees.push(("/build/lnkwts/holder/wt1".into(), "line/y".into()));
+    }
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("target", "/build/wts/holder")], &[]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned" && r.why.contains("worktree")), "{rep:?}");
+    assert!(sim.s().has("/build/wts/holder/wt1/src.rs"));
+}

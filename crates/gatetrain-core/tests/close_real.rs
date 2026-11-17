@@ -256,7 +256,8 @@ fn bl3_an_ignored_build_folder_inside_a_worktree_is_still_moved() {
 
 #[test]
 fn minor5_a_worktree_registered_through_a_link_is_seen_inside_the_folder_that_holds_it() {
-    // git records the worktree by the linked spelling; the recorded folder is the real one
+    // added through a link; git (2.4x on Windows) records it resolved, so this guards the item side. The worktree side, a worktree
+    // registered under a linked spelling, is the Sim test `minor5_a_worktree_registered_under_a_linked_spelling_is_seen_inside_its_folder`
     let f = fx();
     let wts = f.build.join("wts");
     std::fs::create_dir_all(wts.join("holder")).unwrap();
