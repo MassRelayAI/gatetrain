@@ -243,7 +243,10 @@ impl BatchConfig {
             if c.close_tidy && c.close_roots.is_empty() {
                 return Err(Error::Batch("gatetrain.toml: [close] tidy = true needs [close] roots (the folders a batch may tidy inside); without them nothing is owned".into()));
             }
-            if let Some(r) = c.close_roots.iter().find(|r| crate::tidy::close::is_fs_root(r)) {
+            for r in &c.close_roots {
+                crate::tidy::close::parse_root(r).map_err(|why| Error::Batch(format!("gatetrain.toml: [close] roots: {why}")))?;
+            }
+            if let Some(r) = c.close_roots.iter().find(|r| !r.starts_with("prefix:") && crate::tidy::close::is_fs_root(r)) {
                 return Err(Error::Batch(format!("gatetrain.toml: [close] roots names the file-system root {r:?}; a root owns every path below it, so it must be a folder of its own")));
             }
         }

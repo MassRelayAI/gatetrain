@@ -92,9 +92,10 @@ pub trait CloseEnv {
     }
     /// The path sits strictly below one of `roots`, by every spelling this environment can see (as written, and where it leads).
     fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
-        Ok(roots.iter().any(|r| inside(path, r)))
+        Ok(roots.iter().any(|r| spec_owns(path, r)))
     }
-    /// The main checkout (or the root checkout) is `path` or sits below it: such a folder can never be a `[close]` root.
+    /// The main checkout (or the root checkout) is `path` or sits below it (for a prefix root: the root would own it): such a root can
+    /// never own anything.
     fn holds_main_checkout(&self, _path: &str) -> Result<bool> {
         Ok(false)
     }
@@ -176,6 +177,43 @@ pub fn is_fs_root(p: &str) -> bool {
     n.is_empty() || (b.len() == 2 && b[1] == b':') || (n.starts_with("//") && n[2..].split('/').filter(|x| !x.is_empty()).count() <= 2)
 }
 
+/// A `[close] roots` entry: a folder owns what sits strictly below it; `prefix:<dir>/<name>` owns the entries of `<dir>` whose name
+/// starts with `<name>` (the lane worktrees beside a main checkout, `<repos>/main-wt-<lane>`, without owning `<repos>`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RootSpec {
+    Dir(String),
+    Prefix { dir: String, name: String },
+}
+
+/// Read one `[close] roots` entry; a prefix root needs a folder that is not a file-system root and a non-empty name prefix.
+pub fn parse_root(r: &str) -> std::result::Result<RootSpec, String> {
+    let Some(rest) = r.strip_prefix("prefix:") else { return Ok(RootSpec::Dir(r.to_string())) };
+    let rest = rest.replace('\\', "/");
+    let Some((dir, name)) = rest.rsplit_once('/') else { return Err(format!("{r}: a prefix root is prefix:<folder>/<name prefix>")) };
+    if name.is_empty() {
+        return Err(format!("{r}: the name prefix is empty, which would own every entry of {dir}"));
+    }
+    if is_fs_root(dir) {
+        return Err(format!("{r}: the folder of a prefix root may not be a file-system root"));
+    }
+    Ok(RootSpec::Prefix { dir: dir.to_string(), name: name.to_string() })
+}
+
+/// The root owns `path` (normalised spellings, nothing resolved).
+fn root_owns(path: &str, root: &RootSpec) -> bool {
+    match root {
+        RootSpec::Dir(d) => inside(path, d),
+        RootSpec::Prefix { dir, name } => {
+            let p = norm(path);
+            p.rsplit_once('/').is_some_and(|(parent, _)| parent == norm(dir)) && p.starts_with(&norm(&format!("{dir}/{name}")))
+        }
+    }
+}
+
+fn spec_owns(path: &str, root: &str) -> bool {
+    parse_root(root).is_ok_and(|s| root_owns(path, &s))
+}
+
 fn row(code: &str, key: &str, why: impl Into<String>) -> Row {
     Row { code: code.into(), key: key.into(), why: why.into() }
 }
@@ -204,16 +242,16 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
         if set.roots.is_empty() {
             return refuse("tidy.not-owned", format!("{key}: no [close] roots are configured, so no path is owned"));
         }
-        let owning: Vec<&String> = set.roots.iter().filter(|r| inside(key, r)).collect();
+        let owning: Vec<&String> = set.roots.iter().filter(|r| spec_owns(key, r)).collect();
         if owning.is_empty() {
-            return refuse("tidy.not-owned", format!("{key} is not strictly below any [close] root"));
+            return refuse("tidy.not-owned", format!("{key} is not strictly below any [close] root (nor an entry of a prefix root)"));
         }
         let (mut good, mut bad) = (vec![], vec![]);
         for r in owning {
-            if is_fs_root(r) {
+            if matches!(parse_root(r), Ok(RootSpec::Dir(_))) && is_fs_root(r) {
                 bad.push(format!("{r} is a file-system root"));
             } else if env.holds_main_checkout(r)? {
-                bad.push(format!("{r} holds the main checkout"));
+                bad.push(format!("{r} holds the main checkout (or would own it)"));
             } else {
                 good.push(r.clone());
             }
@@ -421,6 +459,14 @@ impl OpsEnv<'_> {
         Ok(v)
     }
 
+    /// The root with its folder resolved.
+    fn resolve_root(&self, spec: &RootSpec) -> Result<RootSpec> {
+        Ok(match spec {
+            RootSpec::Dir(d) => RootSpec::Dir(self.resolved(d, true)?),
+            RootSpec::Prefix { dir, name } => RootSpec::Prefix { dir: self.resolved(dir, true)?, name: name.clone() },
+        })
+    }
+
     /// Every spelling of the main checkout and of the root checkout.
     fn mains(&self) -> Result<Vec<String>> {
         let mut v = vec![];
@@ -507,7 +553,8 @@ impl CloseEnv for OpsEnv<'_> {
         // below a root as written, and where it sits below where that root leads
         let at = self.resolved(path, false)?;
         for r in roots {
-            if inside(path, r) && inside(&at, &self.resolved(r, true)?) {
+            let Ok(spec) = parse_root(r) else { continue };
+            if root_owns(path, &spec) && root_owns(&at, &self.resolve_root(&spec)?) {
                 return Ok(true);
             }
         }
@@ -518,8 +565,19 @@ impl CloseEnv for OpsEnv<'_> {
         Ok(fa.iter().any(|x| fb.iter().any(|y| at_or_under(x, y) || at_or_under(y, x))))
     }
     fn holds_main_checkout(&self, path: &str) -> Result<bool> {
-        let (forms, mains) = (self.place_forms(path)?, self.mains()?);
-        Ok(mains.iter().any(|m| forms.iter().any(|f| at_or_under(m, f))))
+        let mains = self.mains()?;
+        match parse_root(path) {
+            Err(_) => Ok(true),
+            Ok(RootSpec::Dir(_)) => {
+                let forms = self.place_forms(path)?;
+                Ok(mains.iter().any(|m| forms.iter().any(|f| at_or_under(m, f))))
+            }
+            Ok(spec) => {
+                // a prefix root never holds main as a folder would; it may not own main's own name, as written or resolved
+                let resolved = self.resolve_root(&spec)?;
+                Ok(mains.iter().any(|m| root_owns(m, &spec) || root_owns(m, &resolved)))
+            }
+        }
     }
     fn kept(&self, path: Option<&str>, branch: Option<&str>) -> Option<String> {
         let lane_kept = |lane: &str| self.cfg.keep_lanes.iter().any(|k| k.to_lowercase() == lane.to_lowercase());
@@ -704,7 +762,11 @@ impl CloseEnv for FakeCloseEnv {
         Ok(self.wt_branch.keys().any(|w| self.registered(w) && norm(w) != norm(path) && at_or_under(w, path)))
     }
     fn holds_main_checkout(&self, path: &str) -> Result<bool> {
-        Ok(self.main_checkout.as_deref().is_some_and(|m| at_or_under(m, path)))
+        Ok(self.main_checkout.as_deref().is_some_and(|m| match parse_root(path) {
+            Ok(RootSpec::Dir(_)) => at_or_under(m, path),
+            Ok(spec) => root_owns(m, &spec),
+            Err(_) => true,
+        }))
     }
     fn worktree_branch(&self, path: &str) -> Result<Option<String>> {
         Ok(self.wt_branch.get(path).cloned())

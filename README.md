@@ -355,6 +355,31 @@ keyed `STEP_CACHED`, and the engine checks it against its own stamps. A cache ke
 
 The older `[preflight] command` and the engine's own `<sha>.stamp` still work. A light run is refused on a host whose proof lock is held. `gatetrain batch new --base <batch>` stacks a batch on another; the guard `pipeline.base-not-merged` refuses to merge it before its base is merged. Details and the deviations from the design are in [engine v2](docs/design/engine-v2.md) (section 14).
 
+### Close (`gatetrain.toml [close]`)
+
+With `[close] tidy = true` the T9 step tidies only what the batch itself recorded, and only below `[close] roots`. A refusal is a decision
+row and the batch stays `live`; `gatetrain batch close --with-residue` closes it by hand and writes the same rows (with `tidy = false`
+it tidies nothing at all).
+
+| key | meaning |
+|---|---|
+| `[close] tidy` | tidy the owned set at close (default false) |
+| `[close] roots` | required with `tidy = true`. A folder owns what sits strictly below it (never itself, never a file-system root, never a folder that holds the main checkout). `prefix:<folder>/<name>` owns the entries of `<folder>` whose name starts with `<name>`: lane worktrees beside the main checkout, without owning the folder that holds it. The name prefix may not be empty and may not match the main checkout's own name |
+| `[close] own_workdir` | the batch's chain checkout is part of the owned set (default false) |
+| `[close] protected_container_prefixes` | container names never removed, besides the built-in `mr-ref-` |
+
+A recorded target or temp folder is never a registered worktree, never inside the main checkout, never one of `[chain] target_dirs`
+(nor holds or sits inside one), and inside a lane worktree only when it holds no tracked or uncommitted file (an ignored `target/`).
+The tidy config's `keep_paths`, `keep_lanes` and `keep_branches` are honoured for every item.
+
+```toml
+# main checkout /srv/repos/main, lane worktrees /srv/repos/main-wt-<lane>, build output /srv/build
+[close]
+tidy = true
+roots = ["prefix:/srv/repos/main-wt-", "/srv/build"]
+own_workdir = false
+```
+
 ### Tests
 
 ```bash
