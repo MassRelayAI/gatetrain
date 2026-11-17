@@ -102,8 +102,9 @@ pub trait CloseEnv {
     fn overlaps(&self, a: &str, b: &str) -> Result<bool> {
         Ok(at_or_under(a, b) || at_or_under(b, a))
     }
-    /// Why the tidy config keeps it: the worktree's lane is in `keep_lanes` (any case) or the branch is in `keep_branches`.
-    fn kept(&self, _worktree: Option<&str>, _branch: Option<&str>) -> Option<String> {
+    /// Why the tidy config keeps it: the lane of the path (a worktree, target or temp folder) or of a `line/<lane>` branch is in
+    /// `keep_lanes` (any case), or the branch is in `keep_branches`.
+    fn kept(&self, _path: Option<&str>, _branch: Option<&str>) -> Option<String> {
         None
     }
     fn worktree_branch(&self, path: &str) -> Result<Option<String>>;
@@ -227,6 +228,9 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
             return refuse("tidy.not-owned", format!("{key} contains a registered worktree; it is not moved with its contents"));
         }
         if matches!(kind, "target" | "tmp") {
+            if let Some(why) = env.kept(Some(key), None) {
+                return refuse("tidy.protected", why);
+            }
             // a worktree goes only as a worktree (dirty, locked, live-lane and keep checks); a folder inside one only when it holds no work
             match env.worktree_overlap(key)? {
                 WtOverlap::Is(w) => return refuse("tidy.not-owned", format!("{key} is the registered worktree {w}; a worktree is closed only as a worktree, with its checks")),
@@ -517,12 +521,19 @@ impl CloseEnv for OpsEnv<'_> {
         let (forms, mains) = (self.place_forms(path)?, self.mains()?);
         Ok(mains.iter().any(|m| forms.iter().any(|f| at_or_under(m, f))))
     }
-    fn kept(&self, worktree: Option<&str>, branch: Option<&str>) -> Option<String> {
-        if let Some(b) = branch.filter(|b| self.cfg.keep_branches.iter().any(|k| k == b)) {
-            return Some(format!("branch {b} is on the tidy config's keep_branches"));
+    fn kept(&self, path: Option<&str>, branch: Option<&str>) -> Option<String> {
+        let lane_kept = |lane: &str| self.cfg.keep_lanes.iter().any(|k| k.to_lowercase() == lane.to_lowercase());
+        if let Some(b) = branch {
+            if self.cfg.keep_branches.iter().any(|k| k == b) {
+                return Some(format!("branch {b} is on the tidy config's keep_branches"));
+            }
+            // a lane's branch is `line/<lane>`: a kept lane keeps it, with or without a worktree on it
+            if let Some(l) = b.strip_prefix("line/").filter(|l| lane_kept(l)) {
+                return Some(format!("branch {b} is the branch of lane {l}, which is on the tidy config's keep_lanes"));
+            }
         }
-        let lane = lane_of(worktree?, self.cfg);
-        self.cfg.keep_lanes.iter().any(|k| k.to_lowercase() == lane.to_lowercase()).then(|| format!("lane {lane} is on the tidy config's keep_lanes"))
+        let lane = lane_of(path?, self.cfg);
+        lane_kept(&lane).then(|| format!("lane {lane} is on the tidy config's keep_lanes"))
     }
     fn worktree_branch(&self, path: &str) -> Result<Option<String>> {
         Ok(self.ops.worktrees().map_err(e)?.into_iter().find(|w| norm(&w.path) == norm(path)).and_then(|w| w.branch))
@@ -823,8 +834,8 @@ impl CloseEnv for OwnedEnv {
     fn overlaps(&self, a: &str, b: &str) -> Result<bool> {
         self.with(|e| e.overlaps(a, b))
     }
-    fn kept(&self, worktree: Option<&str>, branch: Option<&str>) -> Option<String> {
-        self.with(|e| e.kept(worktree, branch))
+    fn kept(&self, path: Option<&str>, branch: Option<&str>) -> Option<String> {
+        self.with(|e| e.kept(path, branch))
     }
     fn worktree_branch(&self, path: &str) -> Result<Option<String>> {
         self.with(|e| e.worktree_branch(path))
