@@ -94,7 +94,9 @@ impl Fx {
             let c = self.root.join("canary");
             std::fs::create_dir_all(self.root.join("ctarget")).unwrap();
             std::fs::create_dir_all(&c).unwrap();
-            dir_link(&c.join("l"), &self.root.join("ctarget"));
+            if !c.join("l").exists() {
+                dir_link(&c.join("l"), &self.root.join("ctarget"));
+            }
             let o = tidy.as_object_mut().unwrap();
             o.insert("link_canary".into(), json!(fwd(&c)));
             o.insert("link_canary_count".into(), json!(1));
@@ -354,4 +356,178 @@ fn bl3_a_folder_of_a_worktree_with_only_an_untracked_file_is_not_moved() {
     let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/notes"), &[fwd(&f.build)]);
     assert!(wt.join("notes/todo.txt").exists(), "{rep:?}");
     assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}
+
+// ---- review round 4
+
+impl Fx {
+    /// Several items at once, with extra tidy config keys, over the real local shell.
+    fn close_set(&self, items: &[(&str, String)], branches: &[&str], roots: &[String], extra: Value) -> CloseReport {
+        let mut tidy = self.tidy(&fwd(&self.main));
+        for (k, v) in extra.as_object().unwrap() {
+            tidy.as_object_mut().unwrap().insert(k.clone(), v.clone());
+        }
+        let h = Host { name: "real".into(), tidy: to_table(&tidy), ..Default::default() };
+        let cfg = Config { hosts: vec![h.clone()], ..Default::default() };
+        let t = build_cfg(&cfg, &h).unwrap();
+        let ops = Ops::new(&h, &LocalRunner, &t);
+        let env = OpsEnv { ops: &ops, cfg: &t, reference_prefixes: vec![] };
+        let set = OwnedSet { items: items.iter().map(|(k, v)| OwnedItem::new(k, v)).collect(), branches: branches.iter().map(|b| b.to_string()).collect(), chain_checkout: None, roots: roots.to_vec(), shared_targets: vec![] };
+        run_close(&set, &env)
+    }
+
+    /// A lane worktree beside main: `<root>/main-wt-<lane>` on `line/<lane>`, at main's commit (merged).
+    fn sib(&self, lane: &str) -> std::path::PathBuf {
+        git(&self.main, &["worktree", "add", "-q", "-b", &format!("line/{lane}"), &(fwd(&self.root) + "/main-wt-" + lane)]);
+        let wt = self.root.join(format!("main-wt-{lane}"));
+        age(&wt);
+        wt
+    }
+
+    fn prefix(&self) -> Vec<String> {
+        vec![format!("prefix:{}/main-wt-", fwd(&self.root))]
+    }
+
+    /// `git config status.showUntrackedFiles no` on the TEMP main repository only (shared by its worktrees).
+    fn hide_untracked(&self) {
+        git(&self.main, &["config", "status.showUntrackedFiles", "no"]);
+        assert_eq!(git(&self.main, &["config", "--local", "--get", "status.showUntrackedFiles"]).trim(), "no");
+    }
+}
+
+#[test]
+fn bl4_a_merged_worktree_with_an_untracked_file_is_not_removed_when_git_hides_untracked_files() {
+    let f = fx();
+    f.hide_untracked();
+    let wt = f.sib("u");
+    write(wt.join("notes.txt"), "never added\n");
+    age(&wt);
+    let rep = f.close_set(&[("worktree", fwd(&f.root) + "/main-wt-u")], &["line/u"], &f.prefix(), json!({}));
+    assert!(wt.join("notes.txt").exists(), "a worktree with an untracked file was removed: {rep:?}");
+    assert!(refused_with(&rep, "tidy.uncommitted"), "{rep:?}");
+}
+
+#[test]
+fn bl4_a_worktree_folder_holding_only_an_untracked_file_is_not_moved_when_git_hides_untracked_files() {
+    let f = fx();
+    f.hide_untracked();
+    git(&f.main, &["worktree", "add", "-q", "-b", "line/n", &(fwd(&f.build) + "/wt-n")]);
+    let wt = f.build.join("wt-n");
+    write(wt.join("notes/todo.txt"), "never added\n");
+    age(&wt);
+    let rep = f.close_set(&[("target", fwd(&f.build) + "/wt-n/notes")], &[], &[fwd(&f.build)], json!({}));
+    assert!(wt.join("notes/todo.txt").exists(), "untracked work inside a worktree was moved: {rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}
+
+#[test]
+fn ma8_a_folder_inside_a_kept_lanes_worktree_is_protected() {
+    let f = fx();
+    git(&f.main, &["worktree", "add", "-q", "-b", "line/k", &(fwd(&f.build) + "/wt-k")]);
+    let wt = f.build.join("wt-k");
+    write(wt.join(".gitignore"), "target/\n");
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-q", "-m", "ignore target"]);
+    write(wt.join("target/x.o"), "obj\n");
+    age(&wt);
+    let extra = json!({"keep_lanes": ["k"], "worktree_prefix": "wt-"});
+    let rep = f.close_set(&[("target", fwd(&f.build) + "/wt-k/target")], &[], &[fwd(&f.build)], extra);
+    assert!(wt.join("target/x.o").exists(), "{rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.protected"), "{rep:?}");
+}
+
+#[test]
+fn ma8_a_folder_inside_a_keep_paths_entry_is_protected_and_so_is_the_entry() {
+    let f = fx();
+    write(f.build.join("keep/sub/x.o"), "obj\n");
+    age(&f.build);
+    let extra = json!({"keep_paths": [fwd(&f.build) + "/keep"]});
+    for k in ["/keep/sub", "/keep"] {
+        let rep = f.close_set(&[("target", fwd(&f.build) + k)], &[], &[fwd(&f.build)], extra.clone());
+        assert!(f.build.join("keep/sub/x.o").exists(), "{k}: {rep:?}, trash {:?}", f.trash());
+        assert!(refused_with(&rep, "tidy.protected"), "{k}: a tidy.protected row, not executor residue: {rep:?}");
+    }
+}
+
+#[test]
+fn r4minor1_a_recorded_folder_that_is_its_own_repository_is_not_owned() {
+    let f = fx();
+    let repo = f.root.join("main-wt-zz");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    write(repo.join("a.txt"), "one\n");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "own history"]);
+    write(repo.join("a.txt"), "two, not committed\n");
+    age_all(&repo);
+    let rep = f.close_set(&[("tmp", fwd(&f.root) + "/main-wt-zz")], &[], &f.prefix(), json!({}));
+    assert!(repo.join("a.txt").exists(), "{rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}
+
+#[test]
+fn r4minor3_bl3j_a_folder_reached_through_a_link_into_a_worktree_is_judged_as_inside_it() {
+    let f = fx();
+    let wt = live_worktree(&f);
+    dir_link(&f.build.join("lnk"), &wt);
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/lnk/src"), &[fwd(&f.build)]);
+    assert!(wt.join("src/a.rs").exists(), "{rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.not-owned") && rep.refusals.iter().any(|r| r.why.contains("inside the worktree")), "{rep:?}");
+}
+
+#[test]
+fn r4minor3_ma7f_a_prefix_root_written_through_a_link_is_compared_with_main_resolved() {
+    // prefix:<root>/lnkdir/ma, where lnkdir leads back to <root>: resolved, it owns main itself, so it owns nothing
+    let f = fx();
+    dir_link(&f.root.join("lnkdir"), &f.root);
+    write(f.root.join("main-wt-x/out.o"), "obj\n");
+    age(&f.root.join("main-wt-x"));
+    let root = format!("prefix:{}/lnkdir/ma", fwd(&f.root));
+    let rep = f.close_set(&[("target", fwd(&f.root) + "/lnkdir/main-wt-x")], &[], &[root], json!({}));
+    assert!(f.root.join("main-wt-x/out.o").exists(), "{rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.not-owned") && rep.refusals.iter().any(|r| r.why.contains("holds the main checkout")), "{rep:?}");
+}
+
+#[test]
+fn r4minor3_m1d_a_recorded_link_is_moved_as_the_link_not_what_it_leads_to() {
+    let f = fx();
+    let real = f.build.join("real2");
+    write(real.join("x.o"), "not the batch's\n");
+    age(&real);
+    dir_link(&f.build.join("lnk2"), &real);
+    let key = fwd(&f.build) + "/lnk2";
+    let rep = f.close(&fwd(&f.main), "target", &key, &[fwd(&f.build)]);
+    assert!(real.join("x.o").exists(), "the folder a recorded link leads to was moved: {rep:?}, trash {:?}", f.trash());
+}
+
+#[cfg(unix)]
+#[test]
+fn r4minor4_a_tracked_symlink_inside_a_worktree_is_tracked_work() {
+    // a tracked link pointing at the ignored target/: probed from where it leads it looks empty, from its parent it is tracked
+    let f = fx();
+    let wt = live_worktree(&f);
+    std::os::unix::fs::symlink("target", wt.join("out")).unwrap();
+    git(&wt, &["add", "out"]);
+    git(&wt, &["commit", "-q", "-m", "a tracked link"]);
+    age(&wt);
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/out"), &[fwd(&f.build)]);
+    assert!(std::fs::symlink_metadata(wt.join("out")).is_ok(), "a tracked link was moved out of the worktree: {rep:?}");
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}
+
+/// Like `age`, `.git` included (its objects are read-only: made writable first), so a repository of its own is not "in use".
+fn age_all(p: &Path) {
+    for e in std::fs::read_dir(p).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_dir() {
+            age_all(&e.path());
+        } else if e.file_type().unwrap().is_file() {
+            let mut perm = std::fs::metadata(e.path()).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            std::fs::set_permissions(e.path(), perm).unwrap();
+            let f = std::fs::File::options().write(true).open(e.path()).unwrap();
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86400)).unwrap();
+        }
+    }
 }
