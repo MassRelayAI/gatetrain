@@ -52,6 +52,15 @@ pub fn ingest(a: IngestArgs) -> Result<ExitCode> {
             Ok(ExitCode::from(2))
         }
         runs::Ingest::Done => {
+            // the sampler's file beside the log (`<log>.samples.jsonl`, written by `hold --log`): ingested with the log; absent = nothing
+            let mut sf = a.log.clone().into_os_string();
+            sf.push(".samples.jsonl");
+            if let Ok(text) = std::fs::read_to_string(&sf) {
+                let n = l.record_samples_for(&text, Some(&rid))?;
+                if n > 0 {
+                    println!("ingested {n} sample(s) of {rid}");
+                }
+            }
             let reds = p.steps.iter().filter(|s| matches!(s.exit_code, Some(x) if x != 0)).count();
             println!("ingested {rid}: {outcome}, {} steps, {reds} red", p.steps.len());
             Ok(ExitCode::SUCCESS)

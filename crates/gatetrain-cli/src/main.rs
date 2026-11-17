@@ -7,7 +7,9 @@ use gatetrain_core::batch::{system_now, Engine, Outcome};
 use gatetrain_core::batchcfg::BatchConfig;
 use gatetrain_core::hostlock::{MemoryAdmission, RealLock};
 use gatetrain_core::{analysis, config, declog, diagnose, history, ledger::Ledger, logfmt, predict};
+mod advisecmd;
 mod chaincmd;
+mod probecmd;
 mod holdcmd;
 mod tidycmd;
 use std::path::{Path, PathBuf};
@@ -92,6 +94,10 @@ enum Cmd {
     Check(tidycmd::CheckArgs),
     /// Clean the leftovers `check` finds (dry run unless --apply or --auto)
     Tidy(tidycmd::TidyArgs),
+    /// Measure this host and its configured disks (durable writes, sequential, small files, rotational, CPU); stored in the ledger. Refused while a proof holds the host
+    Probe(probecmd::ProbeArgs),
+    /// Read the ledger and say which config change would save time, with evidence, minutes (or unknown) and confidence. Prints only; applies nothing
+    Advise(advisecmd::AdviseArgs),
     /// Run a steps file: fast then slow tier in parallel, full output per step, log-format lines on stdout, a stamp when green and clean
     Chain(chaincmd::ChainArgs),
     /// Fail when any file of a repository holds a word on its hashed deny-list `.privacy-denylist` (a hit names the file and line, never the word)
@@ -471,6 +477,8 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
         Cmd::Chain(a) => Ok(chaincmd::run(a)),
+        Cmd::Probe(a) => probecmd::run(a),
+        Cmd::Advise(a) => advisecmd::run(a),
         Cmd::PrivacyCheck { root, hash } => Ok(ExitCode::from(gatetrain_core::privacy::run(&root, hash.as_deref()) as u8)),
         Cmd::Watch { config, now } => {
             let cfg = match gatetrain_core::watch::load_cfg(&config) {
