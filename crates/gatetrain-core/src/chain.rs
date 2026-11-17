@@ -104,7 +104,7 @@ impl SampleSink {
             let _ = writeln!(f, "{}", r.unknown_json_line());
             self.wrote_header = true;
         }
-        let _ = writeln!(f, "{}", r.to_json_line(&self.host, "", running_steps, &Ts::now_utc().iso()));
+        let _ = writeln!(f, "{}", r.to_json_line(&self.host, "", Some(running_steps), &Ts::now_utc().iso()));
     }
 
     fn maybe(&mut self, running_steps: usize) {

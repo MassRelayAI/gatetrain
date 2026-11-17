@@ -36,7 +36,38 @@ pub struct HoldArgs {
     pub repo_root: Option<PathBuf>,
     /// Build folders the chain writes to (disk admission before, size recorded after).
     pub target_dir: Vec<PathBuf>,
+    /// sampler interval in seconds (0 = off); it writes `<log>.samples.jsonl`, so it needs `log`
+    pub samples: u64,
     pub cmd: Vec<String>,
+}
+
+/// The holder's sampler (engine v2 E7): the loop that already polls the child drives it; no thread.
+struct Sampling {
+    s: gatetrain_core::hw::Sampler,
+    last: Instant,
+    every: Duration,
+    file: PathBuf,
+    host: String,
+    run_id: String,
+    header: bool,
+}
+
+impl Sampling {
+    fn maybe(&mut self) {
+        if self.last.elapsed() < self.every {
+            return;
+        }
+        let elapsed = self.last.elapsed().as_secs_f64();
+        self.last = Instant::now();
+        let r = self.s.sample(elapsed);
+        let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.file) else { return };
+        if !self.header {
+            let _ = writeln!(f, "{}", r.unknown_json_line());
+            self.header = true;
+        }
+        // the holder does not know which steps run: that figure is unknown, not zero
+        let _ = writeln!(f, "{}", r.to_json_line(&self.host, &self.run_id, None, &hold::now_iso()));
+    }
 }
 
 fn resolve(lock: &Option<PathBuf>, hosts: &Option<PathBuf>, host: &Option<String>) -> Result<(PathBuf, Option<hold::HostCapacity>)> {
@@ -235,6 +266,17 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
         c.env("GATETRAIN_CORES", n.to_string());
     }
     c.env("GATETRAIN_RUN_ID", &run_id);
+    let mut sampling = match (a.samples, &a.log) {
+        (n, Some(log)) if n > 0 => {
+            c.env("GATETRAIN_SAMPLED", "1");
+            let mut file = log.clone().into_os_string();
+            file.push(".samples.jsonl");
+            let mut s = gatetrain_core::hw::Sampler::host();
+            s.sample(0.0); // the baseline the first delta is taken against
+            Some(Sampling { s, last: Instant::now(), every: Duration::from_secs(n), file: PathBuf::from(file), host: a.host.clone().unwrap_or_else(gatetrain_core::chain::host_name), run_id: run_id.clone(), header: false })
+        }
+        _ => None,
+    };
     let mut peak: Option<(f64, &'static str)> = None;
     let rc: i32 = match c.spawn() {
         Err(e) => {
@@ -254,6 +296,9 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
                     Some(st) => break exit_code(st),
                     None => std::thread::sleep(Duration::from_millis(50)),
                 }
+                if let Some(s) = sampling.as_mut() {
+                    s.maybe();
+                }
                 if last_sample.elapsed() >= Duration::from_secs(2) {
                     meter.sample();
                     last_sample = Instant::now();
@@ -263,6 +308,11 @@ pub fn run(a: HoldArgs) -> Result<ExitCode> {
             rc
         }
     };
+    if let Some(s) = &sampling {
+        if let Ok(text) = std::fs::read_to_string(&s.file) {
+            let _ = Ledger::open(&a.db).and_then(|l| Ok(l.record_samples_for(&text, Some(&run_id))?));
+        }
+    }
     if let Some((mb, source)) = peak {
         let _ = Ledger::open(&a.db).and_then(|l| l.record_step_peak(&run_id, "(chain)", mb, source, &hold::now_iso()));
         let _ = say(&a.log, &format!("PEAK {run_id} {mb:.0} MB ({source})"));

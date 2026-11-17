@@ -247,6 +247,10 @@ enum Cmd {
         /// Print FREE / HELD / STALE / STOPPED from the lock; exit 0 only when held
         #[arg(long)]
         status: bool,
+        /// Sample the host (load, CPU, I/O wait, disk busy, free memory) every N seconds into <log>.samples.jsonl while the child runs, and
+        /// ingest the samples into --db with the run; the child is told (GATETRAIN_SAMPLED) so `chain` does not sample twice. 0 = off; needs --log
+        #[arg(long, default_value_t = 10)]
+        samples: u64,
         /// The command to run as the child, after `--`
         #[arg(last = true)]
         cmd: Vec<String>,
@@ -457,8 +461,8 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
             }
         }
         Cmd::Hold { status: true, lock, hosts, host, .. } => holdcmd::status(&lock, &hosts, &host),
-        Cmd::Hold { run_id, lock, db, hosts, host, wait_secs, log, steps, repo_root, target_dir, cmd, .. } => {
-            holdcmd::run(holdcmd::HoldArgs { run_id, lock, db, hosts, host, wait_secs, log, steps, repo_root, target_dir, cmd })
+        Cmd::Hold { run_id, lock, db, hosts, host, wait_secs, log, steps, repo_root, target_dir, samples, cmd, .. } => {
+            holdcmd::run(holdcmd::HoldArgs { run_id, lock, db, hosts, host, wait_secs, log, steps, repo_root, target_dir, samples, cmd })
         }
         Cmd::Memory { cmd: MemoryCmd::Record { db, run, step, peak_mb, source } } => holdcmd::memory_record(&db, &run, &step, peak_mb, &source),
         Cmd::Memory { cmd: MemoryCmd::Admit { db, hosts, host, steps } } => holdcmd::memory_admit(&db, &hosts, &host, &steps),

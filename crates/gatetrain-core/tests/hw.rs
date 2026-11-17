@@ -71,7 +71,7 @@ fn a_platform_without_a_source_writes_null_and_the_reason() {
     for k in ["load_1m", "mem_free_mb", "cpu_busy_pct", "iowait_pct"] {
         assert!(r.unknown.contains_key(k), "{k}: {:?}", r.unknown);
     }
-    let line = r.to_json_line("h", "run-1", 3, "2026-11-17T10:00:00Z");
+    let line = r.to_json_line("h", "run-1", Some(3), "2026-11-17T10:00:00Z");
     let v: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert!(v["load_1m"].is_null() && v["running_steps"] == 3 && v["host"] == "h" && v["run_id"] == "run-1");
 }

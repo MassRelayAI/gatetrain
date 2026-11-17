@@ -132,3 +132,25 @@ fn parallelism_comes_from_hosts_toml_only() {
     let o = hold(d.path(), "r2", &[], code).output().unwrap();
     assert!(out(&o).contains("P=unset C=unset"), "no hard-coded number: {}", out(&o));
 }
+
+#[test]
+fn the_holder_samples_into_log_samples_jsonl_tells_its_child_and_ingests_the_samples() {
+    let d = tempfile::tempdir().unwrap();
+    let log = d.path().join("holder.log");
+    let o = hold(d.path(), "hs1", &["--log", log.to_str().unwrap(), "--samples", "1"], "env S=GATETRAIN_SAMPLED").output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(out(&o).contains("S=1"), "the child is told the holder samples, so chain does not: {}", out(&o));
+    let o = hold(d.path(), "hs2", &["--log", log.to_str().unwrap(), "--samples", "1"], "sleep 3").output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let text = std::fs::read_to_string(d.path().join("holder.log.samples.jsonl")).expect("the samples file next to the log");
+    let rows: Vec<serde_json::Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).filter(|v: &serde_json::Value| v.get("host").is_some()).collect();
+    assert!(rows.len() >= 2 && rows.iter().all(|r| r["run_id"] == "hs2" && r["running_steps"].is_null()), "{text}");
+    let l = Ledger::open(&d.path().join("g.db")).unwrap();
+    let n: i64 = l.conn.query_row("SELECT COUNT(*) FROM host_samples WHERE run_id='hs2'", [], |r| r.get(0)).unwrap();
+    assert!(n >= 2, "ingested into the ledger the holder writes");
+    // off: no samples
+    let o = hold(d.path(), "hs3", &["--log", log.to_str().unwrap(), "--samples", "0"], "sleep 2").output().unwrap();
+    assert_eq!(o.status.code(), Some(0));
+    let n: i64 = l.conn.query_row("SELECT COUNT(*) FROM host_samples WHERE run_id='hs3'", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 0);
+}

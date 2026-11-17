@@ -44,7 +44,7 @@ impl Reading {
     }
 
     /// One JSON line of `samples.jsonl`: the time, the host, the run, the steps running now and every figure (null when unknown).
-    pub fn to_json_line(&self, host: &str, run_id: &str, running_steps: usize, at: &str) -> String {
+    pub fn to_json_line(&self, host: &str, run_id: &str, running_steps: Option<usize>, at: &str) -> String {
         let disks: Vec<Value> = self.disks.iter().map(|d| json!({"device": d.device, "busy_pct": d.busy_pct})).collect();
         json!({
             "at": at, "host": host, "run_id": run_id, "running_steps": running_steps,
