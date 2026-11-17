@@ -201,7 +201,7 @@ impl Outcome {
             Outcome::Refused { rule, .. } => match rule.as_str() {
                 "host.refuse" | "host.refuse-proof-running" => 75,
                 "host.refuse-memory" => 76,
-                "host.refuse-disk" => 77,
+                "host.refuse-disk" | "host.disk-unknown" => 77,
                 "host.refuse-cwd" => 78,
                 "host.refuse-doctor" => 79,
                 _ => 3,
@@ -955,9 +955,18 @@ impl<'a> Engine<'a> {
         };
         let again = self.adm.admit_rule(role, id)?;
         let prev: Option<String> = self.ledger.conn.query_row("SELECT outcome FROM decisions WHERE rule='tidy.auto-disk' AND batch<>? ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).ok();
-        let outcome = if again.is_some() { "still-below" } else { "recovered" };
-        self.decide("tidy", id, None, "tidy.auto-disk", outcome, format!("{note}; the disk is {}", if again.is_some() { "still below its floor" } else { "above its floor" }), Some(json!({"role": role})))?;
+        // only a measured shortfall is "still below"; a floor that cannot be judged after the tidy is unknown and never escalates
+        let below = again.as_ref().is_some_and(|(r, _)| r == "host.refuse-disk");
+        let (outcome, state) = match &again {
+            None => ("recovered", "above its floor".to_string()),
+            Some(_) if below => ("still-below", "still below its floor".to_string()),
+            Some((r, _)) => ("unknown", format!("not judged after it ({r})")),
+        };
+        self.decide("tidy", id, None, "tidy.auto-disk", outcome, format!("{note}; the disk is {state}"), Some(json!({"role": role})))?;
         let Some((r2, w2)) = again else { return Ok(None) };
+        if !below {
+            return Ok(Some((r2, w2)));
+        }
         if prev.as_deref() == Some("still-below") {
             let already: i64 = self.ledger.conn.query_row("SELECT COUNT(*) FROM decisions WHERE rule='host.disk-escalation' AND batch=?", [id], |r| r.get(0)).unwrap_or(0);
             if already == 0 {

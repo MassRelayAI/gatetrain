@@ -111,24 +111,35 @@ impl MemoryAdmission {
     }
 }
 
+/// The disk floor cannot be judged (a host missing from the hosts file, a remote host whose free space is not measured here, an unknown
+/// growth, free space that could not be read). It refuses like a low disk, but nothing says the disk is low: no `tidy:auto`, no escalation.
+pub const UNKNOWN: &str = "host.disk-unknown";
+
 impl MemoryAdmission {
     /// `None` when every disk whose `use` covers the run keeps its `min_free_gb`, else why not. The growth is the ledger's median for the
     /// run's target folders that sit on that disk; with no history it is `[needs] preflight_gb` (light) or `chain_gb` (proof); with
     /// neither it is unknown, and unknown refuses.
-    fn floor_problem(&self, text: &str, host: &str, role: &str, hist: &std::collections::HashMap<String, Vec<f64>>) -> Result<Option<String>> {
+    /// The rule is `host.refuse-disk` only for a measured shortfall; a floor that cannot be judged is `host.disk-unknown`.
+    fn floor_problem(&self, text: &str, host: &str, role: &str, hist: &std::collections::HashMap<String, Vec<f64>>) -> Result<Option<(&'static str, String)>> {
         let v: toml::Value = text.parse().map_err(|e: toml::de::Error| Error::Batch(format!("hosts.toml: {e}")))?;
         let uses = if role == "light" { "preflight" } else { "chain" };
         let h = v.get("hosts").and_then(|h| h.as_array()).and_then(|a| a.iter().find(|h| h.get("name").and_then(|n| n.as_str()) == Some(host)));
-        let Some(h) = h else { return Ok(Some(format!("host {host} is not in the hosts file; the disk floor cannot be judged, refused"))) };
+        let Some(h) = h else { return Ok(Some((UNKNOWN, format!("host {host} is not in the hosts file; the disk floor cannot be judged, refused")))) };
+        // the disks that carry a floor for this run's use
+        let floors: Vec<(&str, f64)> = h
+            .get("disks")
+            .and_then(|d| d.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|d| d.get("use").and_then(|u| u.as_array()).is_some_and(|u| u.iter().any(|x| x.as_str() == Some(uses))))
+            .filter_map(|d| Some((d.get("path").and_then(|p| p.as_str())?, d.get("min_free_gb").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64)))?)))
+            .collect();
         let reach = h.get("reach").and_then(|r| r.as_str()).unwrap_or("local");
-        if reach.trim_start().starts_with("ssh") {
-            return Ok(Some(format!("host {host} is reached over ssh ({reach}): its free space is not measured here and is unknown, refused")));
+        if reach.trim_start().starts_with("ssh") && !floors.is_empty() {
+            return Ok(Some((UNKNOWN, format!("host {host} is reached over ssh ({reach}): its free space is not measured here and is unknown, refused"))));
         }
         let needs = if role == "light" { self.needs_preflight_gb } else { self.needs_chain_gb };
-        for d in h.get("disks").and_then(|d| d.as_array()).into_iter().flatten() {
-            let covers = d.get("use").and_then(|u| u.as_array()).is_some_and(|u| u.iter().any(|x| x.as_str() == Some(uses)));
-            let (Some(path), true) = (d.get("path").and_then(|p| p.as_str()), covers) else { continue };
-            let Some(min) = d.get("min_free_gb").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))) else { continue };
+        for (path, min) in floors {
             let dpath = disk::canon(path);
             let mut grown_mb: Option<f64> = None;
             for t in &self.target_dirs {
@@ -143,13 +154,13 @@ impl MemoryAdmission {
             let predicted_gb = match (grown_mb, needs) {
                 (Some(mb), _) => mb / 1024.0,
                 (None, Some(g)) => g,
-                (None, None) => return Ok(Some(format!("disk {path}: the growth of this run is unknown (no history in the ledger and no [needs] value); a floor cannot be shown to hold, refused"))),
+                (None, None) => return Ok(Some((UNKNOWN, format!("disk {path}: the growth of this run is unknown (no history in the ledger and no [needs] value); a floor cannot be shown to hold, refused")))),
             };
             let Some(free) = disk::free_gb(&dpath) else {
-                return Ok(Some(format!("disk {path}: free space could not be read and min_free_gb {min:.1} is set; refused")));
+                return Ok(Some((UNKNOWN, format!("disk {path}: free space could not be read and min_free_gb {min:.1} is set; refused"))));
             };
             if free - predicted_gb < min {
-                return Ok(Some(format!("disk {path}: free {free:.1} GB - predicted growth {predicted_gb:.1} GB = {:.1} GB < min_free_gb {min:.1}", free - predicted_gb)));
+                return Ok(Some(("host.refuse-disk", format!("disk {path}: free {free:.1} GB - predicted growth {predicted_gb:.1} GB = {:.1} GB < min_free_gb {min:.1}", free - predicted_gb))));
             }
         }
         Ok(None)
@@ -184,15 +195,15 @@ impl Admission for MemoryAdmission {
         // free space is not measured here, and a disk that cannot be read all refuse
         if self.disk_floor && (role == "light" || role == "proof") {
             if let Some(err) = &self.floor_error {
-                return refuse("host.refuse-disk", format!("the disk floor cannot be judged: {err}"));
+                return refuse(UNKNOWN, format!("the disk floor cannot be judged: {err}"));
             }
             if let Some((hosts, host)) = &self.hosts {
                 let why = match std::fs::read_to_string(hosts) {
                     Ok(text) => self.floor_problem(&text, host, role, &hist)?,
-                    Err(e) => Some(format!("the hosts file {} could not be read ({e}); the disk floor cannot be judged", hosts.display())),
+                    Err(e) => Some((UNKNOWN, format!("the hosts file {} could not be read ({e}); the disk floor cannot be judged", hosts.display()))),
                 };
-                if let Some(why) = why {
-                    return refuse("host.refuse-disk", why);
+                if let Some((rule, why)) = why {
+                    return refuse(rule, why);
                 }
             }
         }
@@ -214,7 +225,8 @@ impl Admission for MemoryAdmission {
                     let predicted_mb = memory::typical_mb(hist.get(&disk::step_key(&tc)).map(Vec::as_slice).unwrap_or(&[]));
                     let da = disk::admit(&disks, &tc, predicted_mb, &disk::free_gb);
                     if !da.admitted {
-                        return refuse("host.refuse-disk", da.rule);
+                        // a disk whose free space could not be read is unknown, not low
+                        return refuse(if da.free_gb.is_none() { UNKNOWN } else { "host.refuse-disk" }, da.rule);
                     }
                 }
             }
