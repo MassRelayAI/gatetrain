@@ -2349,6 +2349,7 @@ fn above(p: &str) -> String {
 #[test]
 fn minor6_a_record_that_names_a_root_itself_never_owns_the_whole_root() {
     let mut fx = live_fx();
+    fx.cfg.chain_target_dirs = vec![]; // /build holds the shared target: without this the shared-target rule would refuse it first
     std::fs::write(fx.state.join("targets").join("b1-p1.txt"), "/build\n").unwrap();
     let env = FakeCloseEnv::with(&[("target", "/build")]);
     let (o, adm) = run_closed(&mut fx, env);
