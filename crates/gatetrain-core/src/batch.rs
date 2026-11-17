@@ -157,7 +157,7 @@ pub fn fold(events: &[Ev]) -> Option<Folded> {
                         }
                         f.state = to.clone();
                     }
-                    if !matches!(e.transition.as_str(), "hold" | "release" | "abandon") {
+                    if !matches!(e.transition.as_str(), "hold" | "release" | "abandon" | "restack") {
                         if let Some(o) = e.detail.as_object() {
                             for (k, v) in o {
                                 f.facts.insert(k.clone(), v.clone());
@@ -189,7 +189,7 @@ impl Outcome {
     pub fn exit_code(&self) -> u8 {
         match self {
             Outcome::Refused { rule, .. } => match rule.as_str() {
-                "host.refuse" => 75,
+                "host.refuse" | "host.refuse-proof-running" => 75,
                 "host.refuse-memory" => 76,
                 "host.refuse-disk" => 77,
                 "host.refuse-cwd" => 78,
@@ -427,6 +427,15 @@ fn to_state(tr: &str) -> &'static str {
     }
 }
 
+/// The state a transition leads to: a launched pre-flight (T3 with a run id) leads to `preflighting`, not `preflighted`.
+fn to_for(tr: &str, detail: &Value) -> &'static str {
+    if tr == "T3" && detail.get("pf_run_id").is_some() {
+        "preflighting"
+    } else {
+        to_state(tr)
+    }
+}
+
 fn from_state(tr: &str) -> &'static str {
     match tr {
         "T1" => "open",
@@ -577,13 +586,40 @@ impl<'a> Engine<'a> {
             return Err(Error::Batch(format!("batch {id} already exists")));
         }
         let wd = std::path::absolute(workdir)?;
-        let base_sha = git(&wd, &["rev-parse", &format!("{base}^{{commit}}")])?;
+        // `--base <batch-id>`: stacked on the tip of a batch that is preflighted, proving or proven (engine-v2 section 8)
+        let mut pipeline = json!({});
+        let base_sha = if !self.events(base)?.is_empty() {
+            let bf = self.fold(base)?;
+            if !matches!(bf.state.as_str(), "preflighted" | "proving" | "proven") {
+                return Err(Error::Batch(format!("pipeline.base-state: batch {base} is {}; a batch is stacked on a batch that is preflighted, proving or proven", bf.state)));
+            }
+            let unmerged = |s: &str| !matches!(s, "merged" | "deploying" | "live" | "closed" | "abandoned");
+            let (mut ahead, mut cur) = (1usize, bf.clone());
+            while let Some(below) = cur.s("base_batch") {
+                cur = self.fold(&below)?;
+                if unmerged(&cur.state) {
+                    ahead += 1;
+                }
+            }
+            if ahead > self.cfg.max_ahead {
+                return Err(Error::Batch(format!("pipeline.max-ahead: {ahead} unmerged batch(es) would sit below this one, [pipeline] max_ahead is {}", self.cfg.max_ahead)));
+            }
+            let tip = git(&wd, &["rev-parse", &format!("refs/heads/{}", bf.need("branch")?)])?;
+            let floor = bf.s("floor_sha").or_else(|| bf.s("base_sha")).unwrap_or_else(|| tip.clone());
+            pipeline = json!({"base_batch": base, "floor_sha": floor});
+            tip
+        } else {
+            git(&wd, &["rev-parse", &format!("{base}^{{commit}}")])?
+        };
         let mut ls = vec![];
         for l in lanes {
             let tip = git(&wd, &["rev-parse", &format!("{l}^{{commit}}")])?;
             ls.push(json!({"ref": l, "tip": tip}));
         }
-        let detail = json!({"base_ref": base, "base_sha": base_sha, "workdir": wd.to_string_lossy(), "lanes": ls});
+        let mut detail = json!({"base_ref": base, "base_sha": base_sha, "workdir": wd.to_string_lossy(), "lanes": ls});
+        if let (Some(d), Some(x)) = (detail.as_object_mut(), pipeline.as_object()) {
+            d.extend(x.clone());
+        }
         let d = self.decide("transition", id, Some(base_sha.clone()), "transition.open", "allowed", format!("batch opened on {base} with {} lanes", lanes.len()), None)?;
         self.event(id, "open", "done", 1, Some("open"), Some(&base_sha), None, None, Some(d), &detail)?;
         Ok(())
@@ -672,10 +708,6 @@ impl<'a> Engine<'a> {
         self.go(id, &f, "T6a")
     }
 
-    pub fn restack(&mut self, id: &str) -> Result<Outcome> {
-        Ok(Outcome::Idle(format!("batch {id}: restack not built")))
-    }
-
     /// A person records that the cause of the last red run is a `flake` or `infra`, with a reason. It is a decision-log override
     /// (`retry.cause-noted`) naming the red run; it covers that run only, and it leaves the state alone.
     pub fn note_cause(&mut self, id: &str, class: &str, reason: &str) -> Result<Outcome> {
@@ -720,6 +752,8 @@ impl<'a> Engine<'a> {
             "open" => self.go(id, &f, "T1"),
             "stacked" => self.go(id, &f, "T2"),
             "settled" => self.go(id, &f, "T3"),
+            "preflighting" => self.observe_preflight(id, &f),
+            "preflight-red" => self.refuse(id, "preflight.red", "the pre-flight run has a red step; commit a fix and restack (a red pre-flight is not run again on the same tip)".into()),
             "preflighted" => self.go(id, &f, "T4"),
             "proving" => self.observe(id, &f),
             "red" => self.refuse(id, "floor.zero-red", "the proof has a red step; a red batch is not merged (restack after a patch)".into()),
@@ -780,7 +814,7 @@ impl<'a> Engine<'a> {
     // ------------------------------------------------------------ resume (design 3.4)
 
     fn resume(&mut self, id: &str, f: &Folded, p: Ev) -> Result<Outcome> {
-        let plan = Plan { tr: p.transition.clone(), to: to_state(&p.transition).into(), input_sha: p.input_sha.clone(), run_id: p.run_id.clone(), attempt: p.attempt, detail: p.detail.clone() };
+        let plan = Plan { tr: p.transition.clone(), to: to_for(&p.transition, &p.detail).into(), input_sha: p.input_sha.clone(), run_id: p.run_id.clone(), attempt: p.attempt, detail: p.detail.clone() };
         match self.probe(f, &plan)? {
             Probe::Happened(out) => {
                 let extra = if plan.tr == "T7" { json!({"resumed": "happened", "merge_new": out}) } else { json!({"resumed": "happened"}) };
@@ -836,6 +870,14 @@ impl<'a> Engine<'a> {
                     Probe::Partly // commits or leftovers exist; the fixpoint is not proven
                 }
             }
+            "T3" if plan.detail.get("pf_run_id").is_some() => {
+                // a launched pre-flight: the run is adopted when a live lock names it, else it is started again under the same run id
+                if self.lock.names_run(plan.run_id.as_deref().unwrap_or_default())? {
+                    Probe::Happened(None)
+                } else {
+                    Probe::NotHappened
+                }
+            }
             "T3" => {
                 let sha = plan.input_sha.clone().unwrap_or_default();
                 if self.stamp_path(&sha).exists() {
@@ -872,6 +914,78 @@ impl<'a> Engine<'a> {
         self.state_dir.join("stamps").join(format!("{sha}.stamp"))
     }
 
+    /// `[preflight] chain_command` is set: the pre-flight is a launched run (state `preflighting`), not a blocking command.
+    fn launched_preflight(&self) -> bool {
+        !self.cfg.preflight_chain_command.is_empty()
+    }
+
+    /// `None` when the pre-flight of `tip` is proven, else why not. A launched pre-flight is proven by the stamp `gatetrain chain` wrote
+    /// (`stamp-<sha>.json` naming the sha and the digest of the configured steps file); the engine's own `<sha>.stamp` is the older form.
+    fn stamp_problem(&self, tip: &str, wd: &Path) -> Option<String> {
+        if !self.launched_preflight() {
+            return (!self.stamp_path(tip).exists()).then(|| format!("no green preflight stamp for {}", short(tip)));
+        }
+        self.chain_stamp_problem(tip, wd).map(|why| format!("no green preflight stamp for {}: {why}", short(tip)))
+    }
+
+    fn chain_stamp_problem(&self, sha: &str, wd: &Path) -> Option<String> {
+        let dir = self.abs(wd, self.cfg.preflight_stamp_dir.as_deref().unwrap_or_default());
+        let file = dir.join(format!("stamp-{sha}.json"));
+        let Ok(text) = std::fs::read_to_string(&file) else { return Some(format!("no chain stamp {} (a green run of gatetrain chain writes it)", file.display())) };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { return Some(format!("the chain stamp {} is not JSON", file.display())) };
+        if v["sha"].as_str() != Some(sha) {
+            return Some(format!("the chain stamp {} names another commit", file.display()));
+        }
+        if let Some(want) = self.cfg.preflight_steps_file.as_deref() {
+            let have = evidence::file_digest(&self.abs(wd, want));
+            if have.is_none() || v["digest"].as_str() != have.as_deref() {
+                return Some(format!("the stamp was written for another steps file than {want} (digest {} against {})", short(v["digest"].as_str().unwrap_or("none")), short(have.as_deref().unwrap_or("unreadable"))));
+            }
+        }
+        None
+    }
+
+    /// The tip of the batch this one is stacked on, else the recorded base (what a stack or a restack is cut from).
+    fn current_base(&self, f: &Folded) -> Result<String> {
+        match f.s("base_batch") {
+            Some(b) => {
+                let bf = self.fold(&b)?;
+                git(&PathBuf::from(bf.need("workdir")?), &["rev-parse", &format!("refs/heads/{}", bf.need("branch")?)])
+            }
+            None => f.need("base_sha"),
+        }
+    }
+
+    /// `pipeline.base-moved` and `pipeline.base-unproven` (engine-v2 section 8) for a batch stacked on another batch.
+    fn pipeline_guard(&self, f: &Folded) -> Result<Option<Planned>> {
+        let Some(b) = f.s("base_batch") else { return Ok(None) };
+        if self.current_base(f)? != f.need("base_sha")? {
+            return Ok(Some(Planned::Refuse("pipeline.base-moved".into(), format!("batch {b} moved its tip after this batch was stacked on it; `batch restack` stacks it again on the new tip (its pre-flight reuses unchanged steps by key)"))));
+        }
+        let bs = self.fold(&b)?.state;
+        if !self.cfg.prove_ahead && !matches!(bs.as_str(), "proven" | "merged" | "deploying" | "live" | "closed") {
+            return Ok(Some(Planned::Refuse("pipeline.base-unproven".into(), format!("the base batch {b} is {bs}, not proven; a proof on an unproven base may be wasted ([pipeline] prove_ahead = true allows it)"))));
+        }
+        Ok(None)
+    }
+
+    /// Stack this batch again on the new tip of its base batch: a side event back to `open`; the next advance stacks (T1, a new attempt).
+    pub fn restack(&mut self, id: &str) -> Result<Outcome> {
+        let f = self.fold(id)?;
+        if let Some(p) = f.pending.clone() {
+            return self.resume(id, &f, p);
+        }
+        let Some(b) = f.s("base_batch") else { return Ok(Outcome::Idle(format!("batch {id} is not stacked on another batch"))) };
+        if !matches!(f.state.as_str(), "stacked" | "settled" | "preflighted" | "preflight-red") {
+            return self.refuse(id, "pipeline.restack-state", format!("batch {id} is {}; only a stacked, settled or preflighted batch is restacked (stop the run first)", f.state));
+        }
+        let now = self.current_base(&f)?;
+        if now == f.need("base_sha")? {
+            return Ok(Outcome::Idle(format!("the tip of {b} has not moved")));
+        }
+        self.side(id, "restack", "open", "pipeline.restack", &format!("restack on the new tip {} of {b}", short(&now)))
+    }
+
     fn tip(&self, f: &Folded) -> Result<String> {
         let wd = PathBuf::from(f.need("workdir")?);
         git(&wd, &["rev-parse", &format!("refs/heads/{}", f.need("branch")?)])
@@ -896,10 +1010,12 @@ impl<'a> Engine<'a> {
         let mk = |input: Option<String>, run: Option<String>, detail: Value| Planned::Go(Plan { tr: tr.into(), to: to_state(tr).into(), input_sha: input, run_id: run, attempt, detail });
         match tr {
             "T1" => {
-                let base = f.need("base_sha")?;
+                let base = self.current_base(f)?;
+                // a lane of a batch stacked on another batch was cut below that batch's tip: its floor is the root base
+                let floor = f.s("floor_sha").unwrap_or_else(|| base.clone());
                 for l in f.facts.get("lanes").and_then(|l| l.as_array()).cloned().unwrap_or_default() {
                     let tip = l["tip"].as_str().unwrap_or_default();
-                    let (anc, _, _) = git_raw(&wd, &["merge-base", "--is-ancestor", &base, tip])?;
+                    let (anc, _, _) = git_raw(&wd, &["merge-base", "--is-ancestor", &floor, tip])?;
                     if !anc {
                         return Ok(Planned::Refuse("stack.base-ancestor".into(), format!("the base {} is not an ancestor of lane {}", short(&base), l["ref"].as_str().unwrap_or("?"))));
                     }
@@ -910,7 +1026,7 @@ impl<'a> Engine<'a> {
                         return Ok(Planned::Refuse("stack.lane-stamp".into(), format!("no green lane stamp ([lanes] require_stamp) for: {}", missing.join(", "))));
                     }
                 }
-                Ok(mk(Some(base), None, json!({"branch": format!("batch/{id}/s{attempt}"), "stack_attempt": attempt})))
+                Ok(mk(Some(base.clone()), None, json!({"branch": format!("batch/{id}/s{attempt}"), "stack_attempt": attempt, "base_sha": base})))
             }
             "T2" => {
                 let branch = f.need("branch")?;
@@ -927,6 +1043,18 @@ impl<'a> Engine<'a> {
                     return Ok(Planned::Refuse("floor.named-paths".into(), format!("paths outside the generated directories are changed: {}", stray.join(", "))));
                 }
                 Ok(mk(Some(self.tip(f)?), None, json!({})))
+            }
+            "T3" if self.launched_preflight() => {
+                if let Some((rule, why)) = self.adm.admit_rule("light", id)? {
+                    return Ok(Planned::Refuse(rule, why));
+                }
+                let tip = self.tip(f)?;
+                if let Some(st) = f.s("settled_tip").filter(|st| *st != tip) {
+                    return Ok(Planned::Refuse("settle.tip-moved".into(), format!("the batch branch moved from the settled {} to {} after settle; settle must be the last commit before the chain", short(&st), short(&tip))));
+                }
+                let run = format!("{id}-f{attempt}");
+                let log = self.state_dir.join("logs").join(format!("{run}.log"));
+                Ok(Planned::Go(Plan { tr: tr.into(), to: "preflighting".into(), input_sha: Some(tip.clone()), run_id: Some(run.clone()), attempt, detail: json!({"pf_run_id": run, "pf_log": log.to_string_lossy(), "pf_sha": tip}) }))
             }
             "T3" => {
                 if self.cfg.preflight_command.is_empty() {
@@ -946,8 +1074,11 @@ impl<'a> Engine<'a> {
                 if let Some(st) = f.s("settled_tip").filter(|st| *st != tip) {
                     return Ok(Planned::Refuse("settle.tip-moved".into(), format!("the batch branch moved from the settled {} to {} after settle; settle must be the last commit before the chain", short(&st), short(&tip))));
                 }
-                if !self.stamp_path(&tip).exists() {
-                    return Ok(Planned::Refuse("preflight.stamp-for-sha".into(), format!("no green preflight stamp for {}", short(&tip))));
+                if let Some(why) = self.stamp_problem(&tip, &wd) {
+                    return Ok(Planned::Refuse("preflight.stamp-for-sha".into(), why));
+                }
+                if let Some(r) = self.pipeline_guard(f)? {
+                    return Ok(r);
                 }
                 let dirty = dirty_paths(&wd)?;
                 if !dirty.is_empty() {
@@ -976,8 +1107,11 @@ impl<'a> Engine<'a> {
                 if let Some(r) = self.full_run_budget(id)? {
                     return Ok(r);
                 }
-                if !self.stamp_path(&tip).exists() {
-                    return Ok(Planned::Refuse("preflight.stamp-for-sha".into(), format!("no green preflight stamp for {}", short(&tip))));
+                if let Some(why) = self.stamp_problem(&tip, &wd) {
+                    return Ok(Planned::Refuse("preflight.stamp-for-sha".into(), why));
+                }
+                if let Some(r) = self.pipeline_guard(f)? {
+                    return Ok(r);
                 }
                 let dirty = dirty_paths(&wd)?;
                 if !dirty.is_empty() {
@@ -1003,6 +1137,13 @@ impl<'a> Engine<'a> {
                 }
                 let pref = format!("refs/heads/{}", self.cfg.protected);
                 let old = git(&wd, &["rev-parse", &pref])?;
+                if let Some(base) = f.s("base_batch") {
+                    // a batch stacked on another carries the base's commits: a fast-forward to its tip would merge them unproven
+                    let on = f.s("base_sha").is_some_and(|b| git_raw(&wd, &["merge-base", "--is-ancestor", &b, &old]).map(|r| r.0).unwrap_or(false));
+                    if !on {
+                        return Ok(Planned::Refuse("pipeline.base-not-merged".into(), format!("batch {base} is the base of this batch and is not on {} yet; merge {base} first (a fast-forward to this tip would carry its unproven commits)", self.cfg.protected)));
+                    }
+                }
                 let (ff, _, _) = git_raw(&wd, &["merge-base", "--is-ancestor", &old, &tip])?;
                 if !ff {
                     return Ok(Planned::Refuse("merge.fast-forward".into(), format!("{} cannot fast-forward to {}; the protected branch moved", self.cfg.protected, short(&tip))));
@@ -1066,7 +1207,7 @@ impl<'a> Engine<'a> {
         let wd = PathBuf::from(f.need("workdir")?);
         match plan.tr.as_str() {
             "T1" => {
-                let base = f.need("base_sha")?;
+                let base = plan.detail["base_sha"].as_str().map(String::from).map_or_else(|| f.need("base_sha"), Ok)?;
                 let branch = plan.detail["branch"].as_str().unwrap_or_default().to_string();
                 git(&wd, &["switch", "-c", &branch, &base])?;
                 let lanes = f.facts.get("lanes").and_then(|l| l.as_array()).cloned().unwrap_or_default();
@@ -1159,6 +1300,16 @@ impl<'a> Engine<'a> {
                 }
                 let head = git(&wd, &["rev-parse", "HEAD"])?;
                 Ok(Ok(Done { output: Some(head.clone()), extra: json!({"passes": passes, "paths": committed, "settled_tip": head}) }))
+            }
+            "T3" if plan.detail.get("pf_run_id").is_some() => {
+                let run = plan.run_id.clone().unwrap_or_default();
+                let log = PathBuf::from(plan.detail["pf_log"].as_str().unwrap_or_default());
+                std::fs::create_dir_all(log.parent().unwrap())?;
+                let sha = plan.input_sha.clone().unwrap_or_default();
+                let command: Vec<String> = self.cfg.preflight_chain_command.iter().map(|a| a.replace("{sha}", &sha).replace("{run}", &run).replace("{log}", &log.to_string_lossy())).collect();
+                let env = self.env(id, f, &sha, &run, &log.to_string_lossy());
+                self.lock.launch(&LaunchRequest { run_id: run, batch: id.into(), sha, base: f.s("base_sha").unwrap_or_default(), command, log, workdir: wd, env, role: "light".into() })?;
+                Ok(Ok(Done { output: None, extra: json!({}) }))
             }
             "T3" => {
                 let sha = plan.input_sha.clone().unwrap_or_default();
@@ -1342,6 +1493,49 @@ impl<'a> Engine<'a> {
         } else {
             wd.join(p)
         }
+    }
+
+    /// T3o: a pure read of the launched pre-flight's log, its stamp and the lock.
+    fn observe_preflight(&mut self, id: &str, f: &Folded) -> Result<Outcome> {
+        let run = f.need("pf_run_id")?;
+        let sha = f.need("pf_sha")?;
+        let log = PathBuf::from(f.need("pf_log")?);
+        let text = std::fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let p = parse_log(&text)?;
+        if !p.gates_done {
+            if self.lock.names_run(&run)? {
+                return Ok(Outcome::Waiting(format!("pre-flight {run} is still running")));
+            }
+            // stopped, not red: the next launch is a new run id and a new log
+            return self.plain(id, f, "T3s", "settled", Some(sha), Some(run.clone()), json!({"stopped_run": run}), "recorded", format!("pre-flight {run} stopped without GATES_DONE"));
+        }
+        evidence::record_shadow(&self.state_dir, &run, &text)?;
+        if p.mode.as_deref() != Some("preflight") {
+            return self.refuse(id, "floor.preflight-mode", format!("the pre-flight run's mode is {:?}, not preflight", p.mode.unwrap_or_default()));
+        }
+        let mut reds: Vec<Value> = p.red_now.iter().map(|(s, rc, _)| json!({"step": s, "rc": rc})).collect();
+        for s in &p.steps {
+            if s.exit_code.is_some_and(|c| c != 0) && !reds.iter().any(|r| r["step"] == json!(s.name)) {
+                reds.push(json!({"step": s.name, "rc": s.exit_code}));
+            }
+        }
+        if !reds.is_empty() {
+            let note = format!("{} red step(s) in the pre-flight", reds.len());
+            return self.plain(id, f, "T3r", "preflight-red", Some(sha), Some(run), json!({"pf_findings": reds}), "recorded", note);
+        }
+        let logged = p.commit.clone().unwrap_or_default();
+        if logged.len() < 7 || !sha.starts_with(&logged) {
+            return self.refuse(id, "floor.proven-sha", format!("the pre-flight log ran commit {logged:?}, the batch tip it was launched for is {}", short(&sha)));
+        }
+        let tip = self.tip(f)?;
+        if tip != sha {
+            return self.refuse(id, "settle.tip-moved", format!("the batch branch moved from {} to {} while its pre-flight ran", short(&sha), short(&tip)));
+        }
+        let wd = PathBuf::from(f.need("workdir")?);
+        if let Some(why) = self.chain_stamp_problem(&sha, &wd) {
+            return self.refuse(id, "preflight.stamp-for-sha", format!("no green preflight stamp for {}: {why}", short(&sha)));
+        }
+        self.plain(id, f, "T3o", "preflighted", Some(sha), Some(run), json!({"pf_stamped": true}), "allowed", "GATES_DONE, preflight mode, zero red, a chain stamp for the tip".into())
     }
 
     /// T5: a pure read of the chain log and the lock.

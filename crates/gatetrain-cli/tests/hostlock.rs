@@ -71,14 +71,15 @@ fn launch_starts_the_real_holder_which_holds_runs_the_chain_and_releases() {
 }
 
 #[test]
-fn admission_refuses_proof_on_a_held_lock_and_light_still_passes() {
+fn admission_refuses_proof_and_light_on_a_held_lock() {
     let d = tempfile::tempdir().unwrap();
     let a = MemoryAdmission::new(d.path().join("host.lock"), d.path().join("g.db"), None, vec![]);
     assert_eq!(a.admit("proof", "b").unwrap(), None);
     let Acquire::Got(held) = hold::try_acquire(&a.lock, "other").unwrap() else { panic!() };
     let why = a.admit("proof", "b").unwrap().expect("refused");
     assert!(why.contains("other"), "{why}");
-    assert_eq!(a.admit("light", "b").unwrap(), None);
+    // F6 (engine-v2 E5): a light run no longer starts on a host that is proving
+    assert!(a.admit("light", "b").unwrap().expect("refused").contains("proving"));
     held.release().unwrap();
 }
 
@@ -91,4 +92,31 @@ fn admission_applies_the_memory_rule_to_the_chain_steps() {
     assert_eq!(mk(&["lint"]).admit("proof", "b").unwrap(), None, "4 GB fits in 6 GB");
     let why = mk(&["lint", "test"]).admit("proof", "b").unwrap().expect("8 GB does not fit in 6 GB");
     assert!(why.contains("REFUSED"), "{why}");
+}
+
+#[test]
+fn a_light_run_is_refused_on_a_host_whose_proof_lock_is_held_unless_the_host_says_otherwise() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = MemoryAdmission::new(d.path().join("host.lock"), d.path().join("g.db"), None, vec![]);
+    assert_eq!(a.admit_rule("light", "b").unwrap(), None, "a free host admits a light run");
+    let Acquire::Got(held) = hold::try_acquire(&a.lock, "proof-run").unwrap() else { panic!() };
+    let (rule, why) = a.admit_rule("light", "b").unwrap().expect("refused: the host is proving");
+    assert_eq!(rule, "host.refuse-proof-running");
+    assert!(why.contains("proof-run"), "{why}");
+    a.light_while_proving = true;
+    assert_eq!(a.admit_rule("light", "b").unwrap(), None, "light_while_proving = true is the host's own word");
+    held.release().unwrap();
+}
+
+#[test]
+fn a_light_run_is_admitted_on_the_steps_of_the_preflight_not_the_chain() {
+    let d = tempfile::tempdir().unwrap();
+    let hosts = d.path().join("hosts.toml");
+    std::fs::write(&hosts, "[[hosts]]\nname = \"host-a\"\nmemory_gb = 8\nmemory_reserve_gb = 2\nstep_default_gb = 4\n").unwrap();
+    let mut a = MemoryAdmission::new(d.path().join("host.lock"), d.path().join("g.db"), Some((hosts, "host-a".into())), vec!["lint".into(), "test".into()]);
+    assert!(a.admit("proof", "b").unwrap().is_some(), "8 GB of chain steps do not fit in 6 GB");
+    assert!(a.admit("light", "b").unwrap().is_some(), "without the pre-flight's own steps the chain's are used");
+    a.preflight_steps = vec!["lint".into()];
+    assert_eq!(a.admit("light", "b").unwrap(), None, "4 GB of pre-flight steps fit");
+    assert!(a.admit("proof", "b").unwrap().is_some(), "the proof is still judged on the chain's steps");
 }

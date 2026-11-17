@@ -1423,3 +1423,349 @@ fn the_evidence_file_leaves_out_results_the_proof_could_not_accept() {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&req.command[2]).unwrap()).unwrap();
     assert_eq!(v["results"].as_array().unwrap().len(), 0, "{v}");
 }
+
+// ============================================================ E5: the pre-flight as a launched run, and the pipelining (engine-v2 section 8)
+
+impl Fx {
+    /// `[preflight] chain_command`: the pre-flight is launched under the holder and observed (state `preflighting`).
+    fn launched_preflight(&mut self) {
+        let dir = self.root().join("pfstamps");
+        std::fs::create_dir_all(&dir).unwrap();
+        let steps = self.root().join("pf-steps.toml");
+        std::fs::write(&steps, "[[step]]\nname = \"a\"\n").unwrap();
+        self.cfg.preflight_chain_command = vec!["fake-pf".into(), "{sha}".into(), "{run}".into()];
+        self.cfg.preflight_stamp_dir = Some(fwd(&dir));
+        self.cfg.preflight_steps_file = Some(fwd(&steps));
+    }
+
+    fn pf_digest(&self) -> String {
+        sha256_hex(&std::fs::read(self.cfg.preflight_steps_file.as_ref().unwrap()).unwrap())
+    }
+
+    fn pf_stamp_path(&self, sha: &str) -> PathBuf {
+        PathBuf::from(self.cfg.preflight_stamp_dir.as_ref().unwrap()).join(format!("stamp-{sha}.json"))
+    }
+
+    fn pf_stamp(&self, sha: &str) {
+        let v = serde_json::json!({"v": 1, "kind": "preflight", "mode": "preflight", "sha": sha, "digest": self.pf_digest(), "steps": [{"name": "a", "rc": 0}]});
+        std::fs::write(self.pf_stamp_path(sha), serde_json::to_string(&v).unwrap()).unwrap();
+    }
+
+    fn pf_log(&self, mode: &str, body: &str) {
+        let req = self.lock.launches.lock().unwrap().last().unwrap().clone();
+        std::fs::write(&req.log, format!("branch b at {} on h\nCHAIN_MODE {mode}\n{body}", req.sha)).unwrap();
+    }
+
+    fn get_settled(&mut self, id: &str) {
+        self.open(id);
+        self.step(id, "stacked");
+        self.step(id, "settled");
+    }
+
+    fn launches(&self) -> usize {
+        self.lock.launches.lock().unwrap().len()
+    }
+}
+
+#[test]
+fn the_preflight_is_launched_as_a_run_and_the_batch_is_preflighting_until_its_stamp_is_read() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    assert!(!fx.counter.exists(), "the blocking [preflight] command did not run");
+    let req = fx.lock.launches.lock().unwrap()[0].clone();
+    assert_eq!(req.role, "light");
+    assert_eq!(req.run_id, "b1-f1");
+    assert_eq!(req.command[0], "fake-pf");
+    assert_eq!(req.command[1], req.sha);
+    assert_eq!(req.command[2], "b1-f1");
+    assert!(req.env.iter().any(|(k, v)| k == "GATETRAIN_RUN_ID" && v == "b1-f1"));
+    // a live run: wait, no transition
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Waiting(_)));
+    assert_eq!(fx.state("b1"), "preflighting");
+    // the run ends green with its stamp: preflighted, and the proof may start
+    fx.pf_log("preflight", GREEN);
+    fx.pf_stamp(&req.sha);
+    fx.step("b1", "preflighted");
+    fx.step("b1", "proving");
+    let proof = fx.lock.launches.lock().unwrap()[1].clone();
+    assert_eq!((proof.role.as_str(), proof.run_id.as_str()), ("proof", "b1-p1"));
+}
+
+#[test]
+fn a_crash_after_the_preflight_launch_resumes_by_adopting_the_run() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    fx.crash = Some("T3".into());
+    assert!(fx.adv("b1").is_err());
+    fx.crash = None;
+    assert_eq!(fx.launches(), 1);
+    fx.step("b1", "preflighting");
+    assert_eq!(fx.launches(), 1, "the run was adopted, not started again");
+}
+
+#[test]
+fn a_red_preflight_is_a_state_of_its_own_and_is_not_relaunched() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    fx.pf_log("preflight", RED_LOG);
+    fx.step("b1", "preflight-red");
+    let (rule, _) = fx.refused("b1");
+    assert_eq!(rule, "preflight.red");
+    assert_eq!(fx.launches(), 1);
+    assert_eq!(fx.state("b1"), "preflight-red");
+}
+
+#[test]
+fn a_preflight_that_stopped_without_gates_done_returns_get_settled_and_the_relaunch_is_a_new_run() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    fx.lock.named.lock().unwrap().clear();
+    fx.step("b1", "settled");
+    fx.step("b1", "preflighting");
+    assert_eq!(fx.lock.launches.lock().unwrap()[1].run_id, "b1-f2");
+}
+
+#[test]
+fn a_preflight_log_that_is_not_in_preflight_mode_is_refused() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    fx.pf_log("full", GREEN);
+    let (rule, _) = fx.refused("b1");
+    assert_eq!(rule, "floor.preflight-mode");
+    assert_eq!(fx.state("b1"), "preflighting");
+}
+
+#[test]
+fn a_green_preflight_without_a_stamp_for_the_tip_with_the_steps_file_digest_is_refused() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    let sha = fx.lock.launches.lock().unwrap()[0].sha.clone();
+    fx.pf_log("preflight", GREEN);
+    // no stamp at all
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "preflight.stamp-for-sha");
+    assert!(because.contains("no chain stamp"), "{because}");
+    // a stamp of another steps file
+    let v = serde_json::json!({"sha": sha, "digest": "0".repeat(64), "steps": []});
+    std::fs::write(fx.pf_stamp_path(&sha), v.to_string()).unwrap();
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "preflight.stamp-for-sha");
+    assert!(because.contains("steps file"), "{because}");
+    // a stamp for another sha
+    std::fs::remove_file(fx.pf_stamp_path(&sha)).unwrap();
+    fx.pf_stamp(&"2".repeat(40));
+    assert_eq!(fx.refused("b1").0, "preflight.stamp-for-sha");
+    // the same fixture without the violation passes
+    fx.pf_stamp(&sha);
+    fx.step("b1", "preflighted");
+}
+
+#[test]
+fn the_proof_launch_needs_the_chain_stamp_when_the_preflight_is_launched() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    let sha = fx.lock.launches.lock().unwrap()[0].sha.clone();
+    fx.pf_log("preflight", GREEN);
+    fx.pf_stamp(&sha);
+    fx.step("b1", "preflighted");
+    std::fs::remove_file(fx.pf_stamp_path(&sha)).unwrap();
+    let (rule, _) = fx.refused("b1");
+    assert_eq!(rule, "preflight.stamp-for-sha");
+    assert_eq!(fx.launches(), 1);
+}
+
+#[test]
+fn a_preflight_run_on_a_proving_host_is_refused_with_the_hold_exit_code() {
+    let o = Outcome::Refused { rule: "host.refuse-proof-running".into(), because: "x".into(), decision: 1 };
+    assert_eq!(o.exit_code(), 75);
+}
+
+#[test]
+fn the_launched_preflight_is_admitted_as_light() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    let deny = DenyRole("light", "the host is proving");
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &deny, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into(), crash_after_effect: None };
+    assert!(matches!(e.advance("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "host.admission"));
+    assert_eq!(fx.launches(), 0);
+}
+
+// ---- pipelining
+
+impl Fx {
+    fn lane3(&self) {
+        g(&self.repo, &["switch", "-q", "-c", "lane3", "main"]);
+        std::fs::write(self.repo.join("three.txt"), "x\n").unwrap();
+        g(&self.repo, &["add", "--", "three.txt"]);
+        g(&self.repo, &["commit", "-q", "-m", "feat: lane3"]);
+        g(&self.repo, &["switch", "-q", "main"]);
+    }
+
+    fn wt(&self, name: &str) -> PathBuf {
+        let p = self.root().join(name);
+        g(&self.repo, &["worktree", "add", "-q", "--detach", &fwd(&p), "main"]);
+        p
+    }
+
+    fn open_on(&mut self, id: &str, base: &str, wd: &Path, lanes: &[&str]) -> gatetrain_core::Result<()> {
+        let adm = AllowAll;
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        e.new_batch(id, base, wd, &lanes.iter().map(|l| l.to_string()).collect::<Vec<_>>())
+    }
+
+    fn restack(&mut self, id: &str) -> Outcome {
+        let adm = AllowAll;
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        e.restack(id).unwrap()
+    }
+
+    /// b1 on the main checkout, b2 on b1's tip in its own worktree, both preflighted.
+    fn two_preflighted(&mut self) -> PathBuf {
+        // no regeneration: the second checkout would rewrite a file the first already committed (line-ending noise on Windows)
+        self.cfg.regen_command = vec![];
+        self.lane3();
+        let wd2 = self.wt("wt2");
+        self.open("b1");
+        for s in ["stacked", "settled", "preflighted"] {
+            self.step("b1", s);
+        }
+        self.open_on("b2", "b1", &wd2, &["lane3"]).unwrap();
+        for s in ["stacked", "settled", "preflighted"] {
+            self.step("b2", s);
+        }
+        wd2
+    }
+
+    fn prove_b1(&mut self) {
+        self.step("b1", "proving");
+        self.write_log(GREEN);
+        self.step("b1", "proven");
+    }
+}
+
+#[test]
+fn a_batch_may_be_stacked_only_on_a_batch_that_is_preflighted_proving_or_proven() {
+    let mut fx = Fx::new("");
+    fx.cfg.regen_command = vec![];
+    fx.lane3();
+    let wd2 = fx.wt("wt2");
+    fx.open("b1");
+    let e = fx.open_on("b2", "b1", &wd2, &["lane3"]).unwrap_err().to_string();
+    assert!(e.contains("pipeline.base-state"), "{e}");
+    for s in ["stacked", "settled", "preflighted"] {
+        fx.step("b1", s);
+    }
+    fx.open_on("b2", "b1", &wd2, &["lane3"]).unwrap();
+    let tip = g(&fx.repo, &["rev-parse", "batch/b1/s1"]);
+    assert_eq!(status_fact(&mut fx, "b2", &["base_sha"]), tip.as_str());
+    assert_eq!(status_fact(&mut fx, "b2", &["base_batch"]), "b1");
+    // the lane was cut from main, below the base batch's tip: stacking it on that tip still works
+    fx.step("b2", "stacked");
+    assert!(g(&wd2, &["log", "--format=%s", &format!("{tip}..HEAD")]).contains("feat: lane3"));
+}
+
+#[test]
+fn a_batch_on_an_unproven_base_does_not_prove_unless_the_policy_allows_it() {
+    let mut fx = Fx::new("");
+    fx.two_preflighted();
+    fx.step("b1", "proving");
+    let (rule, because) = fx.refused("b2");
+    assert_eq!(rule, "pipeline.base-unproven");
+    assert!(because.contains("b1"), "{because}");
+    assert_eq!(fx.launches(), 1);
+    fx.cfg.prove_ahead = true;
+    fx.step("b2", "proving");
+    assert_eq!(fx.launches(), 2);
+}
+
+#[test]
+fn the_next_batch_proves_at_once_after_the_base_is_fast_forwarded() {
+    let mut fx = Fx::new("");
+    fx.two_preflighted();
+    fx.prove_b1();
+    fx.step("b1", "merged");
+    fx.step("b2", "proving");
+    let req = fx.lock.launches.lock().unwrap()[1].clone();
+    assert_eq!(req.sha, g(&fx.repo, &["rev-parse", "batch/b2/s1"]));
+    fx.write_log(GREEN);
+    fx.step("b2", "proven");
+    fx.step("b2", "merged");
+    assert_eq!(g(&fx.repo, &["rev-parse", "main"]), g(&fx.repo, &["rev-parse", "batch/b2/s1"]));
+}
+
+#[test]
+fn a_batch_never_merges_before_its_base_is_on_the_protected_branch() {
+    let mut fx = Fx::new("");
+    fx.two_preflighted();
+    fx.prove_b1();
+    fx.step("b2", "proving");
+    fx.write_log(GREEN);
+    fx.step("b2", "proven");
+    // main would fast-forward to b2's tip and carry b1's commits with it: refused
+    let (rule, because) = fx.refused("b2");
+    assert_eq!(rule, "pipeline.base-not-merged");
+    assert!(because.contains("b1"), "{because}");
+    assert_ne!(g(&fx.repo, &["rev-parse", "main"]), g(&fx.repo, &["rev-parse", "batch/b2/s1"]));
+    fx.step("b1", "merged");
+    fx.step("b2", "merged");
+}
+
+#[test]
+fn when_the_base_tip_moves_the_next_batch_is_restacked_on_the_new_tip() {
+    let mut fx = Fx::new("");
+    fx.two_preflighted();
+    fx.prove_b1();
+    // a patch on the base batch moves its tip
+    std::fs::write(fx.repo.join("patch.txt"), "p\n").unwrap();
+    g(&fx.repo, &["add", "--", "patch.txt"]);
+    g(&fx.repo, &["commit", "-q", "-m", "fix: patch"]);
+    let new_tip = g(&fx.repo, &["rev-parse", "HEAD"]);
+    let (rule, because) = fx.refused("b2");
+    assert_eq!(rule, "pipeline.base-moved");
+    assert!(because.contains("restack"), "{because}");
+    let o = fx.restack("b2");
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "open"), "{o:?}");
+    fx.step("b2", "stacked");
+    assert_eq!(status_fact(&mut fx, "b2", &["base_sha"]), new_tip.as_str());
+    assert_eq!(status_fact(&mut fx, "b2", &["branch"]), "batch/b2/s2");
+    assert!(g(&fx.repo, &["log", "--format=%s", &format!("{new_tip}..batch/b2/s2")]).contains("feat: lane3"));
+}
+
+#[test]
+fn a_proving_batch_is_not_restacked() {
+    let mut fx = Fx::new("");
+    fx.two_preflighted();
+    fx.prove_b1();
+    fx.step("b2", "proving");
+    let o = fx.restack("b2");
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "pipeline.restack-state"), "{o:?}");
+    assert_eq!(fx.state("b2"), "proving");
+    // a batch that is not stacked on another is not restacked either
+    let o = fx.restack("b1");
+    assert!(matches!(&o, Outcome::Idle(_)), "{o:?}");
+}
+
+#[test]
+fn the_depth_of_the_pipeline_is_limited() {
+    let mut fx = Fx::new("");
+    fx.two_preflighted();
+    let wd3 = fx.wt("wt3");
+    let e = fx.open_on("b3", "b2", &wd3, &["lane2"]).unwrap_err().to_string();
+    assert!(e.contains("pipeline.max-ahead"), "{e}");
+    fx.cfg.max_ahead = 2;
+    fx.open_on("b3", "b2", &wd3, &["lane2"]).unwrap();
+}

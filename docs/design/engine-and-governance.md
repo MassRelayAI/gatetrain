@@ -516,6 +516,16 @@ Rules added by ADR 002 are marked.
 | `preflight.stamp-for-sha` | T4, T6a | no green preflight stamp for the tip | preflight the tip |
 | `retry.causes-open` (ADR 002) | T6a | the last proof run was red, the tip is still the tested sha, and no cause note covers that run | commit a fix, or `note_cause` `flake` or `infra` with a reason |
 | `budget.full-runs` (ADR 002) | T4, T6a | `[chain] max_full_runs_per_batch` full runs are already used | a person raises the budget, or abandons the batch |
+| `proof.cached-unverified` (engine-v2 E3) | T5 | a `STEP_CACHED` step fails a condition of engine-v2 7.2; the `why` names it: `evidence-sha`, `-key`, `-class`, `-stamp`, `-partial`, `-stale`, `-undeclared`, `-unproven`, `-missing`, or `policy-never` (`[merge] allow_cached_steps = "never"`) | run the step in the proof, or fix what the `why` names |
+| `floor.preflight-mode` (engine-v2 E5) | T3o | the launched pre-flight's log is not `CHAIN_MODE preflight` | run the pre-flight with `--mode preflight` |
+| `preflight.red` (engine-v2 E5) | `preflight-red` | the launched pre-flight run has a red step | commit a fix and restack |
+| `host.refuse-proof-running` (engine-v2 E5, exit 75) | T3 | a light run is asked of a host whose proof lock is held, and the host has not set `light_while_proving = true` | wait for the proof, or use another light host |
+| `pipeline.base-state` (engine-v2 E5) | `batch new --base <batch>` | the base batch is not `preflighted`, `proving` or `proven` | wait, or stack on the protected branch |
+| `pipeline.max-ahead` (engine-v2 E5) | `batch new --base <batch>` | more than `[pipeline] max_ahead` (default 1) unmerged batches would sit below the new one | merge the batch below first |
+| `pipeline.base-unproven` (engine-v2 E5) | T4, T6a | the base batch is not yet `proven` and `[pipeline] prove_ahead` is off | wait for the base's proof |
+| `pipeline.base-moved` (engine-v2 E5) | T4, T6a | the base batch's tip is no longer the base this batch was stacked on | `batch restack` |
+| `pipeline.restack-state` (engine-v2 E5) | `restack` | the batch is not stacked, settled or preflighted (a run is live or the batch is past the proof) | stop the run first |
+| `pipeline.base-not-merged` (engine-v2 E5) | T7 | the base batch's tip is not on the protected branch; a fast-forward to this tip would merge its unproven commits | merge the base batch first |
 
 A cause note is a decision-log entry of kind `override`, rule `retry.cause-noted`, evidence `{run_id, class, tested_sha}`. It covers
 that run only: a second red run needs its own fix or note.

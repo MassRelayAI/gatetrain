@@ -81,11 +81,15 @@ pub struct MemoryAdmission {
     pub repo_root: Option<PathBuf>,
     /// Run `doctor` for the host (needs `hosts`).
     pub doctor: bool,
+    /// The steps of the launched pre-flight (`[preflight] steps`): a light run is admitted on these, not on the chain's. Empty = the chain's.
+    pub preflight_steps: Vec<String>,
+    /// The host's own word that a light run may start while a proof holds its lock (host key `light_while_proving`, default false).
+    pub light_while_proving: bool,
 }
 
 impl MemoryAdmission {
     pub fn new(lock: PathBuf, db: PathBuf, hosts: Option<(PathBuf, String)>, chain_steps: Vec<String>) -> MemoryAdmission {
-        MemoryAdmission { lock, db, hosts, chain_steps, target_dirs: vec![], repo_root: None, doctor: false }
+        MemoryAdmission { lock, db, hosts, chain_steps, target_dirs: vec![], repo_root: None, doctor: false, preflight_steps: vec![], light_while_proving: false }
     }
 }
 
@@ -105,8 +109,10 @@ impl Admission for MemoryAdmission {
         if let Some((hosts, host)) = &self.hosts {
             let text = std::fs::read_to_string(hosts)?;
             let m = MemoryModel::from_hosts_toml(&text, host)?;
-            // no step list means the chain as one `(chain)` step, admitted on its own recorded peak (as `hold` does)
-            let steps: Vec<String> = if self.chain_steps.is_empty() { vec!["(chain)".to_string()] } else { self.chain_steps.clone() };
+            // no step list means the chain as one `(chain)` step, admitted on its own recorded peak (as `hold` does); a light run is
+            // admitted on the pre-flight's own steps when they are known, not on the chain's
+            let own = if role == "light" && !self.preflight_steps.is_empty() { &self.preflight_steps } else { &self.chain_steps };
+            let steps: Vec<String> = if own.is_empty() { vec!["(chain)".to_string()] } else { own.clone() };
             let ad = memory::admit(&m, &steps, &hist);
             if !ad.admitted {
                 return refuse("host.refuse-memory", ad.rule);
@@ -126,6 +132,12 @@ impl Admission for MemoryAdmission {
         if role == "proof" {
             if let State::Held(i) = hold::status(&self.lock)? {
                 return refuse("host.refuse", format!("host lock held by {} (pid {}) since {}", i.run_id, i.pid, i.started_at));
+            }
+        }
+        // a pre-flight, a lane run or a probe must not slow a proof down (lesson L26); the host may say otherwise (`light_while_proving`)
+        if role == "light" && !self.light_while_proving {
+            if let State::Held(i) = hold::status(&self.lock)? {
+                return refuse("host.refuse-proof-running", format!("the host is proving: lock held by {} (pid {}) since {}; a light run waits (host key light_while_proving = true allows it)", i.run_id, i.pid, i.started_at));
             }
         }
         if let (true, Some((hosts, host))) = (self.doctor, &self.hosts) {
