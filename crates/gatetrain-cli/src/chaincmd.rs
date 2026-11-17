@@ -41,6 +41,10 @@ pub struct ChainArgs {
     /// at the end, write this run (its steps, shards, skips and stamp) into this ledger file; it is created or migrated forward
     #[arg(long)]
     db: Option<PathBuf>,
+    /// sample the host (load, CPU, I/O wait, disk busy, free memory) every N seconds into <out>/samples.jsonl while the run is alive; 0 = off.
+    /// Off when a `hold` already samples (GATETRAIN_SAMPLED). With --db the samples are ingested with the run
+    #[arg(long, default_value_t = 10)]
+    samples: u64,
     /// the run's id in the ledger (default: chain-<UTC time>-<commit>)
     #[arg(long)]
     run_id: Option<String>,
@@ -75,7 +79,8 @@ pub fn run(a: ChainArgs) -> ExitCode {
         return ExitCode::from(2);
     }
     let (db, run_id) = (a.db, a.run_id);
-    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host };
+    let out_dir = a.out.clone();
+    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples } };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();
         let _ = writeln!(so, "{l}");
@@ -91,7 +96,15 @@ pub fn run(a: ChainArgs) -> ExitCode {
             if let Some(db) = &db {
                 let rid = run_id.unwrap_or_else(|| default_run_id(&r.record));
                 match crate::cmd_runs::open_for_write(&db.to_string_lossy()).and_then(|l| Ok(l.record_chain_run(&rid, &r.record)?)) {
-                    Ok(()) => eprintln!("chain: ledger {}: run {rid}", db.display()),
+                    Ok(()) => {
+                        eprintln!("chain: ledger {}: run {rid}", db.display());
+                        // the samples file of this run, if the sampler ran: rows that name no run take this run's id
+                        if let Ok(text) = std::fs::read_to_string(out_dir.join("samples.jsonl")) {
+                            if let Err(e) = crate::cmd_runs::open_for_write(&db.to_string_lossy()).and_then(|l| Ok(l.record_samples_for(&text, Some(&rid))?)) {
+                                eprintln!("chain: ledger {}: the samples were not recorded: {e:#}", db.display());
+                            }
+                        }
+                    }
                     Err(e) => eprintln!("chain: ledger {}: the run was not recorded: {e:#}", db.display()),
                 }
             }

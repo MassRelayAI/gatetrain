@@ -481,3 +481,47 @@ fn report_counts_a_sharded_steps_slots_from_the_ledger_and_from_the_log() {
         assert!((2.5..=3.01).contains(&avg), "three shards at once are 3 slots, not 1: {line}");
     }
 }
+
+// ---------------------------------------------------------------- E7: the sampler inside chain
+
+fn sample_lines(out: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(out.join("samples.jsonl")).map(|t| t.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()).unwrap_or_default()
+}
+
+#[test]
+fn chain_samples_the_host_into_samples_jsonl_while_a_run_is_alive() {
+    let (run, _r, _w) = chain(&step("slow", "fast", "", &["sleep", "3.2"]), &["--samples", "1", "--host", "samp-host"]);
+    assert_eq!(code(&run), 0, "{}{}", run.stdout, run.stderr);
+    let v = sample_lines(&run.out);
+    let rows: Vec<&serde_json::Value> = v.iter().filter(|x| x.get("host").is_some()).collect();
+    assert!(rows.len() >= 2, "a 3.2 s step sampled every second leaves samples: {v:?}");
+    assert!(rows.iter().all(|x| x["host"] == "samp-host" && x["running_steps"].as_i64() >= Some(1) && x["at"].is_string()), "{rows:?}");
+    // the first line names what this platform does not give, and why
+    assert!(v[0].get("unknown").is_some() && v[0].get("host").is_none(), "{:?}", v[0]);
+    assert!(rows.iter().any(|x| x["mem_free_mb"].is_number()), "free memory is read on every platform: {rows:?}");
+    // the log itself is unchanged by sampling: no new marker, the same shape
+    assert!(!run.stdout.contains("samples"), "{}", run.stdout);
+}
+
+#[test]
+fn samples_zero_and_a_holder_that_already_samples_leave_no_file() {
+    let (run, _r, _w) = chain(&step("slow", "fast", "", &["sleep", "1.5"]), &["--samples", "0"]);
+    assert!(!run.out.join("samples.jsonl").exists());
+    let (r, w) = (repo(), tempfile::tempdir().unwrap());
+    let run = chain_in(r.path(), w.path(), &step("slow", "fast", "", &["sleep", "1.5"]), &["--samples", "1"], &[("GATETRAIN_SAMPLED", Some("1"))]);
+    assert!(!run.out.join("samples.jsonl").exists(), "the holder samples: chain does not");
+}
+
+#[test]
+fn chain_with_db_ingests_its_samples_with_the_run_id_and_leaves_no_process_behind() {
+    let w = tempfile::tempdir().unwrap();
+    let db = w.path().join("l.db");
+    let r = repo();
+    let run = chain_in(r.path(), w.path(), &step("slow", "fast", "", &["sleep", "2.5"]), &["--samples", "1", "--host", "h1", "--db", db.to_str().unwrap(), "--run-id", "samp-1"], &[]);
+    assert_eq!(code(&run), 0, "{}{}", run.stdout, run.stderr);
+    assert!(q(&db, "select count(*) from host_samples where run_id='samp-1' and host='h1'").parse::<i64>().unwrap() >= 1, "{}", run.stderr);
+    assert_eq!(q(&db, "select count(*) from host_samples where run_id is null or running_steps is null"), "0");
+    // the process ended with its run: chain is not a daemon
+    let t = std::time::Instant::now();
+    assert!(t.elapsed().as_secs() < 5 && run.o.status.success());
+}

@@ -486,6 +486,11 @@ impl Ledger {
     /// Ingest the lines of a `samples.jsonl` (E7): the `{"unknown": ..}` header is skipped. A line whose host and time are already stored
     /// is skipped (the file may be ingested twice). Returns how many rows were written.
     pub fn record_samples(&self, text: &str) -> Result<usize> {
+        self.record_samples_for(text, None)
+    }
+
+    /// Like [`Ledger::record_samples`]; a line that names no run takes `run_id`.
+    pub fn record_samples_for(&self, text: &str, run_id: Option<&str>) -> Result<usize> {
         self.require_current()?;
         let tx = self.conn.unchecked_transaction()?;
         let mut n = 0;
@@ -498,7 +503,7 @@ impl Ledger {
             let f = |k: &str| v[k].as_f64();
             let added = tx.execute(
                 "INSERT OR IGNORE INTO host_samples(host,at,run_id,running_steps,load_1m,cpu_busy_pct,iowait_pct,mem_free_mb,stall_io_some,stall_io_full,stall_cpu_some,stall_mem_some) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![host, at, v["run_id"].as_str(), v["running_steps"].as_i64(), f("load_1m"), f("cpu_busy_pct"), f("iowait_pct"), f("mem_free_mb"), f("stall_io_some"), f("stall_io_full"), f("stall_cpu_some"), f("stall_mem_some")],
+                params![host, at, v["run_id"].as_str().filter(|r| !r.is_empty()).or(run_id), v["running_steps"].as_i64(), f("load_1m"), f("cpu_busy_pct"), f("iowait_pct"), f("mem_free_mb"), f("stall_io_some"), f("stall_io_full"), f("stall_cpu_some"), f("stall_mem_some")],
             )?;
             if added > 0 {
                 n += 1;

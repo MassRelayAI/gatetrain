@@ -72,6 +72,46 @@ pub struct Opts {
     pub mode: String,
     /// the host's name in the log, the stamp and the ledger; None = the environment, then the OS ([`host_name`])
     pub host: Option<String>,
+    /// sample the host every this many seconds into `<out>/samples.jsonl` (engine v2 E7); 0 = off
+    pub samples: u64,
+}
+
+/// The sampler of a run (E7): one JSON line per interval, appended to `<out>/samples.jsonl`; no thread, no daemon. It is driven by the
+/// loop that already waits for a step to end, and ends with the run.
+struct SampleSink {
+    s: crate::hw::Sampler,
+    last: Instant,
+    every: Duration,
+    file: PathBuf,
+    host: String,
+    wrote_header: bool,
+}
+
+impl SampleSink {
+    fn new(out: &Path, host: &str, secs: u64) -> SampleSink {
+        let mut s = crate::hw::Sampler::host();
+        s.sample(0.0); // the baseline the first delta is taken against
+        SampleSink { s, last: Instant::now(), every: Duration::from_secs(secs), file: out.join("samples.jsonl"), host: host.to_string(), wrote_header: false }
+    }
+
+    fn tick(&mut self, running_steps: usize) {
+        use std::io::Write;
+        let elapsed = self.last.elapsed().as_secs_f64();
+        self.last = Instant::now();
+        let r = self.s.sample(elapsed);
+        let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.file) else { return };
+        if !self.wrote_header {
+            let _ = writeln!(f, "{}", r.unknown_json_line());
+            self.wrote_header = true;
+        }
+        let _ = writeln!(f, "{}", r.to_json_line(&self.host, "", running_steps, &Ts::now_utc().iso()));
+    }
+
+    fn maybe(&mut self, running_steps: usize) {
+        if self.last.elapsed() >= self.every {
+            self.tick(running_steps);
+        }
+    }
 }
 
 /// One logical step of a finished run, as the ledger keeps it.
@@ -445,6 +485,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     say(&format!("CHAIN_OUT {}", out_abs.to_string_lossy().trim_start_matches(r"\\?\")));
 
     let n_steps = plan.steps.len();
+    let mut sink = (o.samples > 0).then(|| SampleSink::new(&o.out, &host, o.samples));
     let mut state = vec![St::Pending; n_steps];
     let mut times: Vec<(usize, i64, f64)> = Vec::new();
     let mut reds: Vec<(String, i64)> = Vec::new();
@@ -586,7 +627,21 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             if running == 0 {
                 break;
             }
-            let d = rx.recv_timeout(Duration::from_secs(3600 * 24 * 366)).map_err(|e| format!("chain: lost a worker: {e}"))?;
+            let wait = sink.as_ref().map_or(Duration::from_secs(3600 * 24 * 366), |s| s.every);
+            let d = loop {
+                match rx.recv_timeout(wait) {
+                    Ok(d) => break d,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Some(s) = sink.as_mut() {
+                            s.tick(state.iter().filter(|x| **x == St::Running).count());
+                        }
+                    }
+                    Err(e) => return Err(format!("chain: lost a worker: {e}")),
+                }
+            };
+            if let Some(s) = sink.as_mut() {
+                s.maybe(state.iter().filter(|x| **x == St::Running).count());
+            }
             running -= 1;
             let step = &plan.steps[d.idx];
             let name = &step.name;
