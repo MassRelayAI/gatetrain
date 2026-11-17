@@ -193,3 +193,28 @@ fn minor3_an_archive_tag_that_lands_on_another_commit_keeps_the_branch() {
     assert!(sim.s().branches.contains(&"line/solo".to_string()));
     assert!(sim.s().deleted_branches.is_empty(), "{:?}", sim.s().deleted_branches);
 }
+
+#[test]
+fn minor6_a_root_that_holds_the_main_checkout_owns_nothing_in_production() {
+    // /repo holds /repo/main: a worktree below it is not owned through that root
+    let (sim, h, t) = setup(json!({}));
+    let ops = Ops::new(&h, &sim, &t);
+    let mut s = set(&[("worktree", "/repo/wt/lane-a")], &["line/lane-a"]);
+    s.roots = vec!["/repo".into()];
+    let rep = run_close(&s, &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned" && r.why.contains("holds the main checkout")), "{rep:?}");
+    assert!(sim.s().has("/repo/wt/lane-a"));
+}
+
+#[test]
+fn ma2_a_link_to_a_shared_chain_target_is_not_owned_in_production() {
+    // the recorded folder is a link whose target is the shared [chain] target_dirs folder
+    let (sim, h, t) = setup(json!({}));
+    sim.s().link("/build/lnk", "/build/chain");
+    let ops = Ops::new(&h, &sim, &t);
+    let mut s = set(&[("target", "/build/lnk")], &[]);
+    s.shared_targets = vec!["/build/chain".into()];
+    let rep = run_close(&s, &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned" && r.why.contains("shared")), "{rep:?}");
+    assert!(sim.s().has("/build/lnk") && sim.s().has("/build/chain/debug/big.o"));
+}
