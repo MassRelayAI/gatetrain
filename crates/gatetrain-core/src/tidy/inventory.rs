@@ -478,6 +478,9 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         let running: std::collections::HashSet<String> = splitlines(&rn.out).iter().map(|l| strip(l).to_string()).collect();
         if ex.ok() {
             for n in splitlines(&ex.out).iter().map(|l| strip(l).to_string()).filter(|l| l.starts_with(prefix)) {
+                if cfg.protect_containers.iter().any(|p| n.starts_with(p.as_str())) {
+                    continue; // a protected prefix (a reference stack): never inventoried, never planned
+                }
                 inv.containers.push(n.clone());
                 if !running.contains(&n) {
                     inv.items.push(Item::new("containers", "rm-container", &n, Some(0), "exited throwaway container").ruled("exited-container"));

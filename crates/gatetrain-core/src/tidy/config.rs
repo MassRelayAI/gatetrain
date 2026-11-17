@@ -53,6 +53,8 @@ pub struct TidyCfg {
     pub trash_dir: Option<String>,
     pub trash_days: f64,
     pub container_prefix: Option<String>,
+    /// container-name prefixes that are never planned or removed, whatever `container_prefix` says (reference stacks)
+    pub protect_containers: Vec<String>,
     pub image_patterns: Vec<String>,
     /// 0 = never touch the docker build cache
     pub cache_days: f64,
@@ -96,6 +98,7 @@ impl Default for TidyCfg {
             trash_dir: None,
             trash_days: 7.0,
             container_prefix: None,
+            protect_containers: vec![],
             image_patterns: vec![],
             cache_days: 0.0,
             evidence_dirs: vec![],
@@ -114,9 +117,9 @@ impl Default for TidyCfg {
     }
 }
 
-const KNOWN: [&str; 30] = [
+const KNOWN: [&str; 31] = [
     "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_patterns", "item_budget_s", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
-    "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "protect", "remove_timeout_s", "root_checkout", "scratch_dir",
+    "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "protect", "protect_containers", "remove_timeout_s", "root_checkout", "scratch_dir",
     "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_min_idle_days", "worktree_prefix",
 ];
 
@@ -185,6 +188,12 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             "orphan_targets" => t.orphan_targets = nonempty(k, v)?,
             "trash_dir" => t.trash_dir = Some(nonempty(k, v)?),
             "container_prefix" => t.container_prefix = Some(nonempty(k, v)?),
+            "protect_containers" => {
+                t.protect_containers = str_list(k, v)?;
+                if t.protect_containers.iter().any(|p| p.trim().is_empty()) {
+                    return err("tidy.protect_containers: an entry is empty; an empty prefix would protect every container".into());
+                }
+            }
             "log" => t.log = nonempty(k, v)?,
             "scratch_dir" => t.scratch_dir = Some(nonempty(k, v)?),
             "link_canary" => t.link_canary = Some(nonempty(k, v)?),

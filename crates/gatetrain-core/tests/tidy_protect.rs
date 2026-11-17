@@ -157,3 +157,29 @@ fn the_inventory_never_plans_an_item_without_a_rule() {
     assert!(!inv.items.is_empty());
     assert!(inv.items.iter().all(|i| !i.rule.is_empty()), "{:?}", inv.items.iter().filter(|i| i.rule.is_empty()).map(|i| i.key.clone()).collect::<Vec<_>>());
 }
+
+#[test]
+fn an_exited_container_under_a_protected_prefix_is_never_planned_or_removed() {
+    let sim = linux_sim();
+    let (_h, _t, inv) = gather_sim(&sim, merged(json!({})), false, 50.0);
+    assert_eq!(by_key(&inv.items, "gate-1").len(), 1, "an exited container under the prefix is planned when nothing protects it");
+    let protected = merged(json!({"protect_containers": ["gate-1"]}));
+    let (_h, _t, inv) = gather_sim(&sim, protected.clone(), false, 50.0);
+    assert!(by_key(&inv.items, "gate-1").is_empty(), "a protected prefix is never planned");
+    assert!(!inv.containers.contains(&"gate-1".to_string()));
+    // a plan item that slipped in (a stale plan) is still refused at apply time
+    let d = tempfile::tempdir().unwrap();
+    let log = d.path().join("l.jsonl");
+    let (h2, t2, mut inv2) = gather_sim(&sim, with_log(protected, &log), false, 50.0);
+    inv2.items.push(Item::new("containers", "rm-container", "gate-1", Some(0), "exited throwaway container").ruled("exited-container"));
+    let r = apply_plan_report(&h2, &sim, &t2, &inv2, &classes(&["containers"]), Some(NOW as f64), None, true);
+    assert!(r.is_err(), "the guard stops the apply");
+    assert!(sim.s().containers_exited.contains(&"gate-1".to_string()), "a protected container is left alone");
+}
+
+#[test]
+fn an_empty_protect_containers_entry_is_a_config_error() {
+    let sim = linux_sim();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gather_sim(&sim, merged(json!({"protect_containers": [""]})), false, 50.0)));
+    assert!(r.is_err(), "an empty prefix is refused");
+}

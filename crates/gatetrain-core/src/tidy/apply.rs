@@ -201,6 +201,9 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done>
             if split_ws(&o.out).contains(&it.key.as_str()) {
                 return guard(format!("container {} is running", it.key));
             }
+            if cfg.protect_containers.iter().any(|p| it.key.starts_with(p.as_str())) {
+                return guard(format!("container {} matches a protected prefix (protect_containers)", it.key));
+            }
             if !safe_container(&it.key) || !it.key.starts_with(cfg.container_prefix.as_deref().filter(|p| !p.is_empty()).unwrap_or("\0")) {
                 return guard(format!("container {} does not match the prefix", it.key));
             }
