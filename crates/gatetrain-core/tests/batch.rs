@@ -2377,3 +2377,33 @@ fn minor6_a_root_that_holds_the_main_checkout_owns_nothing() {
     assert!(!touched(&adm, TGT), "{:?}", adm.env.disposed.borrow());
     assert!(touched(&adm, TMP), "a path under another, sound root still goes");
 }
+
+fn engine<'a>(fx: &'a mut Fx, adm: &'a CloseAdm) -> Engine<'a> {
+    Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), crash_after_effect: None }
+}
+
+#[test]
+fn ma1_close_with_residue_tidies_nothing_when_close_tidy_is_off() {
+    let mut fx = live_fx();
+    fx.cfg.close_tidy = false;
+    let adm = CloseAdm::new(full_env());
+    let o = engine(&mut fx, &adm).close_with_residue("b1", "closing by hand").unwrap();
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
+    assert!(adm.env.disposed.borrow().is_empty(), "[close] tidy = false and close --with-residue removed {:?}", adm.env.disposed.borrow());
+    assert!(fx.rows("tidy.moved").is_empty());
+}
+
+#[test]
+fn ma1_close_with_residue_writes_a_row_for_everything_it_removed_and_refused() {
+    let mut fx = live_fx();
+    let mut env = full_env();
+    env.dirty.insert("/wt/lane1".into()); // the lane worktree is refused, so its branch stays with it
+    let adm = CloseAdm::new(env);
+    let o = engine(&mut fx, &adm).close_with_residue("b1", "the lane worktree is kept on purpose").unwrap();
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
+    let gone: Vec<String> = adm.env.disposed.borrow().iter().map(|(_, k)| k.clone()).collect();
+    assert_eq!(gone.len(), 4, "{gone:?}");
+    assert_eq!(fx.rows("tidy.moved").len(), gone.len(), "one tidy.moved row per removed item");
+    assert_eq!(fx.rows("tidy.uncommitted"), vec![("refusal".to_string(), "refused".to_string())]);
+    assert_eq!(fx.rows("tidy.in-use"), vec![("refusal".to_string(), "refused".to_string())]);
+}
