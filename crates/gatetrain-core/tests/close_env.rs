@@ -332,3 +332,12 @@ fn minor5_a_worktree_registered_under_a_linked_spelling_is_seen_inside_its_folde
     assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.not-owned" && r.why.contains("worktree")), "{rep:?}");
     assert!(sim.s().has("/build/wts/holder/wt1/src.rs"));
 }
+
+#[test]
+fn r4minor1_whether_a_folder_is_its_own_repository_unknown_is_unreadable() {
+    let (sim, h, t) = setup(json!({}));
+    sim.s().unknown_exists.push("/build/targets/lane-a/.git".into());
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("target", "/build/targets/lane-a")], &[]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.unreadable" && r.why.contains("repository")), "{rep:?}");
+}

@@ -202,16 +202,12 @@ fn a_plain_folder_inside_a_root_is_still_moved() {
 fn live_worktree(f: &Fx) -> std::path::PathBuf {
     let wt = f.build.join("wt-live");
     git(&f.main, &["worktree", "add", "-q", "-b", "line/live", &(fwd(&f.build) + "/wt-live")]);
-    write(wt.join(".gitignore"), "target/
-");
-    write(wt.join("src/a.rs"), "fn a() {}
-");
+    write(wt.join(".gitignore"), "target/\n");
+    write(wt.join("src/a.rs"), "fn a() {}\n");
     git(&wt, &["add", "."]);
     git(&wt, &["commit", "-q", "-m", "live work"]);
-    write(wt.join("src/a.rs"), "fn a() { /* not committed */ }
-");
-    write(wt.join("target/debug/x.o"), "obj
-");
+    write(wt.join("src/a.rs"), "fn a() { /* not committed */ }\n");
+    write(wt.join("target/debug/x.o"), "obj\n");
     age(&wt);
     wt
 }
@@ -335,8 +331,7 @@ fn bl3_a_clean_tracked_folder_of_a_worktree_is_not_moved() {
     // nothing uncommitted: `ls-files` alone shows it is the worktree's
     let f = fx();
     let wt = live_worktree(&f);
-    write(wt.join("docs/a.md"), "doc
-");
+    write(wt.join("docs/a.md"), "doc\n");
     git(&wt, &["add", "docs"]);
     git(&wt, &["commit", "-q", "-m", "docs"]);
     age(&wt);
@@ -350,8 +345,7 @@ fn bl3_a_folder_of_a_worktree_with_only_an_untracked_file_is_not_moved() {
     // nothing tracked: `status --porcelain` alone shows the work
     let f = fx();
     let wt = live_worktree(&f);
-    write(wt.join("notes/todo.txt"), "not yet added
-");
+    write(wt.join("notes/todo.txt"), "not yet added\n");
     age(&wt);
     let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/notes"), &[fwd(&f.build)]);
     assert!(wt.join("notes/todo.txt").exists(), "{rep:?}");
@@ -441,8 +435,12 @@ fn ma8_a_folder_inside_a_keep_paths_entry_is_protected_and_so_is_the_entry() {
     let f = fx();
     write(f.build.join("keep/sub/x.o"), "obj\n");
     age(&f.build);
-    let extra = json!({"keep_paths": [fwd(&f.build) + "/keep"]});
-    for k in ["/keep/sub", "/keep"] {
+    write(f.build.join("outer/keep/y.o"), "obj\n");
+    age(&f.build);
+    dir_link(&f.build.join("lnkk"), &f.build.join("keep"));
+    let extra = json!({"keep_paths": [fwd(&f.build) + "/keep", fwd(&f.build) + "/outer/keep"]});
+    // inside an entry, the entry itself, a folder that holds an entry, and a folder reached through a link into an entry
+    for k in ["/keep/sub", "/keep", "/outer", "/lnkk/sub"] {
         let rep = f.close_set(&[("target", fwd(&f.build) + k)], &[], &[fwd(&f.build)], extra.clone());
         assert!(f.build.join("keep/sub/x.o").exists(), "{k}: {rep:?}, trash {:?}", f.trash());
         assert!(refused_with(&rep, "tidy.protected"), "{k}: a tidy.protected row, not executor residue: {rep:?}");
@@ -588,4 +586,17 @@ fn r4minor2_a_close_through_the_owned_env_the_cli_uses_closes_what_is_clean_and_
     assert!(kept.join("target/x.o").exists() && code("/wt-k/target") == "tidy.protected", "{rep:?}");
     assert!(f.main.join("shared/keep.txt").exists() && code("/lnk/shared") == "tidy.main-checkout", "{rep:?}");
     assert!(f.main.join("f.txt").exists() && !git(&f.main, &["tag", "--list", "archive/line/a"]).trim().is_empty());
+}
+
+#[test]
+fn bl4_the_main_checkout_snapshot_lists_untracked_files_when_git_hides_them() {
+    let f = fx();
+    f.hide_untracked();
+    write(f.main.join("scratch/untracked.txt"), "never added\n");
+    let h = Host { name: "real".into(), tidy: to_table(&f.tidy(&fwd(&f.main))), ..Default::default() };
+    let cfg = Config { hosts: vec![h.clone()], ..Default::default() };
+    let t = build_cfg(&cfg, &h).unwrap();
+    let ops = Ops::new(&h, &LocalRunner, &t);
+    let (_, status) = ops.snapshot_main().unwrap().unwrap();
+    assert!(status.contains("untracked.txt"), "the snapshot that guards main must see untracked files: {status:?}");
 }
