@@ -66,6 +66,25 @@ fn insert_final(l: &Ledger, rid: &str, p: &ParsedLog, outcome: &str, host: Optio
     Ok(())
 }
 
+/// A ledger of version 5 or later keeps the shards of a sharded step in `step_shards`; an older file has no such table (nothing to attach).
+fn attach_shards(l: &Ledger, rid: &str, steps: &mut [Step]) -> crate::Result<()> {
+    let has: i64 = l.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='step_shards'", [], |r| r.get(0))?;
+    if has == 0 {
+        return Ok(());
+    }
+    let mut st = l.conn.prepare("SELECT step, started_at, duration_sec FROM step_shards WHERE run_id=? ORDER BY step, shard")?;
+    let rows = st.query_map([rid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<f64>>(2)?)))?;
+    for r in rows {
+        let (name, started, dur) = r?;
+        if let (Some(t), Some(d)) = (started.and_then(|s| parse_iso(&s).ok()), dur) {
+            if let Some(s) = steps.iter_mut().find(|s| s.name == name) {
+                s.shard_spans.push((t, d));
+            }
+        }
+    }
+    Ok(())
+}
+
 type Head = (Option<String>, Option<String>, Option<String>);
 
 /// A run read back: the finished rows, else the newest snapshot.
@@ -82,8 +101,9 @@ pub fn load(l: &Ledger, rid: &str) -> crate::Result<Option<Loaded>> {
         let mut steps = Vec::new();
         for r in rows {
             let (name, st, ex, cached, dur) = r?;
-            steps.push(Step { name, start: st.and_then(|s| parse_iso(&s).ok()), duration: dur, exit_code: ex, cached: cached.unwrap_or(0) != 0 });
+            steps.push(Step { name, start: st.and_then(|s| parse_iso(&s).ok()), duration: dur, exit_code: ex, cached: cached.unwrap_or(0) != 0, shard_spans: Vec::new() });
         }
+        attach_shards(l, rid, &mut steps)?;
         return Ok(Some(Loaded { outcome: o.unwrap_or_default(), commit: c, host: h, steps }));
     }
     let row = l
@@ -100,6 +120,7 @@ pub fn load(l: &Ledger, rid: &str) -> crate::Result<Option<Loaded>> {
             duration: s["duration"].as_f64(),
             exit_code: s["exit_code"].as_i64(),
             cached: s["cached"].as_bool().unwrap_or(false),
+            shard_spans: Vec::new(),
         });
     }
     Ok(Some(Loaded { outcome: o.unwrap_or_default(), commit: c, host: h, steps }))

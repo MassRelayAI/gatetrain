@@ -213,6 +213,8 @@ pub struct Step {
     pub duration: Option<f64>,
     pub exit_code: Option<i64>,
     pub cached: bool,
+    /// (start, seconds) of each shard of a sharded step, from its `STEP_SHARD` lines; empty for an ordinary step. Not part of `to_json`.
+    pub shard_spans: Vec<(Ts, f64)>,
 }
 
 impl Step {
@@ -350,6 +352,7 @@ pub fn parse_log(text: &str) -> Result<ParsedLog> {
     let r = re();
     let mut p = ParsedLog::default();
     let mut by: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut shard_open: std::collections::HashMap<(String, String), Ts> = std::collections::HashMap::new();
     fn step<'a>(p: &'a mut ParsedLog, by: &mut std::collections::HashMap<String, usize>, name: &str) -> &'a mut Step {
         let i = *by.entry(name.to_string()).or_insert_with(|| {
             p.steps.push(Step { name: name.to_string(), ..Default::default() });
@@ -377,6 +380,22 @@ pub fn parse_log(text: &str) -> Result<ParsedLog> {
         } else if line.starts_with("STEP_CACHED") {
             if let Some(m) = r.cached.captures(line) {
                 step(&mut p, &mut by, &m[1]).cached = true;
+            }
+        } else if let Some(rest) = line.strip_prefix("STEP_SHARD ") {
+            // `STEP_SHARD <step> <i>/<n> START <time>` / `... EXIT <rc> <N>s`: a slot of a sharded step; the step's own lines stay the truth
+            let w: Vec<&str> = rest.split_whitespace().collect();
+            match w.as_slice() {
+                [name, frac, "START", t] => {
+                    if let Ok(t) = parse_iso(t) {
+                        shard_open.insert((name.to_string(), frac.to_string()), t);
+                    }
+                }
+                [name, frac, "EXIT", _rc, secs] => {
+                    if let (Some(t), Ok(d)) = (shard_open.remove(&(name.to_string(), frac.to_string())), secs.trim_end_matches('s').parse::<f64>()) {
+                        step(&mut p, &mut by, name).shard_spans.push((t, d));
+                    }
+                }
+                _ => {}
             }
         } else if let Some(rest) = line.strip_prefix("STEP_SKIPPED ") {
             // `STEP_SKIPPED <step> <reason>`: never ran, so it is no Step (no start, no exit) and counts in no total

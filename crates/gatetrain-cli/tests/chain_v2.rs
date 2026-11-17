@@ -454,3 +454,30 @@ fn a_sharded_run_with_db_keeps_its_shards_in_step_shards() {
     assert_eq!(q(&db, "select log_ref from step_shards where shard=2"), "t.2of3.full");
     assert_eq!(q(&db, "select count(*) from step_shards where run_id='sh-1'"), "3");
 }
+
+// ---------------------------------------------------------------- report counts shard slots
+
+fn report(args: &[&str]) -> String {
+    let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).arg("report").args(args).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+#[test]
+fn report_counts_a_sharded_steps_slots_from_the_ledger_and_from_the_log() {
+    let w = tempfile::tempdir().unwrap();
+    let db = w.path().join("l.db");
+    let r = repo();
+    let body = step("t", "fast", "shards = 3", &["printsleep", "s{shard}", "1.5"]);
+    let run = chain_in(r.path(), w.path(), &body, &["--db", db.to_str().unwrap(), "--run-id", "par-1", "--par", "3"], &[]);
+    assert_eq!(code(&run), 0, "{}{}", run.stdout, run.stderr);
+    for text in [report(&["--db", db.to_str().unwrap(), "--run", "par-1"]), {
+        let log = w.path().join("run.log");
+        std::fs::write(&log, &run.stdout).unwrap();
+        report(&[log.to_str().unwrap()])
+    }] {
+        let line = text.lines().find(|l| l.contains("average parallelism")).unwrap().to_string();
+        let avg: f64 = line.rsplit("average parallelism ").next().unwrap().trim().parse().unwrap();
+        assert!((2.5..=3.01).contains(&avg), "three shards at once are 3 slots, not 1: {line}");
+    }
+}

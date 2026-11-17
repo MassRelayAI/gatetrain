@@ -18,7 +18,13 @@ pub struct Concurrency {
 pub fn concurrency(steps: &[Step]) -> Concurrency {
     let mut ev: Vec<(Ts, i64)> = Vec::new();
     for s in timed(steps) {
-        if s.duration.unwrap_or(0.0) > 0.0 {
+        // a sharded step occupies one slot per shard, so its shards are the intervals (engine v2 section 6)
+        if !s.shard_spans.is_empty() {
+            for (t, d) in s.shard_spans.iter().filter(|(_, d)| *d > 0.0) {
+                ev.push((*t, 1));
+                ev.push((t.plus_seconds(*d), -1));
+            }
+        } else if s.duration.unwrap_or(0.0) > 0.0 {
             ev.push((s.start.unwrap(), 1));
             ev.push((s.end().unwrap(), -1));
         }
@@ -144,6 +150,30 @@ mod tests {
         let c = concurrency(&p.steps);
         assert_eq!(c.max, 2);
         assert!((c.avg - 120.0 / 90.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn shards_are_slots_the_average_counts_each_one() {
+        let p = parse_log("STEP_START t 2026-11-11T10:00:00Z
+STEP_SHARD t 1/3 START 2026-11-11T10:00:00Z
+STEP_SHARD t 2/3 START 2026-11-11T10:00:00Z
+STEP_SHARD t 3/3 START 2026-11-11T10:00:00Z
+STEP_SHARD t 1/3 EXIT 0 60.0s
+STEP_SHARD t 2/3 EXIT 0 60.0s
+STEP_SHARD t 3/3 EXIT 0 60.0s
+STEP_TIME t 60s
+STEP_EXIT t 0
+").unwrap();
+        assert_eq!(p.steps.len(), 1);
+        let c = concurrency(&p.steps);
+        assert_eq!(c.max, 3);
+        assert!((c.avg - 3.0).abs() < 1e-9, "{}", c.avg);
+        // the same log without the shard lines is one slot
+        let q = parse_log("STEP_START t 2026-11-11T10:00:00Z
+STEP_TIME t 60s
+STEP_EXIT t 0
+").unwrap();
+        assert_eq!(concurrency(&q.steps).max, 1);
     }
 
     #[test]
