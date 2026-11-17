@@ -311,3 +311,205 @@ fn a_relative_cwd_resolves_against_the_steps_file() {
         .unwrap();
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stdout));
 }
+
+// ---- the step cache (`--cache <dir>`) ----
+
+/// A step with `inputs` that touches `marker` when it really runs (or runs `args`).
+fn cstep(name: &str, needs: &[&str], inputs: &[&str], marker: &Path, args: &[&str]) -> String {
+    let m = marker.to_str().unwrap().to_string();
+    let default = ["marker", m.as_str(), "0"];
+    let mut s = step(name, "fast", needs, None, if args.is_empty() { &default } else { args });
+    if !inputs.is_empty() {
+        let list = inputs.iter().map(|i| format!("'{i}'")).collect::<Vec<_>>().join(", ");
+        s = s.replacen("argv = ", &format!("inputs = [{list}]\nargv = "), 1);
+    }
+    s
+}
+
+fn cache_repo() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q"]);
+    std::fs::write(repo.path().join("in.txt"), "one").unwrap();
+    std::fs::write(repo.path().join("other.txt"), "x").unwrap();
+    git(repo.path(), &["add", "in.txt", "other.txt"]);
+    git(repo.path(), &["commit", "-q", "-m", "init"]);
+    repo
+}
+
+fn with_cwd(repo: &Path, body: &str) -> String {
+    format!("cwd = '{}'\n\n{body}", repo.display())
+}
+
+fn entries(cache: &Path, step: &str) -> usize {
+    std::fs::read_dir(cache.join(step)).map(|rd| rd.flatten().count()).unwrap_or(0)
+}
+
+#[test]
+fn a_second_run_with_unchanged_inputs_is_cached_and_does_not_run() {
+    let repo = cache_repo();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let toml = with_cwd(repo.path(), &cstep("a", &[], &["in.txt"], &marker, &[]));
+    let c = cache.path().to_str().unwrap();
+    let r1 = chain(work.path(), &toml, &["--cache", c]);
+    assert_eq!(code(&r1), 0, "{}", r1.stdout);
+    assert!(marker.exists() && !r1.stdout.contains("STEP_CACHED"), "{}", r1.stdout);
+    assert_eq!(entries(cache.path(), "a"), 1);
+    std::fs::remove_file(&marker).unwrap();
+    let r2 = chain(work.path(), &toml, &["--cache", c]);
+    assert_eq!(code(&r2), 0, "{}", r2.stdout);
+    assert!(r2.stdout.contains("STEP_CACHED a"), "{}", r2.stdout);
+    assert!(!marker.exists(), "a cached step must not run");
+    let full = std::fs::read_to_string(r2.out.join("a.full")).unwrap();
+    assert!(full.starts_with("cached: green at "), "{full}");
+    // the log parses with the existing parser and says cached
+    let p = parse_log(&r2.stdout).unwrap();
+    assert!(p.steps[0].cached && p.steps[0].exit_code == Some(0), "{}", r2.stdout);
+    // the stamp lists what was cached
+    let st = stamps(&r2.out);
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&st[0]).unwrap()).unwrap();
+    assert_eq!(v["cached"], serde_json::json!(["a"]));
+}
+
+#[test]
+fn without_the_flag_nothing_is_cached() {
+    let repo = cache_repo();
+    let (work, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let toml = with_cwd(repo.path(), &cstep("a", &[], &["in.txt"], &marker, &[]));
+    chain(work.path(), &toml, &[]);
+    std::fs::remove_file(&marker).unwrap();
+    let r = chain(work.path(), &toml, &[]);
+    assert!(marker.exists() && !r.stdout.contains("STEP_CACHED"), "{}", r.stdout);
+}
+
+#[test]
+fn changing_an_input_runs_the_step_again() {
+    let repo = cache_repo();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let toml = with_cwd(repo.path(), &cstep("a", &[], &["in.txt"], &marker, &[]));
+    let c = cache.path().to_str().unwrap();
+    chain(work.path(), &toml, &["--cache", c]);
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::write(repo.path().join("in.txt"), "two").unwrap();
+    git(repo.path(), &["commit", "-q", "-am", "change"]);
+    let r = chain(work.path(), &toml, &["--cache", c]);
+    assert!(marker.exists() && !r.stdout.contains("STEP_CACHED"), "{}", r.stdout);
+    assert_eq!(entries(cache.path(), "a"), 2);
+    // a change outside the inputs keeps the hit
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::write(repo.path().join("other.txt"), "y").unwrap();
+    git(repo.path(), &["commit", "-q", "-am", "other"]);
+    let r = chain(work.path(), &toml, &["--cache", c]);
+    assert!(!marker.exists() && r.stdout.contains("STEP_CACHED a"), "{}", r.stdout);
+}
+
+#[test]
+fn a_dirty_input_runs_the_step_and_writes_no_entry() {
+    let repo = cache_repo();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    std::fs::write(repo.path().join("in.txt"), "dirty").unwrap();
+    let toml = with_cwd(repo.path(), &cstep("a", &[], &["in.txt"], &marker, &[]));
+    let c = cache.path().to_str().unwrap();
+    for _ in 0..2 {
+        let _ = std::fs::remove_file(&marker);
+        let r = chain(work.path(), &toml, &["--cache", c]);
+        assert!(marker.exists() && !r.stdout.contains("STEP_CACHED"), "{}", r.stdout);
+        let full = std::fs::read_to_string(r.out.join("a.full")).unwrap();
+        assert!(full.contains("not cached: inputs are dirty"), "{full}");
+    }
+    assert_eq!(entries(cache.path(), "a"), 0);
+}
+
+#[test]
+fn a_step_without_inputs_always_runs() {
+    let repo = cache_repo();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let toml = with_cwd(repo.path(), &cstep("a", &[], &[], &marker, &[]));
+    let c = cache.path().to_str().unwrap();
+    chain(work.path(), &toml, &["--cache", c]);
+    std::fs::remove_file(&marker).unwrap();
+    let r = chain(work.path(), &toml, &["--cache", c]);
+    assert!(marker.exists() && !r.stdout.contains("STEP_CACHED"), "{}", r.stdout);
+    assert_eq!(entries(cache.path(), "a"), 0);
+}
+
+#[test]
+fn a_red_step_writes_no_entry() {
+    let repo = cache_repo();
+    let (work, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let toml = with_cwd(repo.path(), &cstep("a", &[], &["in.txt"], Path::new("x"), &["exit", "3"]));
+    let c = cache.path().to_str().unwrap();
+    for _ in 0..2 {
+        let r = chain(work.path(), &toml, &["--cache", c]);
+        assert_eq!(code(&r), 1, "{}", r.stdout);
+        assert!(!r.stdout.contains("STEP_CACHED"), "{}", r.stdout);
+    }
+    assert_eq!(entries(cache.path(), "a"), 0);
+}
+
+#[test]
+fn a_dependent_of_a_cached_step_runs_normally() {
+    let repo = cache_repo();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (ma, mb) = (mk.path().join("a"), mk.path().join("b"));
+    let toml = with_cwd(repo.path(), &(cstep("a", &[], &["in.txt"], &ma, &[]) + &cstep("b", &["a"], &[], &mb, &[])));
+    let c = cache.path().to_str().unwrap();
+    chain(work.path(), &toml, &["--cache", c]);
+    std::fs::remove_file(&ma).unwrap();
+    std::fs::remove_file(&mb).unwrap();
+    let r = chain(work.path(), &toml, &["--cache", c]);
+    assert_eq!(code(&r), 0, "{}", r.stdout);
+    assert!(!ma.exists() && mb.exists(), "{}", r.stdout);
+    let p = parse_log(&r.stdout).unwrap();
+    assert!(p.steps[0].cached && !p.steps[1].cached && p.skipped.is_empty(), "{}", r.stdout);
+}
+
+#[test]
+fn no_cache_for_forces_a_run() {
+    let repo = cache_repo();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let toml = with_cwd(repo.path(), &cstep("a", &[], &["in.txt"], &marker, &[]));
+    let c = cache.path().to_str().unwrap();
+    chain(work.path(), &toml, &["--cache", c]);
+    std::fs::remove_file(&marker).unwrap();
+    let r = chain(work.path(), &toml, &["--cache", c, "--no-cache-for", "a"]);
+    assert!(marker.exists() && !r.stdout.contains("STEP_CACHED"), "{}", r.stdout);
+    let r = chain(work.path(), &toml, &["--cache", c, "--no-cache-for", "nope"]);
+    assert_eq!(code(&r), 2, "an unknown step name is a config error");
+}
+
+#[test]
+fn the_salt_is_part_of_the_key() {
+    let repo = cache_repo();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let base = cstep("a", &[], &["in.txt"], &marker, &[]);
+    let c = cache.path().to_str().unwrap();
+    chain(work.path(), &with_cwd(repo.path(), &base), &["--cache", c]);
+    std::fs::remove_file(&marker).unwrap();
+    let salted = base.replacen("argv = ", "cache_salt = 'v2'\nargv = ", 1);
+    let r = chain(work.path(), &with_cwd(repo.path(), &salted), &["--cache", c]);
+    assert!(marker.exists() && !r.stdout.contains("STEP_CACHED"), "{}", r.stdout);
+}
+
+#[test]
+fn diagnose_reads_a_log_with_a_cached_step() {
+    let repo = cache_repo();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let toml = with_cwd(repo.path(), &(cstep("a", &[], &["in.txt"], &marker, &[]) + &step("r", "fast", &[], None, &["exit", "1"])));
+    let c = cache.path().to_str().unwrap();
+    chain(work.path(), &toml, &["--cache", c]);
+    let r = chain(work.path(), &toml, &["--cache", c]);
+    assert!(r.stdout.contains("STEP_CACHED a"), "{}", r.stdout);
+    let log = work.path().join("run.log");
+    std::fs::write(&log, &r.stdout).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["diagnose", log.to_str().unwrap()]).output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
+    assert!(text.contains('r') && !text.contains("panicked"), "{text}");
+}
