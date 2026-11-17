@@ -1,7 +1,7 @@
 //! `gatetrain check` and `gatetrain tidy`: the arguments of the Python commands, run by `gatetrain_core::tidy`.
 //! Text and exit codes are Python's (`gatetrain/tidy.py` cmd_check, cmd_tidy).
 use clap::Args;
-use gatetrain_core::tidy::{cmd_check, cmd_tidy, make_runner, CliOut};
+use gatetrain_core::tidy::{cmd_check, cmd_restore_image, cmd_tidy, make_runner, CliOut};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -30,6 +30,9 @@ pub struct TidyArgs {
     /// for schedulers: check, then apply only the unattended classes
     #[arg(long)]
     auto: bool,
+    /// `docker load -i` of an image archived by `[tidy] image_archive`: an exact .tar directly inside <trash_dir>/docker-images, nothing else
+    #[arg(long, value_name = "TAR")]
+    restore_image: Option<String>,
 }
 
 /// Each item is reported on stderr as soon as it is judged (`GATETRAIN_PROGRESS=0` turns it off): a long inventory is never silent.
@@ -56,6 +59,9 @@ pub fn run_check(a: CheckArgs) -> ExitCode {
 }
 
 pub fn run_tidy(a: TidyArgs) -> ExitCode {
+    if let Some(tar) = &a.restore_image {
+        return emit(cmd_restore_image(&a.config, a.host.as_deref(), tar, &make_runner));
+    }
     stream_progress();
     emit(cmd_tidy(&a.config, a.host.as_deref(), a.apply, a.cls.as_deref(), a.auto, &make_runner, None))
 }

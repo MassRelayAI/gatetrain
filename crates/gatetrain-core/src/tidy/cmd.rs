@@ -187,3 +187,52 @@ pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<
     o.rc = rc;
     o
 }
+
+/// `gatetrain tidy --restore-image <tar>`: `docker load -i` of an image archived by `image_archive`. Only an exact `.tar` that sits
+/// directly inside `<trash_dir>/docker-images` (no `..`, no sub-folder, no link) is loaded; anything else is refused and nothing runs.
+pub fn cmd_restore_image(config_path: &str, host: Option<&str>, tar: &str, mk: RunnerFactory) -> CliOut {
+    use super::ops::{norm, safe_path, Ops, IMAGE_ARCHIVE};
+    let mut o = CliOut::new();
+    let (cfg, hs) = match hosts(config_path, host) {
+        Ok(x) => x,
+        Err(m) => return o.exit(1, m),
+    };
+    if hs.len() != 1 {
+        return o.exit(1, "--restore-image needs exactly one host: give --host");
+    }
+    let h = &cfg.hosts[hs[0]];
+    let Some(r) = mk(h) else { return o.exit(1, format!("host {} has reach {:?}: restore needs local or ssh", h.name, h.reach)) };
+    let t = match build_cfg(&cfg, h) {
+        Ok(t) => t,
+        Err(e) => return o.exit(1, format!("config error: {e}")),
+    };
+    let Some(trash) = t.trash_dir.clone().filter(|d| !d.is_empty()) else { return o.exit(1, "no trash_dir configured: there is no image archive") };
+    let ops = Ops::new(h, r.as_ref(), &t);
+    let dir = ops.join(&trash, IMAGE_ARCHIVE);
+    if !tar.ends_with(".tar") {
+        return o.exit(1, format!("refusing {tar}: an archived image is a .tar"));
+    }
+    if let Err(e) = safe_path(tar, Some(&dir)) {
+        return o.exit(1, format!("refusing {tar}: it must be exactly one file directly inside {dir} ({})", match e { Fatal::Guard(m) | Fatal::Item(m) | Fatal::Other(m) => m }));
+    }
+    // the real place of the file must be the real archive folder: no link out of it
+    let (rp_dir, rp_parent) = match (ops.rp(&dir), ops.rp(tar.replace('\\', "/").trim_end_matches('/').rsplit_once('/').map(|x| x.0).unwrap_or(""))) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => return o.exit(1, "cannot resolve the archive folder"),
+    };
+    if rp_dir.is_none() || rp_dir != rp_parent || norm(tar) != format!("{}/{}", norm(&dir), norm(tar).rsplit('/').next().unwrap_or("")) {
+        return o.exit(1, format!("refusing {tar}: it does not resolve to a file directly inside {dir}"));
+    }
+    match (ops.exists(tar), ops.is_link(tar)) {
+        (Ok(Some(true)), Ok(Some(false))) => {}
+        _ => return o.exit(1, format!("{tar} is not an existing file (or is a link); nothing loaded")),
+    }
+    match ops.run_argv(&["docker".into(), "load".into(), "-i".into(), tar.to_string()], Some(t.remove_timeout_s)) {
+        Ok(c) if c.ok() => {
+            o.say(format!("restored {tar} on {}", h.name));
+            o
+        }
+        Ok(c) => o.exit(1, format!("docker load failed (exit {}) for {tar}", c.rc.map_or("none".into(), |x| x.to_string()))),
+        Err(_) => o.exit(1, "docker load could not run"),
+    }
+}

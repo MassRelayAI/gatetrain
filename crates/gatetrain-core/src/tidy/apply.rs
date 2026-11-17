@@ -3,7 +3,7 @@ use super::config::{TidyCfg, CLASSES};
 use crate::config::Host;
 use super::inventory::{is_cargo, Extra, Inventory, Item};
 use crate::pycompat::{dumps, round2, J};
-use super::ops::{guard, safe_branch, safe_container, safe_image, safe_path, Fatal, Ops, R};
+use super::ops::{guard, norm, safe_branch, safe_container, safe_image, safe_path, Fatal, Ops, IMAGE_ARCHIVE, R};
 use crate::pycompat::{fmt_f, fmt_g, fnmatchcase, repr_str, split_ws};
 use crate::runner::Runner;
 use chrono::TimeZone;
@@ -153,6 +153,67 @@ fn measured_after(planned: Option<i64>, before: Option<i64>, after_total: Option
     }
 }
 
+/// Save an image to `<trash_dir>/docker-images/<safe name>@<short id>.tar` before it is removed. `Ok(Err(why))` = refused or failed: the image
+/// is kept. The archive folder must be on a disk configured with `use = ["archive"]`, with room for the image plus that disk's `min_free_gb`
+/// (checked BEFORE the save). The save counts only when it exited 0 and left a file with a size above 0. `Ok(Ok((path, size)))` = archived.
+fn archive_image(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Result<(String, String), String>> {
+    let Some(trash) = cfg.trash_dir.as_deref().filter(|t| !t.is_empty()) else { return Ok(Err("refused: image_archive needs trash_dir".into())) };
+    let dir = ops.join(trash, IMAGE_ARCHIVE);
+    safe_path(&dir, Some(trash))?;
+    let dn = norm(&dir);
+    let disk = ops.host.disks.iter().filter(|d| {
+        let p = norm(&d.path);
+        dn == p || dn.starts_with(&format!("{}/", p.trim_end_matches('/')))
+    }).max_by_key(|d| d.path.len());
+    let Some(disk) = disk else {
+        return Ok(Err(format!("refused: the archive folder {dir} is on no configured disk; give the disk that holds it use = [\"archive\"] in [[hosts.disks]]")));
+    };
+    if !disk.r#use.iter().any(|u| u == "archive") {
+        return Ok(Err(format!("refused: disk {} is not configured to hold `archive` (its use is {:?})", disk.path, disk.r#use)));
+    }
+    let size_gb = it.bytes.unwrap_or(0) as f64 / (1024.0 * 1024.0 * 1024.0);
+    let floor = disk.min_free_gb.f();
+    match ops.free_gb(&disk.path)? {
+        None => return Ok(Err(format!("refused: the free space of {} cannot be read; the image is kept", disk.path))),
+        Some(f) if f < size_gb + floor => {
+            return Ok(Err(format!("refused: {f:.1} GB free on {} is below the image ({size_gb:.1} GB) plus its floor min_free_gb {floor:.1} GB; the image is kept", disk.path)));
+        }
+        Some(_) => {}
+    }
+    let list = ops.run0(r#"docker images --format "{{.Repository}}:{{.Tag}}|{{.ID}}|{{.Size}}""#)?;
+    let id = list.out.lines().find_map(|l| {
+        let p: Vec<&str> = l.trim().split('|').collect();
+        (p.len() == 3 && p[0] == it.key).then(|| p[1].to_string())
+    });
+    let Some(id) = id.filter(|i| !i.is_empty() && i.chars().all(|c| c.is_ascii_alphanumeric())) else { return Ok(Err(format!("cannot read the id of image {}; it is kept", it.key))) };
+    let safe: String = it.key.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    let dest = ops.join(&dir, &format!("{safe}@{}.tar", id.chars().take(12).collect::<String>()));
+    safe_path(&dest, Some(&dir))?;
+    if ops.exists(&dest)? != Some(false) {
+        return Ok(Err(format!("{dest} exists or cannot be probed; not overwriting it; the image is kept")));
+    }
+    if ops.exists(&dir)? != Some(true) {
+        let mk = if ops.win {
+            ops.run(&format!("powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path {} | Out-Null\"", ops.psq(&dir)?), None)?
+        } else {
+            ops.run_argv(&["mkdir".into(), "-p".into(), dir.clone()], None)?
+        };
+        if !mk.ok() {
+            return Ok(Err(format!("cannot create the archive folder {dir}; the image is kept")));
+        }
+    }
+    let r = ops.run_argv(&["docker".into(), "save".into(), "-o".into(), dest.clone(), it.key.clone()], Some(cfg.remove_timeout_s))?;
+    let size = if r.ok() && ops.exists(&dest)? == Some(true) { ops.size(&dest)? } else { None };
+    if !r.ok() || !size.is_some_and(|s| s > 0) {
+        if ops.exists(&dest)? == Some(true) {
+            let _ = ops.remove_dir(&dest); // a partial file we just made, inside the archive folder
+        }
+        let why = if r.ok() { "left no file or an empty one" } else { "failed" };
+        return Ok(Err(format!("docker save {why} for {}; the image is kept", it.key)));
+    }
+    Ok(Ok((dest, super::inventory::human(size))))
+}
+
 pub fn cache_hours(cfg: &TidyCfg) -> i64 {
     ((cfg.cache_days * 24.0).ceil() as i64).max(1) // a window under an hour is an hour, never `until=0h` (= everything)
 }
@@ -214,14 +275,30 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done>
             if !safe_image(&it.key) || !cfg.image_patterns.iter().any(|p| fnmatchcase(&it.key, p)) {
                 return guard(format!("image {} matches no configured pattern", it.key));
             }
+            if cfg.image_keep_patterns.iter().any(|p| fnmatchcase(&it.key, p)) {
+                return guard(format!("image {} matches image_keep_patterns, which win over image_patterns", it.key));
+            }
             let used = ops.run0(r#"docker ps -a --format "{{.Image}}""#)?;
             if split_ws(&used.out).contains(&it.key.as_str()) {
                 return guard(format!("image {} is used by a container", it.key));
             }
+            // the archive first: the image is removed only when its tar exists and is not empty
+            let archived = if cfg.image_archive {
+                match archive_image(ops, cfg, it)? {
+                    Ok(a) => Some(a),
+                    Err(why) => return Ok((it.bytes, "failed", why)),
+                }
+            } else {
+                None
+            };
             let before = docker_type_bytes(ops, "Images")?;
             let r = ops.run_argv(&["docker".into(), "rmi".into(), it.key.clone()], None)?;
             let (after, freed) = measured_after(it.bytes, before, docker_type_bytes(ops, "Images")?);
-            Ok((after, if r.ok() { "ok" } else { "failed" }, format!("removed by exact name; freed: {freed}")))
+            let note = match archived {
+                Some((path, size)) => format!("archived: {path} {size}; freed: {freed}"),
+                None => format!("removed by exact name; freed: {freed}"),
+            };
+            Ok((after, if r.ok() { "ok" } else { "failed" }, note))
         }
         "prune-cache" => {
             let argv: Vec<String> = ["docker", "builder", "prune", "-f", "--filter"].iter().map(|s| s.to_string()).chain([format!("until={}h", cache_hours(cfg))]).collect();

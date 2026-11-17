@@ -55,6 +55,10 @@ pub struct TidyCfg {
     pub container_prefix: Option<String>,
     /// container-name prefixes that are never planned or removed, whatever `container_prefix` says (reference stacks)
     pub protect_containers: Vec<String>,
+    /// `docker save` an unused image to `<trash_dir>/docker-images/` before it is removed; the archive ages out like any trash entry
+    pub image_archive: bool,
+    /// globs that win over `image_patterns`: an image matching one is never planned or removed
+    pub image_keep_patterns: Vec<String>,
     pub image_patterns: Vec<String>,
     /// 0 = never touch the docker build cache
     pub cache_days: f64,
@@ -99,6 +103,8 @@ impl Default for TidyCfg {
             trash_days: 7.0,
             container_prefix: None,
             protect_containers: vec![],
+            image_archive: false,
+            image_keep_patterns: vec![],
             image_patterns: vec![],
             cache_days: 0.0,
             evidence_dirs: vec![],
@@ -117,8 +123,8 @@ impl Default for TidyCfg {
     }
 }
 
-const KNOWN: [&str; 31] = [
-    "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_patterns", "item_budget_s", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
+const KNOWN: [&str; 33] = [
+    "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_archive", "image_keep_patterns", "image_patterns", "item_budget_s", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
     "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "protect", "protect_containers", "remove_timeout_s", "root_checkout", "scratch_dir",
     "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_min_idle_days", "worktree_prefix",
 ];
@@ -179,6 +185,11 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             "keep_branches" => t.keep_branches = str_list(k, v)?,
             "target_roots" => t.target_roots = str_list(k, v)?,
             "image_patterns" => t.image_patterns = str_list(k, v)?,
+            "image_keep_patterns" => t.image_keep_patterns = str_list(k, v)?,
+            "image_archive" => match v {
+                Value::Boolean(b) => t.image_archive = *b,
+                _ => return err("tidy.image_archive: expected true or false".into()),
+            },
             "evidence_dirs" => t.evidence_dirs = str_list(k, v)?,
             "unattended" => t.unattended = str_list(k, v)?,
             "main_checkout" => t.main_checkout = Some(nonempty(k, v)?),
@@ -260,6 +271,9 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
     }
     if t.trash_dir.is_some() {
         check_trash_dir(&t)?;
+    }
+    if t.image_archive && t.trash_dir.as_deref().is_none_or(|d| d.trim().is_empty()) {
+        return err("tidy.image_archive needs trash_dir: the archive lives in <trash_dir>/docker-images and ages out with the recycle bin".into());
     }
     if t.container_prefix.is_none() {
         t.container_prefix = host.container_prefix.clone();

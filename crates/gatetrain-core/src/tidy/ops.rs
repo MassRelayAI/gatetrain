@@ -46,6 +46,9 @@ impl From<String> for Fatal {
 
 pub type R<T> = Result<T, Fatal>;
 
+/// The folder inside the recycle bin that holds archived docker images.
+pub const IMAGE_ARCHIVE: &str = "docker-images";
+
 pub fn guard<T>(msg: String) -> R<T> {
     Err(Fatal::Guard(msg))
 }
@@ -849,7 +852,10 @@ impl<'a> Ops<'a> {
     /// A recycle-bin entry is exactly one component below a bin that resolves to a place of its own.
     pub fn check_trash_entry(&self, p: &str) -> R<()> {
         let td = self.cfg.trash_dir.clone().unwrap_or_default();
-        safe_path(p, Some(&td))?;
+        // an archived image tar sits one level down, in `<trash_dir>/docker-images`
+        let archive = format!("{}/{IMAGE_ARCHIVE}", norm(&td));
+        let nested = norm(p).strip_prefix(&format!("{archive}/")).is_some();
+        safe_path(p, Some(if nested { &archive } else { &td }))?;
         let Some(rt) = self.rp(&td)? else { return guard(format!("cannot resolve the recycle bin {td}")) };
         for k in self.kept() {
             let bad = match self.rp(&k)? {
@@ -863,7 +869,8 @@ impl<'a> Ops<'a> {
         let s = p.replace('\\', "/");
         let parent = s.trim_end_matches('/').rsplit_once('/').map(|x| x.0.to_string()).unwrap_or_default();
         let par = self.rp(&parent)?;
-        if par.as_deref() != Some(rt.as_str()) {
+        let want = if nested { format!("{rt}/{IMAGE_ARCHIVE}") } else { rt.clone() };
+        if par.as_deref() != Some(want.as_str()) {
             return guard(format!("{p} does not sit directly in the recycle bin {td} (resolves to {})", par.map(|x| repr_str(&x)).unwrap_or_else(|| "None".into())));
         }
         Ok(())

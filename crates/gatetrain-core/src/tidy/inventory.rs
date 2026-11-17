@@ -503,9 +503,11 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                 if name.ends_with(":<none>") || !cfg.image_patterns.iter().any(|p| fnmatchcase(name, p)) {
                     continue;
                 }
+                // image_keep_patterns win over image_patterns: such an image is listed but never planned
+                let kept = cfg.image_keep_patterns.iter().any(|p| fnmatchcase(name, p));
                 let in_use = used.contains(name) || used.iter().any(|u| iid.starts_with(u.as_str()) || u.starts_with(iid));
                 inv.images.push(ImageInfo { name: name.into(), bytes: parse_size(sz), in_use });
-                if !in_use {
+                if !in_use && !kept {
                     inv.items.push(Item::new("images", "rm-image", name, Some(parse_size(sz)), "no container uses it; matches a configured pattern").ruled("unused-image"));
                 }
             }
@@ -533,7 +535,19 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         if te == Some(true) {
             let seen = ops.read_seen(td)?;
             let mut new_seen: std::collections::BTreeMap<String, super::ops::SeenRec> = std::collections::BTreeMap::new();
-            let names: Vec<String> = ops.listdir(td)?.into_iter().filter(|n| n != super::ops::SEEN).collect();
+            // the image archive (`<trash_dir>/docker-images/<name>@<id>.tar`): each tar ages and is purged on its own, so the folder is
+            // never an entry itself
+            let mut names: Vec<String> = Vec::new();
+            for n in ops.listdir(td)?.into_iter().filter(|n| n != super::ops::SEEN) {
+                let sub = ops.join(td, &n);
+                if n == super::ops::IMAGE_ARCHIVE && ops.is_link(&sub)? == Some(false) && ops.exists(&sub)? == Some(true) {
+                    for c in ops.listdir(&sub)? {
+                        names.push(format!("{n}/{c}"));
+                    }
+                } else {
+                    names.push(n);
+                }
+            }
             for (bi, nm) in names.iter().enumerate() {
                 let nm = nm.clone();
                 let p = ops.join(td, &nm);

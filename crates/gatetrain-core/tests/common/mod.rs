@@ -80,6 +80,12 @@ pub struct SimState {
     pub call_timeouts: Vec<(String, Option<f64>)>,
     /// a recursive remove that says ok and removes nothing (a long path, a locked file)
     pub rm_noop: bool,
+    /// `docker save` exits non-zero and writes nothing
+    pub save_fails: bool,
+    /// `docker save` exits 0 and writes an empty file
+    pub save_zero: bool,
+    /// archived tar path to the image row it holds, so `docker load -i` can bring it back
+    pub saved: HashMap<String, String>,
 }
 
 impl SimState {
@@ -422,6 +428,10 @@ impl Sim {
             }
             return ok(String::new());
         }
+        if let Some(m) = re(r"^mkdir -p (.+)$").captures(&c) {
+            st.dir(&m[1], 0);
+            return ok(String::new());
+        }
         if let Some(m) = re(r"^(?:rmdir /S /Q|rm -r --) (.+)$").captures(&c) {
             if st.rm_noop {
                 return ok(String::new());
@@ -580,6 +590,26 @@ impl Sim {
             let nm = c.split(' ').nth(2).unwrap().to_string();
             st.containers_exited.retain(|x| *x != nm);
             return ok(String::new());
+        }
+        if let Some(m) = re(r"^docker save -o (\S+) (\S+)$").captures(c) {
+            if st.save_fails {
+                return RunOut::done(1, "");
+            }
+            let (path, nm) = (m[1].to_string(), m[2].to_string());
+            let Some(row) = st.images.iter().find(|x| x.starts_with(&format!("{nm}|"))).cloned() else { return RunOut::done(1, "") };
+            let size = if st.save_zero { 0 } else { gatetrain_core::tidy::inventory::parse_size(row.split('|').nth(2).unwrap_or("0")) };
+            st.file(&path, size, 0);
+            st.saved.insert(n(&path), row);
+            return ok(String::new());
+        }
+        if let Some(m) = re(r"^docker load -i (\S+)$").captures(c) {
+            return match st.saved.get(&n(&m[1])).cloned() {
+                Some(row) => {
+                    st.images.push(row);
+                    ok(String::new())
+                }
+                None => RunOut::done(1, ""),
+            };
         }
         if c.starts_with("docker rmi ") {
             let nm = c.split(' ').nth(2).unwrap().to_string();
