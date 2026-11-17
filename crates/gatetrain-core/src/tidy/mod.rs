@@ -9,6 +9,6 @@ pub mod inventory;
 pub mod ops;
 pub mod report;
 
-pub use cmd::{CliOut, cmd_check, cmd_restore_image, cmd_tidy, make_runner, RunnerFactory, tidy_auto_note};
+pub use cmd::{CliOut, cmd_check, cmd_restore_image, cmd_tidy, make_runner, RunnerFactory, tidy_auto_note, TidyRun};
 pub use ops::{Fatal, Ops};
 pub use crate::runner::{LocalRunner, RunOut, Runner, SshRunner};

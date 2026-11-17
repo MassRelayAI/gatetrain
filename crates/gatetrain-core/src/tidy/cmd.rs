@@ -14,11 +14,23 @@ pub struct CliOut {
     pub stdout: String,
     pub stderr: String,
     pub rc: i32,
+    /// Whether `cmd_tidy` acted at all: exit 1 means both "a config error, nothing ran" and "it ran, an item failed or a threshold is
+    /// still crossed"; this tells them apart.
+    pub ran: TidyRun,
+}
+
+/// What `cmd_tidy` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TidyRun {
+    /// Nothing was acted on: a config or usage error, an unknown host, every host skipped, a dry run, or a guard that stopped it.
+    NotRun,
+    /// It applied a plan on at least one host: `failed` items failed and `breaches` thresholds are crossed after it.
+    Ran { failed: usize, breaches: usize },
 }
 
 impl CliOut {
     fn new() -> CliOut {
-        CliOut { stdout: String::new(), stderr: String::new(), rc: 0 }
+        CliOut { stdout: String::new(), stderr: String::new(), rc: 0, ran: TidyRun::NotRun }
     }
     fn say(&mut self, s: impl AsRef<str>) {
         self.stdout.push_str(s.as_ref());
@@ -35,12 +47,23 @@ impl CliOut {
     }
 }
 
-/// What `tidy --auto` did, for the disk floor's decision row: `Ok(note)` when it ran, `Err` when it did not.
+/// What `tidy --auto` did, for the disk floor's decision row: `Ok(note)` when it ran (failed items and crossed thresholds included in
+/// the note), `Err` when it did not run or a guard stopped it.
 pub fn tidy_auto_note(out: &CliOut, host: &str) -> crate::Result<String> {
+    let TidyRun::Ran { failed, breaches } = out.ran else {
+        return Err(crate::Error::Batch(format!("tidy --auto on {host} did not run: {}", out.stderr.trim())));
+    };
     if out.rc >= 2 {
-        return Err(crate::Error::Batch(format!("tidy --auto on {host} failed: {}", out.stderr.trim())));
+        return Err(crate::Error::Batch(format!("tidy --auto on {host} was stopped: {}", out.stderr.trim())));
     }
-    Ok(out.stdout.lines().find(|l| l.contains("reclaimed")).unwrap_or("tidy --auto ran").to_string())
+    let mut note = out.stdout.lines().find(|l| l.contains("reclaimed")).unwrap_or("tidy --auto ran").to_string();
+    if failed > 0 {
+        note.push_str(&format!("; {failed} item(s) failed"));
+    }
+    if breaches > 0 {
+        note.push_str(&format!("; {breaches} threshold(s) still crossed"));
+    }
+    Ok(note)
 }
 
 pub type RunnerFactory<'a> = &'a dyn Fn(&Host) -> Option<Box<dyn Runner>>;
@@ -168,6 +191,10 @@ pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<
         let after = match gather(h, r.as_ref(), &t, now) {
             Ok(x) => x,
             Err(e) => return fatal(o, h, e, stop),
+        };
+        o.ran = match o.ran {
+            TidyRun::NotRun => TidyRun::Ran { failed, breaches: after.breaches.len() },
+            TidyRun::Ran { failed: f, breaches: b } => TidyRun::Ran { failed: f + failed, breaches: b + after.breaches.len() },
         };
         let freed = total_str(&plan);
         o.say(format!("{}: {} planned in {}; {} done, {} failed", h.name, plan.len(), classes.join(","), done, failed));
