@@ -738,3 +738,38 @@ fn defaults_are_conservative() {
     assert_eq!(t.orphan_targets, "keep");
     assert_eq!(CLASSES.len(), 6);
 }
+
+// ---- MA4 (review round 2): a tidy --auto that did not run is never "tidy --auto ran"
+
+#[test]
+fn ma4_a_tidy_auto_with_a_config_error_did_not_run() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let p = write_conf(d.path(), json!({"log": d.path().join("l.jsonl").to_string_lossy(), "unattended": ["no-such-class"]}), true);
+    let o = cli(&sim, &["tidy", "--auto", "--host", "h1"], &p);
+    assert_eq!(o.rc, 1, "{}{}", o.stdout, o.stderr);
+    assert!(gatetrain_core::tidy::tidy_auto_note(&o, "h1").is_err(), "a config error is a tidy that did not run: {:?}", gatetrain_core::tidy::tidy_auto_note(&o, "h1"));
+}
+
+#[test]
+fn ma4_a_tidy_auto_for_an_unknown_host_did_not_run() {
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let p = write_conf(d.path(), json!({"log": d.path().join("l.jsonl").to_string_lossy()}), true);
+    let o = cli(&sim, &["tidy", "--auto", "--host", "nobody"], &p);
+    assert_eq!(o.rc, 1);
+    assert!(gatetrain_core::tidy::tidy_auto_note(&o, "nobody").is_err());
+}
+
+#[test]
+fn ma4_a_tidy_auto_that_ran_and_left_the_disk_below_its_threshold_ran() {
+    // exit 1 here is "ran, a threshold is still crossed", not "did not run"
+    let sim = linux_sim();
+    let d = tempfile::tempdir().unwrap();
+    let p = write_conf(d.path(), json!({"log": d.path().join("l.jsonl").to_string_lossy()}), true);
+    let o = cli(&sim, &["tidy", "--auto", "--host", "h1"], &p);
+    assert_eq!(o.rc, 1, "{}{}", o.stdout, o.stderr);
+    assert!(o.stdout.contains("THRESHOLD"), "{}", o.stdout);
+    let note = gatetrain_core::tidy::tidy_auto_note(&o, "h1").expect("it ran");
+    assert!(note.contains("reclaimed"), "{note}");
+}
