@@ -1955,7 +1955,7 @@ fn a_batch_checkout_on_a_branch_the_batch_does_not_own_is_not_owned() {
     let mut fx = live_fx();
     fx.cfg.close_own_workdir = true;
     let wd = fx.repo.to_string_lossy().to_string(); // the spelling the engine recorded
-    fx.cfg.close_roots.push(wd.clone());
+    fx.cfg.close_roots.push(above(&wd));
     let mut env = full_env();
     env.present.borrow_mut().insert(("worktree".into(), wd.clone()));
     env.wt_branch.insert(wd.clone(), "someone-elses".into());
@@ -2216,7 +2216,7 @@ fn b4b_a_line_batch_branch_is_not_derived_by_name_and_the_recorded_stack_branch_
 fn b4c_the_batch_checkout_is_left_alone_unless_own_workdir_is_set() {
     let mut fx = live_fx();
     let wd = fwd(&fx.repo);
-    fx.cfg.close_roots.push(wd.clone()); // inside a root, so only the own_workdir rule keeps it out
+    fx.cfg.close_roots.push(above(&wd)); // inside a root, so only the own_workdir rule keeps it out
     let mut env = full_env();
     env.present.borrow_mut().insert(("worktree".into(), wd.clone()));
     env.wt_branch.insert(wd.clone(), OWN.into());
@@ -2226,7 +2226,7 @@ fn b4c_the_batch_checkout_is_left_alone_unless_own_workdir_is_set() {
     let mut fx = live_fx();
     fx.cfg.close_own_workdir = true;
     let wd = fwd(&fx.repo);
-    fx.cfg.close_roots.push(wd.clone());
+    fx.cfg.close_roots.push(above(&wd));
     let mut env = full_env();
     env.present.borrow_mut().insert(("worktree".into(), wd.clone()));
     env.wt_branch.insert(wd.clone(), OWN.into());
@@ -2336,4 +2336,44 @@ fn the_escalation_row_is_written_once_per_batch() {
     fx.adv_with("b2", &adm);
     let esc = fx.ledger.conn.query_row("SELECT COUNT(*) FROM decisions WHERE rule='host.disk-escalation' AND batch='b2'", [], |r| r.get::<_, i64>(0)).unwrap();
     assert_eq!(esc, 1);
+}
+
+/// The folder that holds `p`: a `[close]` root owns what is strictly below it, never itself.
+fn above(p: &str) -> String {
+    std::path::Path::new(p).parent().unwrap().to_string_lossy().replace('\\', "/")
+}
+
+// ============================================================ review round 2 (BL2, MA1-MA3, minors 2, 4, 6): red first
+
+#[test]
+fn minor6_a_record_that_names_a_root_itself_never_owns_the_whole_root() {
+    let mut fx = live_fx();
+    std::fs::write(fx.state.join("targets").join("b1-p1.txt"), "/build\n").unwrap();
+    let env = FakeCloseEnv::with(&[("target", "/build")]);
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "tidy.not-owned"), "{o:?}");
+    assert!(!touched(&adm, "/build"), "{:?}", adm.env.disposed.borrow());
+}
+
+#[test]
+fn minor6_a_file_system_root_owns_nothing() {
+    let mut fx = live_fx();
+    fx.cfg.close_roots = vec!["/".into()];
+    let (o, adm) = run_closed(&mut fx, full_env());
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "tidy.not-owned"), "{o:?}");
+    assert!(!touched(&adm, TGT) && !touched(&adm, TMP), "{:?}", adm.env.disposed.borrow());
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"/\"]\n").is_err(), "a file-system root is refused when the config is read");
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"C:/\"]\n").is_err());
+    assert!(BatchConfig::parse("[close]\ntidy = true\nroots = [\"/build\", \"D:\\\\\"]\n").is_err());
+}
+
+#[test]
+fn minor6_a_root_that_holds_the_main_checkout_owns_nothing() {
+    let mut fx = live_fx();
+    let mut env = full_env();
+    env.main_checkout = Some("/build/main".into()); // main sits inside the /build root: that root can own nothing
+    let (o, adm) = run_closed(&mut fx, env);
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "tidy.not-owned"), "{o:?}");
+    assert!(!touched(&adm, TGT), "{:?}", adm.env.disposed.borrow());
+    assert!(touched(&adm, TMP), "a path under another, sound root still goes");
 }
