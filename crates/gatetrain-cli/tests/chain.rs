@@ -111,7 +111,8 @@ fn needs_orders_steps_and_a_red_dependency_skips_dependents() {
     let p = parse_log(&r.stdout).unwrap();
     let a = p.steps.iter().find(|s| s.name == "a").unwrap();
     let b = p.steps.iter().find(|s| s.name == "b").unwrap();
-    assert!(b.start.as_ref().unwrap().instant_us() >= a.end().unwrap().instant_us(), "b began before a ended");
+    // STEP_TIME is rounded to 0.1 s, so allow that much slack: a ran 1 s, b must start at least ~0.9 s after a started
+    assert!(b.start.as_ref().unwrap().instant_us() - a.start.as_ref().unwrap().instant_us() >= 900_000, "b began before a ended");
 
     // a red dependency: dependents are skipped (no start, no exit), the independent step still runs
     let d2 = tempfile::tempdir().unwrap();

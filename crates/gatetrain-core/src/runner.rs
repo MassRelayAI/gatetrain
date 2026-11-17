@@ -277,3 +277,13 @@ impl FakeRunner {
         f
     }
 }
+
+/// A shell command line as a prepared [`Command`] (cmd.exe on Windows, `/bin/sh -c` elsewhere), for callers that set their own directory.
+pub fn shell_command(cmd: &str) -> Command {
+    shell(cmd)
+}
+
+/// Run a prepared command to the end with BOTH streams captured and a time limit (`None` = 60 s); `Ok(None)` = timed out, the tree is killed.
+pub fn run_cmd_full(c: Command, timeout: Option<f64>) -> Result<Option<Output>, String> {
+    spawn_wait(c, None, timeout)
+}

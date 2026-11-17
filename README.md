@@ -482,7 +482,7 @@ Seventy-six so far, each with the rule and what enforces it ([`docs/lessons.md`]
 - [x] `gatetrain watch`: a repository's lanes and the next assignments, read-only (log watchers are still `status` / `next-tick`)
 - [ ] `gatetrain tick` (generic, host-aware); `status` and multi-log `next-tick` are built
 - [x] `gatetrain hold`, `running`, `memory` and `batch`: the host lock, the memory rule and the batch state machine
-- [ ] `gatetrain chain` (step runner)
+- [x] `gatetrain chain` (step runner): `--steps`, `--par`, `--out`, fast then slow tier, a stamp for a clean green tree
 - [x] Ledger writer: `gatetrain ingest` (chain logs into runs and steps), `report`, `trace` (Perfetto timeline)
 - [x] `gatetrain eta` (prediction from the ledger) and `gatetrain next-tick` (adaptive cadence)
 - [ ] `gatetrain stack` with base detection, artefact repair and pre-flight on a free host
