@@ -18,6 +18,9 @@ makes a later "disk equals build" test red (L53). Before stacking, `gatetrain la
 routes or tables and touches none of the lists they must join (L54).
 Every check under ~10 minutes: type checks, lints, structure and dependency rules, tracker and doc checks, the fast unit suites, the
 "every test is listed" and "every gate is in the full run" checks. The chain starts only when this is green.
+Run them as a steps file with `gatetrain chain --steps steps.toml --out out` (see `docs/chain.md`): the fast tier runs in parallel, every red is
+reported with its full output in `out/<step>.full`, a red fast step skips the slow tier, and a green run on a clean tree writes a stamp. `--cache <dir>`
+skips steps whose inputs are unchanged; use it for the pre-flight only, never for a proof run.
 
 ## Chain (on the builder)
 One holder takes the locks; steps write their own exit codes; reds do not stop the run, so all of them arrive together. Delete old logs

@@ -13,6 +13,7 @@ description: Use when a chain, a batch, a lane gate or an agent hand-back went w
    `infra-port` (failed to bind, address in use), `generated-uncommitted` (a NEW generated file never committed; run `gatetrain generated`),
    `baseline-shrink` (a lane fixed something: delete the entry and lower the count in the same commit), `baseline-missing` (a new route
    or table must join its list), `platform-windows` (run that step on Linux). Anything else is `real`: it is never silently a flake.
+   When many steps are red, read the `causes:` section first: steps that share a message are one cause ("N red steps from K causes"); fix the cause once.
    Also read its parallelism note: a run below the host's configured parallelism is slow for a reason that is not the code.
    The classes in prose:
    - *Artefact of stacking* (a duplicated line, a dropped list entry, a replayed row, re-applied commits) -> fix on the batch; teach the
