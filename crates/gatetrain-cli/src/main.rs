@@ -592,10 +592,7 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
             let (hp, hn) = (h.to_string_lossy().into_owned(), n.clone());
             adm.tidy = Some(Box::new(move || {
                 let out = gatetrain_core::tidy::cmd_tidy(&hp, Some(&hn), false, None, true, &gatetrain_core::tidy::make_runner, None);
-                if out.rc >= 2 {
-                    return Err(gatetrain_core::Error::Batch(format!("tidy --auto on {hn} failed: {}", out.stderr.trim())));
-                }
-                Ok(out.stdout.lines().find(|l| l.contains("reclaimed")).unwrap_or("tidy --auto ran").to_string())
+                gatetrain_core::tidy::tidy_auto_note(&out, &hn)
             }));
         }
     }

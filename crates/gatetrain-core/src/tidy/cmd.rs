@@ -35,6 +35,14 @@ impl CliOut {
     }
 }
 
+/// What `tidy --auto` did, for the disk floor's decision row: `Ok(note)` when it ran, `Err` when it did not.
+pub fn tidy_auto_note(out: &CliOut, host: &str) -> crate::Result<String> {
+    if out.rc >= 2 {
+        return Err(crate::Error::Batch(format!("tidy --auto on {host} failed: {}", out.stderr.trim())));
+    }
+    Ok(out.stdout.lines().find(|l| l.contains("reclaimed")).unwrap_or("tidy --auto ran").to_string())
+}
+
 pub type RunnerFactory<'a> = &'a dyn Fn(&Host) -> Option<Box<dyn Runner>>;
 
 /// `doctor.make_runner`: local, or ssh; anything else is skipped.
