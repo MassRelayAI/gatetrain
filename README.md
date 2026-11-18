@@ -410,7 +410,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 gatetrain privacy-check             # no deny-listed word in any file (hashed list `.privacy-denylist`; `--hash W` prints a line to add)
 ```
 
-Real run on Windows (2026-11-17), from `cargo test --workspace`: 378 tests, 0 failed (gatetrain-core 304, gatetrain-cli 73, the test child program 1). Clippy with `-D warnings` is clean. The privacy check has 8 of the core tests. CI repeats all of it on Linux, macOS and Windows. The tests that once compared against the Python version now read what it printed: `tests/golden/` and `tests/corpus/`.
+Real runs (2026-11-19), from `cargo test --workspace`, summed over the `test result` lines of its 42 test binaries: Windows 802 tests, 0 failed; Linux (WSL 2) 807 tests, 0 failed (the Linux-only watchdog and process-group tests are the difference). Clippy with `-D warnings` is clean. The privacy check has 8 of the core tests. CI repeats all of it on Linux, macOS and Windows. The tests that once compared against the Python version now read what it printed: `tests/golden/` and `tests/corpus/`.
 
 Works alongside single-branch development skill sets (brainstorming, plans, test-driven development, code review, such as
 [Superpowers](https://github.com/obra/superpowers)): those make one lane good; gatetrain runs many lanes on many machines and proves the batch.
