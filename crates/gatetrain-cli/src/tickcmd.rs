@@ -73,6 +73,13 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
     } else {
         BatchConfig::default()
     };
+    if !cfg.tick_enabled {
+        // off by default: an unattended pass merges and deploys, so a person turns it on once the deploy targets are ready for it
+        return config_error(format!(
+            "tick is off: set [tick] enabled = true in {} once every deploy target has timeout_min and a deploy command that is safe to run twice",
+            a.config.display()
+        ));
+    }
     let hosts = match config::load(&a.hosts) {
         Ok(h) => h,
         Err(e) => return config_error(e.to_string()),

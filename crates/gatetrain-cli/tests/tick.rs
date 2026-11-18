@@ -48,7 +48,7 @@ impl Fx {
         g(&["add", "--", "b"]);
         g(&["commit", "-q", "-m", "feat: b"]);
         g(&["switch", "-q", "main"]);
-        std::fs::write(root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n").unwrap();
+        std::fs::write(root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[tick]\nenabled = true\n").unwrap();
         std::fs::write(root.join("hosts.toml"), HOSTS).unwrap();
         let fx = Fx { db: fwd(&root.join("g.db")), root, _t: t };
         assert!(gt(&["ledger", "migrate", "--db", &fx.db]).status.success());
@@ -135,7 +135,7 @@ fn no_open_batch_is_exit_0_and_a_bad_config_is_exit_2() {
     let o = fx.tick(&[]);
     assert_eq!(o.status.code(), Some(2), "{}", out(&o));
     std::fs::write(fx.root.join("hosts.toml"), HOSTS).unwrap();
-    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\nstorm_reds = 0\n").unwrap();
+    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\nstorm_reds = 0\n[tick]\nenabled = true\n").unwrap();
     assert_eq!(fx.tick(&[]).status.code(), Some(2));
 }
 
@@ -224,7 +224,7 @@ fn minor1_a_tick_finding_the_lock_held_too_long_says_so_and_exits_1() {
     let t = String::from_utf8_lossy(&o.stdout).to_string();
     assert!(t.starts_with(&format!("tick: the ledger lock is held by pid {me} (tick) since 2026-01-01T00:00:00Z")), "{t}");
     assert!(t.contains("[tick] stuck_minutes = 60"), "{t}");
-    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[tick]\nstuck_minutes = 999999999\n").unwrap();
+    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[tick]\nenabled = true\nstuck_minutes = 999999999\n").unwrap();
     let o = fx.tick(&[]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), format!("tick: another tick holds the lock (pid {me}, started 2026-01-01T00:00:00Z)"));
@@ -312,4 +312,20 @@ fn rev3_minor4_the_wait_help_names_exit_73() {
     let o = gt(&["batch", "--help"]);
     let t = out(&o);
     assert!(t.contains("exit 73") && !t.contains("exit 75"), "{t}");
+}
+
+// ---------------------------------------------------------------- the failure-model rebuild (S0..S8)
+
+#[test]
+fn s0_tick_is_off_unless_the_config_turns_it_on() {
+    let fx = Fx::new(true);
+    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n").unwrap();
+    let before = fx.rows();
+    let o = fx.tick(&[]);
+    assert_eq!(o.status.code(), Some(2), "{}", out(&o));
+    assert!(out(&o).contains("[tick] enabled = true"), "{}", out(&o));
+    assert_eq!(fx.rows(), before, "nothing was written");
+    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[tick]\nenabled = false\n").unwrap();
+    assert_eq!(fx.tick(&[]).status.code(), Some(2));
+    assert!(gatetrain_core::batchcfg::BatchConfig::parse("[tick]\nenabled = \"yes\"\n").is_err(), "enabled is a boolean");
 }

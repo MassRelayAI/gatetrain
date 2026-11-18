@@ -104,6 +104,9 @@ pub struct BatchConfig {
     /// `[chain] storm_reds` (default 20): when one cause explains at least this many reds of a running chain, `tick` reports it and names
     /// the stop command (engine-v2 section 8). It only reports; nothing is stopped.
     pub storm_reds: usize,
+    /// `[tick] enabled` (default false): `gatetrain tick` refuses to run (exit 2) until a person turns it on, after the deploy targets
+    /// carry `timeout_min` and their commands are safe to run twice.
+    pub tick_enabled: bool,
     /// `[tick] stuck_minutes` (default 60): a tick that finds the ledger lock held longer than this reports it and exits 1.
     pub stuck_minutes: f64,
     /// `[tick] max_wait_minutes` (default 120): a batch that has waited longer (a health check that never passes, a host that keeps
@@ -158,6 +161,7 @@ impl Default for BatchConfig {
             tidy_auto: false,
             legacy_stamp_command: vec![],
             storm_reds: 20,
+            tick_enabled: false,
             stuck_minutes: 60.0,
             max_wait_minutes: 120.0,
             max_run_minutes: 360.0,
@@ -201,6 +205,9 @@ impl BatchConfig {
         }
         c.cache_verify_command = argv(v.get("chain").and_then(|p| p.get("cache_verify_command")));
         c.chain_target_dirs = argv(v.get("chain").and_then(|p| p.get("target_dirs")));
+        if let Some(x) = v.get("tick").and_then(|t| t.get("enabled")) {
+            c.tick_enabled = x.as_bool().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [tick] enabled is true or false, not {x}")))?;
+        }
         if let Some(n) = v.get("tick").and_then(|t| t.get("stuck_minutes")) {
             match n.as_float().or_else(|| n.as_integer().map(|i| i as f64)) {
                 Some(m) if m > 0.0 => c.stuck_minutes = m,
