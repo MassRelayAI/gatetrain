@@ -571,20 +571,29 @@ fn major2_no_close_environment_is_a_refusal_with_the_error_not_a_wait() {
 }
 
 #[test]
-fn minor1_a_crash_inside_a_target_deploys_again_on_resume() {
-    let mut fx = Fx::new("");
-    fx.drive_to_proving("b1", "lane1");
-    fx.write_log("b1", GREEN);
-    for want in ["proven", "merged"] {
-        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+fn minor1_s3_a_crash_inside_a_target_is_not_deployed_again_unless_the_target_is_idempotent() {
+    for idempotent in [false, true] {
+        let mut fx = Fx::new("");
+        fx.cfg.targets.get_mut("staging").unwrap().idempotent = idempotent;
+        fx.drive_to_proving("b1", "lane1");
+        fx.write_log("b1", GREEN);
+        for want in ["proven", "merged"] {
+            assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+        }
+        gatetrain_core::batch::crash_seam::set(Some("T8a:staging".into()));
+        assert!(fx.with(|e| e.advance("b1")).is_err(), "the simulated crash right after the staging deploy");
+        gatetrain_core::batch::crash_seam::set(None);
+        assert_eq!(lines_in(&fx, "deploy.txt"), 1);
+        let r = fx.tick();
+        if idempotent {
+            assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+            assert_eq!(lines_in(&fx, "deploy.txt"), 2, "a target declared idempotent is deployed again on resume");
+        } else {
+            assert!(r.lines[0].starts_with("b1: merged, BLOCKED batch.failed-needs-person: the last attempt of T8a failed (interrupted: "), "{:?}", r.lines);
+            assert_eq!(lines_in(&fx, "deploy.txt"), 1, "a target that may be half deployed is not deployed again without a person");
+            assert_eq!(r.exit_code(), 1);
+        }
     }
-    gatetrain_core::batch::crash_seam::set(Some("T8a:staging".into()));
-    assert!(fx.with(|e| e.advance("b1")).is_err(), "the simulated crash right after the staging deploy");
-    gatetrain_core::batch::crash_seam::set(None);
-    assert_eq!(lines_in(&fx, "deploy.txt"), 1);
-    let r = fx.tick();
-    assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
-    assert_eq!(lines_in(&fx, "deploy.txt"), 2, "the marker was not written, so the resumed T8a deploys again");
 }
 
 #[test]

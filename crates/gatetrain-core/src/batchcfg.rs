@@ -14,6 +14,9 @@ pub struct Target {
     pub health_timeout_min: f64,
     /// How long the deploy command may run before its process tree is ended and the deploy fails; `None` = no limit.
     pub timeout_min: Option<f64>,
+    /// `idempotent = true`: the deploy command is safe to run twice, so a resume that cannot tell whether a crash left this target
+    /// half deployed may deploy it again; otherwise the interrupted attempt waits for a person.
+    pub idempotent: bool,
 }
 
 /// A shared file ("hub") that is rebuilt, not merged, when two lanes change it: `[stack] hubs = [{ glob, rebuild }]`.
@@ -340,6 +343,10 @@ impl BatchConfig {
                     Target {
                         command: argv(t.get("command")),
                         health: argv(t.get("health")),
+                        idempotent: match t.get("idempotent") {
+                            None => false,
+                            Some(x) => x.as_bool().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [deploy.{name}] idempotent is true or false, not {x}")))?,
+                        },
                         tier: t.get("tier").and_then(|x| x.as_str()).unwrap_or("staging").to_string(),
                         health_timeout_min: t.get("health_timeout_min").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).unwrap_or(0.0),
                         timeout_min: match t.get("timeout_min") {

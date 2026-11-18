@@ -172,23 +172,23 @@ fn crash_between_intent_and_done_resumes_without_rerunning_the_effect() {
 }
 
 #[test]
-fn an_intent_whose_effect_did_not_happen_runs_again_under_the_same_run_id() {
+fn an_intent_whose_effect_did_not_happen_runs_again_as_a_new_attempt_with_a_new_run_id() {
     let mut fx = Fx::new("");
     fx.open("b1");
     for s in ["stacked", "settled", "preflighted"] {
         fx.step("b1", s);
     }
-    // simulate a crash before the launch: an intent with no effect
-    gatetrain_core::batch::crash_seam::set(Some("T4".into()));
-    // the fake lock records the launch before the crash hook fires, so clear it to model "never happened"
+    // a crash right after the intent: the launch never happened (no lock names the run, no log was opened)
+    gatetrain_core::batch::crash_seam::set(Some("before:T4".into()));
     assert!(fx.adv("b1").is_err());
-    fx.lock.named.lock().unwrap().clear();
-    fx.lock.launches.lock().unwrap().clear();
     gatetrain_core::batch::crash_seam::set(None);
+    assert!(fx.lock.launches.lock().unwrap().is_empty());
     fx.step("b1", "proving");
     let l = fx.lock.launches.lock().unwrap();
     assert_eq!(l.len(), 1);
-    assert_eq!(l[0].run_id, "b1-p1", "the run id fixed before launch is reused");
+    assert_eq!(l[0].run_id, "b1-p2", "a resume never reuses a run id: the interrupted attempt keeps b1-p1");
+    let outcome: String = fx.ledger.conn.query_row("SELECT json_extract(detail,'$.outcome') FROM batch_events WHERE batch='b1' AND transition='T4' AND phase='failed'", [], |r| r.get(0)).unwrap();
+    assert_eq!(outcome, "interrupted");
 }
 
 #[test]
@@ -2550,4 +2550,51 @@ fn s1_an_abandoned_batch_with_a_pending_intent_is_never_resumed() {
     assert!(matches!(fx.adv("b1").unwrap(), Outcome::Idle(_)));
     assert_eq!(fx.state("b1"), "abandoned");
     assert_eq!(g(&fx.repo, &["rev-parse", "main"]), main0);
+}
+
+fn outcome_of(fx: &Fx, tr: &str) -> String {
+    fx.ledger.conn.query_row("SELECT json_extract(detail,'$.outcome') FROM batch_events WHERE transition=? AND phase='failed' ORDER BY seq DESC LIMIT 1", [tr], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn s3_a_failed_attempt_says_whether_it_left_the_world_changed() {
+    // a stack command that fails after the stack branch was created: the branch is left (dirty)
+    let mut fx = Fx::new("[stack]\ncommand = [\"sh\", \"-c\", \"exit 3\"]\n");
+    fx.open("b1");
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Failed(_)));
+    assert_eq!(outcome_of(&fx, "T1"), "failed-dirty");
+    // a blocking pre-flight that fails writes no stamp and changes nothing (clean)
+    let mut fx = Fx::new("");
+    fx.cfg.preflight_command = vec!["sh".into(), "-c".into(), "exit 4".into()];
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Failed(_)));
+    assert_eq!(outcome_of(&fx, "T3"), "failed-clean");
+}
+
+#[test]
+fn s3_a_launch_whose_log_was_opened_but_whose_run_no_lock_names_is_interrupted_not_launched_again() {
+    let mut fx = Fx::new("");
+    fx.open("b1");
+    for s in ["stacked", "settled", "preflighted"] {
+        fx.step("b1", s);
+    }
+    crash_seam::set(Some("T4".into()));
+    assert!(fx.adv("b1").is_err());
+    crash_seam::set(None);
+    // the holder was spawned and opened its log, but no lock names the run: it may still start, so it is not settled
+    fx.lock.named.lock().unwrap().clear();
+    let req = fx.lock.launches.lock().unwrap()[0].clone();
+    std::fs::write(&req.log, "").unwrap();
+    match fx.adv("b1").unwrap() {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "batch.failed-needs-person");
+            assert!(because.contains("interrupted"), "{because}");
+        }
+        o => panic!("{o:?}"),
+    }
+    assert_eq!(fx.lock.launches.lock().unwrap().len(), 1, "never a second launch of a run that may be starting");
+    assert_eq!(outcome_of(&fx, "T4"), "interrupted");
+    assert_eq!(fx.state("b1"), "preflighted");
 }

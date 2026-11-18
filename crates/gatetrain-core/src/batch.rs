@@ -258,6 +258,9 @@ enum Probe {
     Happened(Option<String>),
     NotHappened,
     Partly,
+    /// The probe cannot tell whether the effect happened (a holder that opened its log but holds no lock yet, a deploy target a crash
+    /// may have left half done): the attempt is closed as `interrupted` and is run again only when the effect is declared idempotent.
+    Unknown(String),
 }
 
 pub struct Engine<'a> {
@@ -808,13 +811,14 @@ impl<'a> Engine<'a> {
 
     /// The failed attempts of `tr` that still count: after the row that put the batch in its state (a hold, a release or a retry
     /// override is not such a row) and after the newest person's retry override. A crash is not a failure of the effect: an attempt
-    /// closed as `interrupted` does not count. Oldest first.
+    /// closed as `interrupted` does not count, unless the probe could not settle it. Oldest first.
     fn failures_since(&self, id: &str, tr: &str) -> Result<Vec<Ev>> {
         let ev = self.events(id)?;
         let entered = ev.iter().rev().find(|e| e.phase == "done" && !matches!(e.transition.as_str(), "hold" | "release" | "retry")).map_or(0, |e| e.seq);
         let overridden = ev.iter().rev().find(|e| e.transition == "retry" && e.phase == "done" && e.detail["transition"].as_str() == Some(tr)).map_or(0, |e| e.seq);
         let since = entered.max(overridden);
-        Ok(ev.into_iter().filter(|e| e.seq > since && e.transition == tr && e.phase == "failed" && e.detail["outcome"].as_str() != Some("interrupted")).collect())
+        let settled_crash = |e: &Ev| e.detail["outcome"].as_str() == Some("interrupted") && e.detail["settled"].as_bool() != Some(false);
+        Ok(ev.into_iter().filter(|e| e.seq > since && e.transition == tr && e.phase == "failed" && !settled_crash(e)).collect())
     }
 
     /// The engine's one retry decision, used by every path that starts an attempt (`advance`, a tick, `retry`): a transition whose
@@ -936,16 +940,54 @@ impl<'a> Engine<'a> {
             Err(e @ Error::SimulatedCrash(_)) => return Err(e),
             // every other error of the effect (a command that cannot be spawned, a missing folder, a marker that cannot be written)
             // is a failed attempt with its row, so no caller runs the effect again without a person
-            Ok(Err(msg)) | Err(Error::Batch(msg)) => return self.failed(id, &plan, msg),
-            Err(e) => return self.failed(id, &plan, e.to_string()),
+            Ok(Err(msg)) | Err(Error::Batch(msg)) => return self.failed(id, f, &plan, msg),
+            Err(e) => return self.failed(id, f, &plan, e.to_string()),
         };
         crash_point(&plan.tr)?;
         self.finish(id, &plan, done.output, done.extra, "")
     }
 
-    fn failed(&mut self, id: &str, plan: &Plan, msg: String) -> Result<Outcome> {
-        self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": msg, "outcome": "failed"}))?;
+    /// A failed attempt: `failed-clean` when the world is as it was before the attempt, `failed-dirty` when the attempt left something
+    /// behind (a stack branch, a commit, a moved ref, a deployed target), so a person knows what a retry starts from.
+    fn failed(&mut self, id: &str, f: &Folded, plan: &Plan, msg: String) -> Result<Outcome> {
+        let outcome = if self.left_dirty(f, plan) { "failed-dirty" } else { "failed-clean" };
+        self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": msg, "outcome": outcome}))?;
         Ok(Outcome::Failed(format!("{}: {msg}", plan.tr)))
+    }
+
+    /// Did the failed attempt leave the world changed? A check that cannot be made counts as changed.
+    fn left_dirty(&self, f: &Folded, plan: &Plan) -> bool {
+        let Some(wd) = f.s("workdir").map(PathBuf::from) else { return true };
+        let rev = |r: &str| git(&wd, &["rev-parse", "--verify", "-q", r]).ok();
+        match plan.tr.as_str() {
+            "T1" => rev(&format!("refs/heads/{}", plan.detail["branch"].as_str().unwrap_or_default())).is_some(),
+            "T2" => rev("HEAD") != plan.input_sha || dirty_paths(&wd).map(|d| !d.is_empty()).unwrap_or(true),
+            "T7" => {
+                let branch = f.s("branch").unwrap_or_default();
+                rev(&format!("refs/heads/{branch}")) != plan.input_sha || rev(&format!("refs/heads/{}", self.cfg.protected)).as_deref() != plan.detail["merge_old"].as_str()
+            }
+            "T8a" => true,
+            _ => false,
+        }
+    }
+
+    /// Close the pending attempt as `interrupted`: a crash, not a failure of the effect. `settled` = the probe (or the effect's declared
+    /// idempotence) says running it again is safe; an unsettled interruption counts against the `[retry] budget` like a failure.
+    fn interrupted(&mut self, id: &str, plan: &Plan, settled: bool, why: &str) -> Result<()> {
+        let detail = json!({"error": format!("interrupted: {why}"), "outcome": "interrupted", "settled": settled});
+        self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &detail)?;
+        Ok(())
+    }
+
+    /// May the effect of this plan run twice without harm? A regen fixpoint and a blocking pre-flight are; a deploy is when every
+    /// target of the attempt is declared `idempotent`; a launch, a stack and a merge are not (their probes settle them instead).
+    fn idempotent(&self, plan: &Plan) -> bool {
+        match plan.tr.as_str() {
+            "T2" => true,
+            "T3" => plan.detail.get("pf_run_id").is_none(),
+            "T8a" => plan.detail["targets"].as_array().into_iter().flatten().all(|n| self.cfg.targets.get(n.as_str().unwrap_or_default()).is_some_and(|t| t.idempotent)),
+            _ => false,
+        }
     }
 
     fn finish(&mut self, id: &str, plan: &Plan, output: Option<String>, extra: Value, why: &str) -> Result<Outcome> {
@@ -967,34 +1009,30 @@ impl<'a> Engine<'a> {
 
     // ------------------------------------------------------------ resume (design 3.4)
 
+    /// An intent with no `done`: the probe settles it. `happened` finishes the attempt; anything else closes it as `interrupted` and the
+    /// transition starts again as a new attempt through `go` (its guards, its retry decision, a new run id), never the same attempt
+    /// twice. An effect the probe cannot settle runs again only when it is declared idempotent; otherwise it waits for a person.
     fn resume(&mut self, id: &str, f: &Folded, p: Ev) -> Result<Outcome> {
         let plan = Plan { tr: p.transition.clone(), to: to_for(&p.transition, &p.detail).into(), input_sha: p.input_sha.clone(), run_id: p.run_id.clone(), attempt: p.attempt, detail: p.detail.clone() };
         match self.probe(id, f, &plan)? {
             Probe::Happened(out) => {
                 let extra = if plan.tr == "T7" { json!({"resumed": "happened", "merge_new": out}) } else { json!({"resumed": "happened"}) };
-                self.finish(id, &plan, out, extra, " (resumed: the probe found the effect done)")
+                return self.finish(id, &plan, out, extra, " (resumed: the probe found the effect done)");
             }
-            Probe::NotHappened => {
-                // the world moved while the intent waited (a hold, a reboot, a person): its guards are judged again before the effect
-                match self.plan(&plan.tr, id, f, plan.attempt)? {
-                    Planned::Refuse(rule, because) => self.refuse(id, &rule, because),
-                    Planned::Go(_) => self.execute(id, f, plan),
-                }
-            }
-            Probe::Partly => {
-                // Finish forward under a new attempt; the partial result is kept, never deleted.
-                self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": "partly done; finishing forward under a new attempt", "outcome": "interrupted"}))?;
-                let attempt = p.attempt + 1;
-                let f2 = self.fold(id)?;
-                match self.plan(&plan.tr, id, &f2, attempt)? {
-                    Planned::Refuse(rule, because) => self.refuse(id, &rule, because),
-                    Planned::Go(np) => {
-                        self.event(id, &np.tr, "intent", attempt, None, np.input_sha.as_deref(), None, np.run_id.as_deref(), None, &np.detail)?;
-                        self.execute(id, &f2, np)
-                    }
-                }
+            Probe::NotHappened => self.interrupted(id, &plan, true, "the probe found the effect not done; it runs again under a new attempt")?,
+            // finish forward under a new attempt; the partial result is kept, never deleted
+            Probe::Partly => self.interrupted(id, &plan, true, "partly done; finishing forward under a new attempt")?,
+            Probe::Unknown(why) => {
+                let again = self.idempotent(&plan);
+                let what = if again { "; the effect is declared idempotent, so it runs again under a new attempt" } else { "; a person settles it" };
+                self.interrupted(id, &plan, again, &format!("{why}{what}"))?
             }
         }
+        let f2 = self.fold(id)?;
+        if let Some(o) = self.parked(id, &f2)? {
+            return Ok(o);
+        }
+        self.go(id, &f2, &plan.tr)
     }
 
     /// Read-only: git refs and commits, files on disk, the lock.
@@ -1030,14 +1068,8 @@ impl<'a> Engine<'a> {
                     Probe::Partly // commits or leftovers exist; the fixpoint is not proven
                 }
             }
-            "T3" if plan.detail.get("pf_run_id").is_some() => {
-                // a launched pre-flight: the run is adopted when a live lock names it, else it is started again under the same run id
-                if self.lock.names_run(plan.run_id.as_deref().unwrap_or_default())? {
-                    Probe::Happened(None)
-                } else {
-                    Probe::NotHappened
-                }
-            }
+            // a launched pre-flight: adopted when a live lock names it (see `launch_probe`)
+            "T3" if plan.detail.get("pf_run_id").is_some() => self.launch_probe(plan, "pf_log")?,
             "T3" => {
                 let sha = plan.input_sha.clone().unwrap_or_default();
                 if self.stamp_path(&sha).exists() {
@@ -1046,13 +1078,7 @@ impl<'a> Engine<'a> {
                     Probe::NotHappened
                 }
             }
-            "T4" | "T6a" => {
-                if self.lock.names_run(plan.run_id.as_deref().unwrap_or_default())? {
-                    Probe::Happened(None)
-                } else {
-                    Probe::NotHappened
-                }
-            }
+            "T4" | "T6a" => self.launch_probe(plan, "log")?,
             "T7" => {
                 let new = plan.detail["merge_new"].as_str().unwrap_or_default();
                 let cur = git(&wd, &["rev-parse", &format!("refs/heads/{}", self.cfg.protected)])?;
@@ -1071,10 +1097,27 @@ impl<'a> Engine<'a> {
                 if have.as_ref() == Some(&want) {
                     Probe::Happened(plan.input_sha.clone())
                 } else {
-                    Probe::NotHappened // nothing recorded: run again (the deploy command must still be idempotent, design 7.6)
+                    // no marker: a crash may have left a target half deployed
+                    Probe::Unknown(format!("a crash may have left a deploy target of {} half deployed", short(plan.input_sha.as_deref().unwrap_or_default())))
                 }
             }
             _ => Probe::NotHappened,
+        })
+    }
+
+    /// The probe of a launch (T4, T6a, a launched T3): a live lock that names the run means it was launched; a log the holder wrote
+    /// into means it ran (T5 reads how it ended); no log means the holder never started; an empty log means it was spawned and may
+    /// still take the lock, which no probe can settle.
+    fn launch_probe(&self, plan: &Plan, log_key: &str) -> Result<Probe> {
+        let run = plan.run_id.as_deref().unwrap_or_default();
+        if self.lock.names_run(run)? {
+            return Ok(Probe::Happened(None));
+        }
+        let log = PathBuf::from(plan.detail[log_key].as_str().unwrap_or_default());
+        Ok(match std::fs::metadata(&log) {
+            Err(_) => Probe::NotHappened,
+            Ok(m) if m.len() > 0 => Probe::Happened(None),
+            Ok(_) => Probe::Unknown(format!("the holder of run {run} opened its log {} but no lock names the run; it may still start", log.display())),
         })
     }
 
