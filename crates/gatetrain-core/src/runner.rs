@@ -211,22 +211,10 @@ pub struct Opts<'a> {
 mod watchdog {
     use libc::{c_int, pid_t, sigset_t};
 
-    /// The signals the watchdog takes itself (blocked, read by `sigtimedwait`); SIGKILL and SIGSTOP cannot be.
-    const TAKEN: [c_int; 13] = [
-        libc::SIGTERM,
-        libc::SIGINT,
-        libc::SIGQUIT,
-        libc::SIGHUP,
-        libc::SIGUSR1,
-        libc::SIGUSR2,
-        libc::SIGALRM,
-        libc::SIGPIPE,
-        libc::SIGCHLD,
-        libc::SIGTSTP,
-        libc::SIGTTIN,
-        libc::SIGTTOU,
-        libc::SIGVTALRM,
-    ];
+    /// The signals the watchdog does NOT take: SIGKILL and SIGSTOP cannot be blocked, and the synchronous fault signals (SEGV, BUS,
+    /// FPE, ILL) must keep their default so a fault of the watchdog itself is never held. Every other signal, the real-time ones
+    /// included, is blocked and read by `sigtimedwait` (round 3, A: a list missed IO, PWR, PROF, XCPU, ABRT, RTMIN...).
+    const LEFT: [c_int; 6] = [libc::SIGKILL, libc::SIGSTOP, libc::SIGSEGV, libc::SIGBUS, libc::SIGFPE, libc::SIGILL];
 
     /// Between fork and exec (async-signal-safe calls only, nothing allocated): fork the plugin, which returns `Ok` and goes on to exec;
     /// this process becomes the watchdog and never returns. `parent` is gatetrain's pid.
@@ -234,9 +222,9 @@ mod watchdog {
         // SAFETY: raw syscalls on our own process, on zeroed POD signal sets; no allocation, no lock
         unsafe {
             let mut set: sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            for sig in TAKEN {
-                libc::sigaddset(&mut set, sig);
+            libc::sigfillset(&mut set);
+            for sig in LEFT {
+                libc::sigdelset(&mut set, sig);
             }
             // a SIGCHLD set to "ignore" would let the kernel reap the plugin before the watchdog reads its status
             libc::signal(libc::SIGCHLD, libc::SIG_DFL);
@@ -299,7 +287,8 @@ mod watchdog {
             if (sig == libc::SIGINT || sig == libc::SIGTERM) && from != me && (from <= 0 || libc::getpgid(from) != group) {
                 libc::kill(0, sig);
             }
-            // every other signal (HUP, USR1, ... sent to the group) reached the plugin already: the watchdog stays
+            // every other signal (HUP, USR1, IO, a real-time signal, ... sent to the group) reached the plugin already, and anything
+            // unexpected is ignored: the watchdog stays
         }
     }
 }
@@ -310,7 +299,8 @@ mod watchdog {
 fn reset_signals_unix() {
     // SAFETY: async-signal-safe calls on our own process, between fork and exec
     unsafe {
-        for sig in 1..32 {
+        // the real-time signals too (glibc refuses the two it keeps for itself, which is harmless)
+        for sig in 1..=libc::SIGRTMAX() {
             if sig != libc::SIGKILL && sig != libc::SIGSTOP {
                 libc::signal(sig, libc::SIG_DFL);
             }

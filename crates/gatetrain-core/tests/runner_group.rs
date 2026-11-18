@@ -235,3 +235,18 @@ fn minor7_a_job_assignment_that_fails_fails_the_step_and_nothing_runs() {
         assert!(!marker.exists(), "survives_parent {survives_parent}: the plugin ran its command");
     }
 }
+
+/// Round 3, A: the watchdog takes every catchable signal the plugin may send its group, not a list: IO, PWR, PROF, a real-time
+/// signal, XCPU, ABRT and WINCH sent with `kill -X 0` leave it standing, the run waits for the plugin and returns its exit code.
+#[cfg(target_os = "linux")]
+#[test]
+fn round3_a_every_signal_a_plugin_sends_its_group_leaves_the_watchdog_standing() {
+    let mut died = vec![];
+    for sig in ["IO", "PWR", "PROF", "RTMIN", "RTMAX", "XCPU", "XFSZ", "SYS", "TRAP", "STKFLT", "ABRT", "WINCH"] {
+        let r = run_watched(bash(&format!("trap '' {sig}; kill -{sig} 0; sleep 1.5; exit 0")));
+        if rc_out(&r).0 != 0 {
+            died.push(format!("SIG{sig} rc {}", rc_out(&r).0));
+        }
+    }
+    assert!(died.is_empty(), "the watchdog died alone on: {died:?}");
+}
