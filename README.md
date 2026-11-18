@@ -442,6 +442,15 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 
 ### What a tick looks like (example)
 
+> **Not ready to enable yet (2026-11-18).** The enable-readiness review of this release found open items. Leave `[tick] enabled`
+> off until a release says they are closed:
+> 1. A second batch can deploy alongside the first batch's orphaned deploy, after gatetrain dies mid-deploy. The first batch can then
+>    deploy its older sha over the second's, with nothing flagged.
+> 2. On Linux, only the deploy's leader process dies with gatetrain; its children can live on.
+> 3. A crash between starting a deploy and recording it leaves no record.
+>
+> Until then, `batch advance` by hand is the supported path.
+
 `gatetrain tick` is off until `gatetrain.toml` says `[tick] enabled = true`; without it the tick exits 2 and writes nothing. Turn it on
 only when every deploy target has `timeout_min` and a deploy command that is safe to run twice (a tick that dies mid-deploy may leave a
 target for a person or a probe to settle, and a target the tick deploys again must not break by being deployed twice).
@@ -494,7 +503,7 @@ process group (a job object on Windows) of its own so a timeout ends what it sta
 `[preflight] timeout_min` (60), `[postmerge] timeout_min` (30), and `[timeouts] plugin_min` (30) for the stack command, hub rebuilds,
 regen, health checks, cache verification, the legacy stamp and every git call the engine makes (git runs hooks, which can hang). A command past its limit fails the attempt (`the local process tree
 was signalled; a remote or detached deploy may still run`); a health check past it is a wait. A plugin dies with gatetrain (Linux:
-`PR_SET_PDEATHSIG`; Windows: a job object that kills on close while the plugin runs) unless its deploy target says
+`PR_SET_PDEATHSIG`, which reaches the plugin's leader process only, not the processes it starts; Windows: a job object that kills on close while the plugin runs) unless its deploy target says
 `survives_parent = true` (it starts a long-lived service). A deploy step records its process (`<state>/running/<batch>-T8a.json`, pid
 and start time) while it runs: if gatetrain dies and the deploy lives on, the next advance waits (`... is still running as pid N`)
 instead of starting a second deploy beside it. Before it advances anything the tick verifies the decision log; a
