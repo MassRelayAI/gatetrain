@@ -2652,6 +2652,12 @@ fn install_post_merge_hook(fx: &Fx) {
     let hooks = if hooks.is_absolute() { hooks } else { fx.repo.join(hooks) }.join("hooks");
     std::fs::create_dir_all(&hooks).unwrap();
     std::fs::write(hooks.join("post-merge"), "#!/bin/sh\necho made-by-hook > hook-made.txt\n").unwrap();
+    // git runs a hook only when it is executable (on Windows every file is)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(hooks.join("post-merge"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 #[test]
