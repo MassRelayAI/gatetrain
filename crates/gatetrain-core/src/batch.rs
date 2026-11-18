@@ -2101,9 +2101,11 @@ impl<'a> Engine<'a> {
                 return self.refuse(id, "deploy.health-missing", format!("target {name} has no health check; live cannot be confirmed"));
             }
             let env = self.env(id, f, &sha, "", "");
-            let rc = match self.plugin(id, "T8b", &format!("health {name}"), " ([timeouts] plugin_min)", &substitute(&health, &sha), &wd, &env, self.plugin_min())? {
-                Ok((rc, _)) => rc,
-                Err(why) => return Ok(Outcome::Waiting(format!("target {name}: {}", why.trim_start_matches(&format!("health {name} ")).replacen("timed out", "health timed out", 1)))),
+            // a health call that times out is an answer: not healthy. It runs into the same age check as a failing one, so a check
+            // that hangs on every call is refused at the health timeout instead of waiting for ever
+            let (rc, hung) = match self.plugin(id, "T8b", &format!("health {name}"), " ([timeouts] plugin_min)", &substitute(&health, &sha), &wd, &env, self.plugin_min())? {
+                Ok((rc, _)) => (rc, None),
+                Err(why) => (-1, Some(why.trim_start_matches(&format!("health {name} ")).replacen("timed out", "health timed out", 1))),
             };
             if rc != 0 {
                 // the one health timer: the target's own limit, else `[tick] max_wait_minutes`; it runs from the row that put the batch
@@ -2112,8 +2114,12 @@ impl<'a> Engine<'a> {
                 let since: Option<String> = self.ledger.conn.query_row("SELECT at FROM batch_events WHERE batch=? AND phase='done' ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).ok();
                 if let (Some(t0), Some(t1)) = (since.as_deref().and_then(parse_iso), parse_iso(&(self.now)())) {
                     if (t1 - t0) as f64 > tmo * 60.0 {
-                        return self.refuse(id, "deploy.health-timeout", format!("target {name} did not report {} healthy within {tmo} min; the deploy is left as it is for a person to look at", short(&sha)));
+                        let last = hung.as_deref().map(|h| format!(" (the last call: {h})")).unwrap_or_default();
+                        return self.refuse(id, "deploy.health-timeout", format!("target {name} did not report {} healthy within {tmo} min{last}; the deploy is left as it is for a person to look at", short(&sha)));
                     }
+                }
+                if let Some(h) = hung {
+                    return Ok(Outcome::Waiting(format!("target {name}: {h}")));
                 }
                 return Ok(Outcome::Waiting(format!("target {name} does not report {} healthy yet", short(&sha))));
             }

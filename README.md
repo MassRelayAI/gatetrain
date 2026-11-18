@@ -442,12 +442,11 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 
 ### What a tick looks like (example)
 
-> **Not ready to enable yet (2026-11-18).** The final review of this release found four open items. Leave `[tick] enabled` off
+> **Not ready to enable yet (2026-11-18).** The final review of this release found open items. Leave `[tick] enabled` off
 > until a release says they are closed:
-> 1. A health check that hangs on every call waits without escalating.
-> 2. If the gatetrain process dies during a deploy, that deploy keeps running, and the next tick may deploy again alongside it.
-> 3. git calls and their hooks have no time limit.
-> 4. Any tier spelling other than exactly `production` is deployed automatically.
+> 1. If the gatetrain process dies during a deploy, that deploy keeps running, and the next tick may deploy again alongside it.
+> 2. git calls and their hooks have no time limit.
+> 3. Any tier spelling other than exactly `production` is deployed automatically.
 >
 > Until then, `batch advance` by hand is the supported path.
 

@@ -2729,3 +2729,14 @@ fn s7_a_tip_that_moved_beyond_the_generated_files_is_still_refused() {
     let (rule, _) = fx.refused("b1");
     assert_eq!(rule, "merge.tested-equals-merged");
 }
+
+// ============================================================ before tick may be enabled (final review, round 5)
+
+/// review round 5: a timed-out health call returned `Waiting` before the age check, so a check that hangs on every call waited for ever
+#[test]
+fn rev5_a_health_check_that_always_times_out_is_refused_past_the_health_timeout() {
+    let mut fx = deployed("[timeouts]\nplugin_min = 0.02\n[deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"sleep 10\"]\nhealth_timeout_min = 30\n");
+    fx.step("b1", "deploying");
+    let o = fx.adv_at("b1", &LATER).unwrap();
+    assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "deploy.health-timeout"), "an hour past a 30 min health timeout, a hung health check: {o:?}");
+}
