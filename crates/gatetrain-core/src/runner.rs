@@ -221,6 +221,7 @@ pub fn run_isolated_with(mut c: Command, secs: f64, mut opts: Opts) -> Result<Is
     if let Some(f) = opts.on_spawn.as_mut() {
         if let Err(e) = f(child.id()) {
             // the parent "dies" here: the command is left as it is (the job closes as it would with a dead process)
+            #[cfg(windows)]
             drop(job);
             return Err(e);
         }
