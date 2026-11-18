@@ -182,17 +182,49 @@ pub fn run_isolated_raw(c: Command, secs: f64) -> Result<IsolatedRaw, String> {
 /// How [`run_isolated_with`] runs a command beyond its time limit.
 #[derive(Default)]
 pub struct Opts<'a> {
-    /// The command may outlive this process (a deploy that starts a long-lived service). Otherwise it dies with its parent: on Linux
-    /// by `PR_SET_PDEATHSIG` (SIGKILL when the spawning thread ends), on Windows by a job object that kills its processes when the
-    /// last handle to it closes, which is set only while the command runs (one that ended keeps what it started on purpose).
+    /// The command may outlive this process (a deploy that starts a long-lived service). Otherwise it dies with its parent, and so
+    /// does every process it started that stayed in its process group (job): on Linux its leader is a watchdog shell ([`WATCHDOG`])
+    /// that gets `SIGTERM` by `PR_SET_PDEATHSIG` when the spawning thread ends and then kills its whole process group; on Windows a
+    /// job object kills its processes when the last handle to it closes, which is set only while the command runs (one that ended
+    /// keeps what it started on purpose). Elsewhere (macOS, BSD) nothing ties it to its parent.
     pub survives_parent: bool,
     /// Called once the command runs, with its pid (its process group id on Unix). An `Err` abandons it where it stands, as a dead
     /// parent would (a test's crash), and is returned.
     pub on_spawn: Option<&'a mut dyn FnMut(u32) -> Result<(), String>>,
 }
 
-pub fn run_isolated_with(mut c: Command, secs: f64, mut opts: Opts) -> Result<IsolatedRaw, String> {
+/// The leader of a Linux plugin that dies with its parent: `sh -c WATCHDOG gatetrain-watchdog <program> <args>...`. It runs the
+/// command as its child in the same process group and exits with its status; when `PR_SET_PDEATHSIG` sends it `SIGTERM` (the
+/// gatetrain thread that spawned it ended), the trap kills the whole process group, the command's grandchildren included. A
+/// grandchild that left the group (`setsid`, its own process group) or that runs as another user (a setuid program such as
+/// `sudo`, which the kernel also clears the parent-death signal for) is beyond it; `group_alive` and the start token are the second
+/// line. The command runs as an asynchronous list of a non-interactive shell, so it starts with SIGINT and SIGQUIT ignored.
+#[cfg(target_os = "linux")]
+pub const WATCHDOG: &str = "trap 'kill -KILL 0' TERM; \"$@\" & wait $!";
+
+/// `c` as the argument list of the [`WATCHDOG`] shell, with its directory and environment.
+#[cfg(target_os = "linux")]
+fn watchdog(c: &Command) -> Command {
+    let mut w = Command::new("/bin/sh");
+    w.arg("-c").arg(WATCHDOG).arg("gatetrain-watchdog").arg(c.get_program()).args(c.get_args());
+    if let Some(d) = c.get_current_dir() {
+        w.current_dir(d);
+    }
+    for (k, v) in c.get_envs() {
+        match v {
+            Some(v) => w.env(k, v),
+            None => w.env_remove(k),
+        };
+    }
+    w
+}
+
+pub fn run_isolated_with(c: Command, secs: f64, mut opts: Opts) -> Result<IsolatedRaw, String> {
     let limit = Duration::try_from_secs_f64(secs).ok().filter(|d| !d.is_zero()).ok_or_else(|| format!("{secs} s is not a usable time limit"))?;
+    #[cfg(target_os = "linux")]
+    let mut c = if opts.survives_parent { c } else { watchdog(&c) };
+    #[cfg(not(target_os = "linux"))]
+    let mut c = c;
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     {
@@ -200,12 +232,11 @@ pub fn run_isolated_with(mut c: Command, secs: f64, mut opts: Opts) -> Result<Is
         c.process_group(0);
         #[cfg(target_os = "linux")]
         if !opts.survives_parent {
-            // SAFETY: prctl is async-signal-safe and touches no memory of the parent; it runs in the child between fork and exec
+            let parent = std::process::id();
+            // SAFETY: prctl and getppid are async-signal-safe, allocate nothing and touch no memory of the parent; they run in the
+            // child between fork and exec
             unsafe {
-                c.pre_exec(|| {
-                    group::set_pdeathsig();
-                    Ok(())
-                });
+                c.pre_exec(move || group::set_pdeathsig(parent));
             }
         }
     }
@@ -215,7 +246,7 @@ pub fn run_isolated_with(mut c: Command, secs: f64, mut opts: Opts) -> Result<Is
         use std::os::windows::process::CommandExt;
         c.creation_flags(group::CREATE_SUSPENDED);
     }
-    let mut child = c.spawn().map_err(|e| e.to_string())?;
+    let mut child = c.spawn().map_err(|e| if e.raw_os_error() == Some(group::ESRCH) { "the parent died before the plugin started".to_string() } else { e.to_string() })?;
     let job = group::Job::adopt(&child, !opts.survives_parent);
     if let Err(why) = group::resume(&child) {
         // a child that cannot be resumed never runs its command: end it (and its job) rather than leave a suspended process behind
@@ -396,18 +427,31 @@ mod group {
         Ok(())
     }
 
-    /// Kill this child when its parent dies (Linux; called between fork and exec).
+    /// "No such process": the parent died between the fork and `PR_SET_PDEATHSIG`.
+    pub const ESRCH: i32 = 3;
+
+    /// Signal this child (the watchdog shell) with SIGTERM when the thread that spawned it ends (Linux; called between fork and
+    /// exec, so it allocates nothing). A parent that died before the call would never send it: `getppid()` is read again after it, and
+    /// a parent other than `parent` fails the spawn. The kernel clears the setting when the child execs a setuid or setgid program
+    /// (the watchdog, `/bin/sh`, is neither).
     #[cfg(target_os = "linux")]
-    pub fn set_pdeathsig() {
+    pub fn set_pdeathsig(parent: u32) -> std::io::Result<()> {
         extern "C" {
             fn prctl(option: i32, ...) -> i32;
+            fn getppid() -> i32;
         }
         const PR_SET_PDEATHSIG: i32 = 1;
-        const SIGKILL: u64 = 9;
-        // SAFETY: a plain syscall wrapper with integer arguments
+        const SIGTERM: u64 = 15;
+        // SAFETY: plain syscall wrappers with integer arguments
         unsafe {
-            prctl(PR_SET_PDEATHSIG, SIGKILL);
+            if prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if u32::try_from(getppid()).ok() != Some(parent) {
+                return Err(std::io::Error::from_raw_os_error(ESRCH));
+            }
         }
+        Ok(())
     }
 
     #[cfg(windows)]
