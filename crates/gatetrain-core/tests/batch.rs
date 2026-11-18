@@ -1702,6 +1702,9 @@ fn the_next_batch_proves_at_once_after_the_base_is_fast_forwarded() {
     assert_eq!(req.sha, g(&fx.repo, &["rev-parse", "batch/b2/s1"]));
     fx.write_log(GREEN);
     fx.step("b2", "proven");
+    // b2 merges once b1's deploy settled (enable-readiness MAJOR 1: the newer sha is the last one deployed)
+    assert_eq!(fx.refused("b2").0, "deploy.another-batch-deploying");
+    fx.step("b1", "deploying");
     fx.step("b2", "merged");
     assert_eq!(g(&fx.repo, &["rev-parse", "main"]), g(&fx.repo, &["rev-parse", "batch/b2/s1"]));
 }
@@ -1720,6 +1723,7 @@ fn a_batch_never_merges_before_its_base_is_on_the_protected_branch() {
     assert!(because.contains("b1"), "{because}");
     assert_ne!(g(&fx.repo, &["rev-parse", "main"]), g(&fx.repo, &["rev-parse", "batch/b2/s1"]));
     fx.step("b1", "merged");
+    fx.step("b1", "deploying");
     fx.step("b2", "merged");
 }
 

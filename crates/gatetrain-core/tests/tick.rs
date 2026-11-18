@@ -1363,3 +1363,92 @@ fn minor4_a_target_removed_from_the_config_is_a_refusal_not_a_panic() {
     fx.cfg.targets.clear();
     assert!(fx.with(|e| e.advance("b1")).is_ok(), "no panic");
 }
+
+// ---------------------------------------------------------------- enable-readiness review (2026-11-18)
+
+fn log_lines(fx: &Fx, file: &str) -> Vec<String> {
+    std::fs::read_to_string(fx.t.path().join(file)).map(|t| t.lines().map(|l| l.trim().to_string()).collect()).unwrap_or_default()
+}
+
+/// b1 merged, and b2 stacked on b1 and proven (a green proof each). The staging deploy is `f`.
+fn b1_merged_b2_proven(fx: &mut Fx, f: impl FnOnce(&mut gatetrain_core::batchcfg::Target)) {
+    f(fx.cfg.targets.get_mut("staging").unwrap());
+    fx.drive_to_proving("b1", "lane1");
+    fx.open_on("b2", "b1", "lane2");
+    for want in ["stacked", "settled", "preflighted"] {
+        assert!(matches!(fx.adv("b2"), Outcome::Advanced { to, .. } if to == want));
+    }
+    fx.write_log("b1", GREEN);
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "proven"));
+    assert!(matches!(fx.adv("b2"), Outcome::Advanced { to, .. } if to == "proving"));
+    fx.write_log("b2", GREEN);
+    assert!(matches!(fx.adv("b2"), Outcome::Advanced { to, .. } if to == "proven"));
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "merged"));
+}
+
+/// MAJOR 1 (the reviewer's repro): gatetrain dies right after it spawned b1's staging deploy, which outlives it. The next tick must
+/// neither merge nor deploy b2 beside it, and once it is gone b1 settles first: b2's newer sha is the last one deployed.
+#[test]
+fn major1_a_second_batch_never_deploys_beside_or_after_an_orphaned_deploy_of_the_first() {
+    let mut fx = Fx::new("");
+    let log = fwd(&fx.t.path().join("deploy-log.txt"));
+    b1_merged_b2_proven(&mut fx, |t| {
+        t.command = vec!["sh".into(), "-c".into(), format!("echo start $GATETRAIN_BATCH >> '{log}'; sleep 4; echo end $GATETRAIN_BATCH >> '{log}'")];
+        t.survives_parent = true;
+        t.timeout_min = Some(1.0);
+    });
+    crash_seam::set(Some("T8a:spawned:deploy staging".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err());
+    crash_seam::set(None);
+    assert!(wait_for(|| log_lines(&fx, "deploy-log.txt").len() == 1, 10), "the orphaned deploy runs");
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: merged, waits: ") && r.lines[0].contains("still running"), "{:?}", r.lines);
+    assert!(r.lines[1].starts_with("b2: proven, BLOCKED deploy.another-batch-deploying: "), "{:?}", r.lines);
+    assert!(r.lines[1].contains("b1"), "the wait names the batch it waits for: {:?}", r.lines);
+    assert_eq!(r.exit_code(), 0, "a wait that clears by itself");
+    assert_eq!(fx.state("b2"), "proven", "b2 is not merged while b1's deploy is unsettled");
+    assert!(wait_for(|| log_lines(&fx, "deploy-log.txt").len() == 2, 10), "the orphaned deploy ends");
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(r.lines[1], "b2: proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
+    fx.tick();
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["start b1", "end b1", "start b1", "end b1", "start b2", "end b2"], "no overlap, and b1 never deploys after b2");
+}
+
+/// MAJOR 1: a deploy whose sha is behind what a newer batch already deployed to the target is refused (`deploy.superseded`, a person
+/// decides), whether it is a fresh attempt after a person's retry or a resumed one; it is never run.
+#[test]
+fn major1_a_deploy_behind_a_newer_batch_on_its_target_is_refused_superseded() {
+    // b1's deploy fails once; it needs a person, so b2 merges and deploys; the person's retry of b1 must not deploy the older sha
+    let mut fx = Fx::new("");
+    let (log, flag) = (fwd(&fx.t.path().join("deploy-log.txt")), fwd(&fx.t.path().join("failed-once")));
+    b1_merged_b2_proven(&mut fx, |t| t.command = vec!["sh".into(), "-c".into(), format!("if [ $GATETRAIN_BATCH = b1 ] && [ ! -e '{flag}' ]; then touch '{flag}'; exit 1; fi; echo deployed $GATETRAIN_BATCH >> '{log}'")]);
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)));
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: merged, BLOCKED batch.failed-needs-person"), "{:?}", r.lines);
+    assert_eq!(r.lines[1], "b2: proven -> merged -> deploying -> live -> closed", "a batch whose deploy needs a person does not hold the next one: {:?}", r.lines);
+    fx.with(|e| e.retry_failed("b1", "the deploy host was fixed")).unwrap();
+    match fx.adv("b1") {
+        Outcome::Refused { rule, because, clears_by_itself, .. } => {
+            assert_eq!(rule, "deploy.superseded");
+            assert!(!clears_by_itself, "a person decides");
+            assert!(because.contains("staging") && because.contains("b2"), "{because}");
+        }
+        o => panic!("{o:?}"),
+    }
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b2"], "the older sha was never deployed over the newer one");
+    // a resumed attempt: b1 crashed inside its deploy intent and was held; b2 deployed meanwhile; after the release b1 resumes
+    let mut fx = Fx::new("");
+    let log = fwd(&fx.t.path().join("deploy-log.txt"));
+    b1_merged_b2_proven(&mut fx, |t| t.command = vec!["sh".into(), "-c".into(), format!("echo deployed $GATETRAIN_BATCH >> '{log}'")]);
+    crash_seam::set(Some("before:T8a".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err());
+    crash_seam::set(None);
+    fx.with(|e| e.hold("b1", "looking at the deploy host")).unwrap();
+    let r = fx.tick();
+    assert_eq!(r.lines[1], "b2: proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
+    fx.with(|e| e.release("b1")).unwrap();
+    assert!(matches!(fx.adv("b1"), Outcome::Refused { rule, .. } if rule == "deploy.superseded"));
+    assert!(matches!(fx.adv("b1"), Outcome::Refused { rule, .. } if rule == "deploy.superseded"), "never re-run by a later advance");
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b2"]);
+}

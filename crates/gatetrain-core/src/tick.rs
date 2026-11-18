@@ -33,6 +33,8 @@ pub const MAX_BATCH_LINES: usize = 3;
 
 /// Refusals that may clear when another batch moves in this tick.
 const RETRY_AFTER_A_MOVE: &[&str] = &["pipeline.base-unproven", "pipeline.base-not-merged"];
+/// A refusal that may clear when ANOTHER batch (not this one's base) settles its deploy in this tick.
+const RETRY_AFTER_ANOTHER: &[&str] = &["deploy.another-batch-deploying"];
 
 // ---------------------------------------------------------------- the ledger lock
 
@@ -472,7 +474,7 @@ pub fn tick(e: &mut Engine, o: &TickOpts) -> Result<TickReport> {
                 if unreadable.contains(&r.batch) {
                     continue;
                 }
-                let retry = matches!(&r.end, End::Blocked { rule, .. } if RETRY_AFTER_A_MOVE.contains(&rule.as_str()));
+                let retry = matches!(&r.end, End::Blocked { rule, .. } if RETRY_AFTER_A_MOVE.contains(&rule.as_str()) || RETRY_AFTER_ANOTHER.contains(&rule.as_str()));
                 if pass > 0 && !retry {
                     continue;
                 }

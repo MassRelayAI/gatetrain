@@ -251,7 +251,7 @@ impl Outcome {
 }
 
 /// Refusals that clear by themselves (a busy host, a base batch still on its way); every other refusal needs a person.
-pub const CLEARS_BY_ITSELF: &[&str] = &["host.refuse", "host.refuse-proof-running", "host.refuse-memory", "pipeline.base-unproven", "pipeline.base-not-merged", "deploy.still-running"];
+pub const CLEARS_BY_ITSELF: &[&str] = &["host.refuse", "host.refuse-proof-running", "host.refuse-memory", "pipeline.base-unproven", "pipeline.base-not-merged", "deploy.still-running", "deploy.another-batch-deploying"];
 
 /// The transition with an effect that `advance` takes from `state`, if any.
 fn next_effect(state: &str) -> Option<&'static str> {
@@ -635,9 +635,10 @@ impl<'a> Engine<'a> {
         self.plugin_as(id, tr, step, key, cmd, dir, env, min, false)
     }
 
-    /// [`Engine::plugin`], for a step that may outlive this process (`survives_parent`). A T8a step (the post-merge command, a deploy)
-    /// also records the process it runs (`<state>/running/<batch>-T8a.json`: pid, its start token) while it runs, so if this process
-    /// dies the next advance waits for that deploy instead of starting a second one beside it.
+    /// [`Engine::plugin`], for a step that may outlive this process (`survives_parent`). A T8a step (the post-merge command, a probe, a
+    /// deploy) also records the process it runs in `<state>/running/<target>.json` (one file per target, whichever batch runs it: the
+    /// batch, the sha, the pid and its start token) while it runs, so if this process dies the next advance of ANY batch waits for
+    /// that deploy instead of starting a second one beside it on the same target.
     #[allow(clippy::too_many_arguments)]
     fn plugin_as(&self, id: &str, tr: &str, step: &str, key: &str, cmd: &[String], dir: &Path, env: &[(String, String)], min: f64, survives_parent: bool) -> Result<std::result::Result<(i32, String), String>> {
         let noun = if step == "postmerge" { "post-merge".to_string() } else { step.to_string() };
@@ -654,14 +655,16 @@ impl<'a> Engine<'a> {
                 *g = Some(json!({"effect": format!("{id} {tr} {step}"), "since_ms": since, "deadline_ms": since + (secs * 1000.0) as i64}));
             }
         }
-        let record = (tr == "T8a").then(|| self.running_path(id));
+        let key = step.strip_prefix("deploy ").or_else(|| step.strip_prefix("probe ")).unwrap_or(if step == "postmerge" { POSTMERGE } else { step });
+        let sha = env.iter().find(|(k, _)| k == "GATETRAIN_SHA").map(|(_, v)| v.clone()).unwrap_or_default();
+        let record = (tr == "T8a").then(|| self.running_path(key));
         let crashed: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
         let mut on_spawn = |pid: u32| -> std::result::Result<(), String> {
             if tr == "T8a" {
                 T8A_SPAWNED.with(|c| c.set(true));
             }
             if let Some(p) = &record {
-                let v = json!({"pid": pid, "token": crate::runner::process_token(pid), "step": step, "batch": id, "since_ms": since});
+                let v = json!({"pid": pid, "token": crate::runner::process_token(pid), "step": step, "batch": id, "target": key, "sha": sha, "since_ms": since, "survives_parent": survives_parent});
                 let _ = std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")));
                 let _ = std::fs::write(p, v.to_string());
             }
@@ -692,17 +695,102 @@ impl<'a> Engine<'a> {
         })
     }
 
-    /// Where a running T8a step of batch `id` is recorded.
-    fn running_path(&self, id: &str) -> PathBuf {
-        self.state_dir.join("running").join(format!("{id}-T8a.json"))
+    /// Where a running T8a step on `target` (a deploy target, or [`POSTMERGE`]) is recorded, whichever batch runs it: a deploy that
+    /// is running is a fact about the target, not about one batch.
+    fn running_path(&self, target: &str) -> PathBuf {
+        let safe: String = target.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_string() } else { format!("%{:02x}", c as u32) }).collect();
+        self.state_dir.join("running").join(format!("{safe}.json"))
     }
 
-    /// A T8a step a dead process left running: `Some(what)` while the recorded process (or, on Unix, its process group) lives.
-    fn deploy_still_running(&self, id: &str) -> Option<String> {
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(self.running_path(id)).ok()?).ok()?;
+    /// Every record of a running T8a step, of every batch (`<state>/running/*.json`; a file of an older release is read too).
+    fn running_records(&self) -> Vec<(PathBuf, Value)> {
+        let Ok(dir) = std::fs::read_dir(self.state_dir.join("running")) else { return vec![] };
+        let mut out: Vec<(PathBuf, Value)> = dir
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json") && !p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.')))
+            .map(|p| {
+                let v = std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+                (p, v)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// `Some(what)` while the process of this record (or, on Unix, its process group) may still run.
+    fn record_running(&self, path: &Path, v: &Value) -> Option<String> {
+        let step = v["step"].as_str().unwrap_or("a deploy step");
+        let Some(batch) = v["batch"].as_str() else {
+            return Some(format!("the record {} cannot be read; a person checks that no deploy runs and removes it", path.display()));
+        };
         let pid = u32::try_from(v["pid"].as_u64()?).ok()?;
         let alive = crate::runner::process_alive(pid, v["token"].as_u64()) || crate::runner::group_alive(pid);
-        alive.then(|| format!("{} of batch {id} is still running as pid {pid}, started by a gatetrain that is gone; the next step waits for it", v["step"].as_str().unwrap_or("a deploy step")))
+        alive.then(|| format!("{step} of batch {batch} is still running as pid {pid}, started by a gatetrain that is gone; the next step waits for it"))
+    }
+
+    /// A T8a step of batch `id` a dead process left running: `Some(what)` while it lives.
+    fn deploy_still_running(&self, id: &str) -> Option<String> {
+        self.running_records().iter().filter(|(_, v)| v["batch"].as_str() == Some(id)).find_map(|(p, v)| self.record_running(p, v))
+    }
+
+    /// Another batch deploys, or will before this one may (MAJOR 1 of the enable-readiness review): a T8a step of another batch that a
+    /// dead process left running on any target, or another batch in `merged` whose deploy is not settled (not started, pending, or
+    /// interrupted and due to run again; one whose deploy failed and needs a person does not hold the others, `deploy.superseded`
+    /// guards it instead). For T8a only a batch merged before this one counts, so the older merge deploys first.
+    fn another_batch_deploying(&self, id: &str, tr: &str) -> Result<Option<String>> {
+        if let Some(why) = self.running_records().iter().filter(|(_, v)| v["batch"].as_str() != Some(id)).find_map(|(p, v)| self.record_running(p, v)) {
+            return Ok(Some(why));
+        }
+        let merged_at = |evs: &[Ev]| evs.iter().rev().find(|e| e.transition == "T7" && e.phase == "done").map(|e| e.seq);
+        let mine = merged_at(&self.events(id)?);
+        for b in self.batch_ids()?.into_iter().filter(|b| b != id) {
+            let evs = self.events(&b)?;
+            let Some(f) = fold(&evs) else { continue };
+            if f.state != "merged" || self.t8a_needs_person(&b)? {
+                continue;
+            }
+            if tr == "T8a" && !matches!((merged_at(&evs), mine), (Some(theirs), Some(m)) if theirs < m) {
+                continue;
+            }
+            let how = if f.pending.as_ref().is_some_and(|p| p.transition == "T8a") { "its deploy was interrupted and is not settled" } else { "it has not deployed yet" };
+            return Ok(Some(format!("batch {b} is merged and {how}; this batch {} after it settles, so the newer sha is the last one deployed", if tr == "T7" { "merges" } else { "deploys" })));
+        }
+        Ok(None)
+    }
+
+    /// Does the T8a of batch `b` wait for a person (its failed attempts spent the budget, or it was interrupted too often)?
+    fn t8a_needs_person(&self, b: &str) -> Result<bool> {
+        let (crashes, _) = self.repeats(b, "T8a")?;
+        Ok(crashes >= self.cfg.max_interrupts || self.failures_since(b, "T8a")?.len() > self.cfg.retry_budget("T8a"))
+    }
+
+    /// A deploy of `sha` that a newer batch already overtook on one of `targets`: the newest checkpoint of that target is another
+    /// batch's, for a sha that `sha` does not contain (it is ahead of `sha`, or unrelated to it). `Some(why)`: refused, never run.
+    fn superseded(&self, id: &str, wd: &Path, sha: &str, targets: &[String]) -> Result<Option<String>> {
+        for t in targets {
+            if self.checkpointed(id, sha, t)? {
+                continue;
+            }
+            let newest: Option<(String, String)> = self
+                .ledger
+                .conn
+                .query_row(
+                    "SELECT batch, json_extract(evidence,'$.sha') FROM decisions WHERE kind='deploy' AND rule='deploy.checkpoint' AND subject=? AND batch<>? ORDER BY seq DESC LIMIT 1",
+                    params![t, id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            let Some((b, theirs)) = newest else { continue };
+            if theirs == sha || git_raw(wd, &["merge-base", "--is-ancestor", &theirs, sha]).map(|r| r.0).unwrap_or(false) {
+                continue; // what the target serves is this sha or older: deploying it moves the target forward
+            }
+            return Ok(Some(format!(
+                "target {t} already serves {} of batch {b}, which {} does not contain; deploying it would put an older sha over a newer one. A person decides (`gatetrain batch abandon {id} --reason <why>` once the target is right)",
+                short(&theirs),
+                short(sha)
+            )));
+        }
+        Ok(None)
     }
 
     /// The limit of a plugin without one of its own (`[timeouts] plugin_min`).
@@ -1271,7 +1359,16 @@ impl<'a> Engine<'a> {
     /// twice. An effect the probe cannot settle runs again only when it is declared idempotent; otherwise it waits for a person.
     fn resume(&mut self, id: &str, f: &Folded, p: Ev) -> Result<Outcome> {
         let plan = Plan { tr: p.transition.clone(), to: to_for(&p.transition, &p.detail).into(), input_sha: p.input_sha.clone(), run_id: p.run_id.clone(), attempt: p.attempt, detail: p.detail.clone() };
-        match self.probe(id, f, &plan)? {
+        let probed = self.probe(id, f, &plan)?;
+        if plan.tr == "T8a" && !matches!(probed, Probe::Happened(_) | Probe::Running(_)) {
+            // a resumed deploy whose sha a newer batch already overtook is never run again
+            let targets: Vec<String> = plan.detail["targets"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect();
+            let wd = PathBuf::from(f.need("workdir")?);
+            if let Some(why) = self.superseded(id, &wd, plan.input_sha.as_deref().unwrap_or_default(), &targets)? {
+                return self.refuse(id, "deploy.superseded", why);
+            }
+        }
+        match probed {
             Probe::Happened(out) => {
                 let extra = if plan.tr == "T7" { json!({"resumed": "happened", "merge_new": out}) } else { json!({"resumed": "happened"}) };
                 return self.finish(id, &plan, out, extra, " (resumed: the probe found the effect done)");
@@ -1725,6 +1822,9 @@ impl<'a> Engine<'a> {
                         return Ok(Planned::Refuse("pipeline.base-not-merged".into(), format!("batch {base} is the base of this batch and is not on {} yet; merge {base} first (a fast-forward to this tip would carry its unproven commits)", self.cfg.protected)));
                     }
                 }
+                if let Some(why) = self.another_batch_deploying(id, "T7")? {
+                    return Ok(Planned::Refuse("deploy.another-batch-deploying".into(), why));
+                }
                 let (ff, _, _) = git_raw(&wd, &["merge-base", "--is-ancestor", &old, &tip])?;
                 if !ff {
                     return Ok(Planned::Refuse("merge.fast-forward".into(), format!("{} cannot fast-forward to {}; the protected branch moved", self.cfg.protected, short(&tip))));
@@ -1744,6 +1844,9 @@ impl<'a> Engine<'a> {
                 if let Some(why) = self.deploy_still_running(id) {
                     return Ok(Planned::Refuse("deploy.still-running".into(), why));
                 }
+                if let Some(why) = self.another_batch_deploying(id, "T8a")? {
+                    return Ok(Planned::Refuse("deploy.another-batch-deploying".into(), why));
+                }
                 let (mut auto, mut prod) = (vec![], vec![]);
                 for (n, t) in &self.cfg.targets {
                     if t.tier == "production" {
@@ -1756,7 +1859,11 @@ impl<'a> Engine<'a> {
                     // floor.production-human: recorded, never deployed by the engine
                     self.decide("refusal", id, Some(n.clone()), "floor.production-human", "refused", format!("target {n} is production and needs a human; skipped"), None)?;
                 }
-                Ok(mk(Some(f.s("output_sha").map_or_else(|| f.need("merge_new"), Ok)?), None, json!({"targets": auto, "skipped_production": prod})))
+                let sha = f.s("output_sha").map_or_else(|| f.need("merge_new"), Ok)?;
+                if let Some(why) = self.superseded(id, &wd, &sha, &auto)? {
+                    return Ok(Planned::Refuse("deploy.superseded".into(), why));
+                }
+                Ok(mk(Some(sha), None, json!({"targets": auto, "skipped_production": prod})))
             }
             _ => Err(Error::Batch(format!("no plan for {tr}"))),
         }

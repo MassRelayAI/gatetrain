@@ -506,9 +506,12 @@ regen, health checks, deploy probes, cache verification and the legacy stamp, an
 engine makes (git runs hooks, which can hang; a key of its own, so a short health-check limit never cuts a slow hook short). A command past its limit fails the attempt (`the local process tree
 was signalled; a remote or detached deploy may still run`); a health check past it is a wait. A plugin dies with gatetrain (Linux:
 `PR_SET_PDEATHSIG`, which reaches the plugin's leader process only, not the processes it starts; Windows: a job object that kills on close while the plugin runs) unless its deploy target says
-`survives_parent = true` (it starts a long-lived service). A deploy step records its process (`<state>/running/<batch>-T8a.json`, pid
-and start time) while it runs: if gatetrain dies and the deploy lives on, the next advance waits (`... is still running as pid N`)
-instead of starting a second deploy beside it. Before it advances anything the tick verifies the decision log; a
+`survives_parent = true` (it starts a long-lived service). A deploy step records its process per target, whichever batch runs it
+(`<state>/running/<target>.json`: batch, sha, pid and start time) while it runs: if gatetrain dies and the deploy lives on, the next
+advance of that batch waits (`... is still running as pid N`) and every other batch is refused `deploy.another-batch-deploying`
+(clears by itself) instead of merging or deploying beside it. A batch is not merged either while another batch is `merged` and its
+deploy is not settled, and of two merged batches the older merge deploys first. A deploy whose sha is behind what a newer batch
+already deployed to a target is refused `deploy.superseded` (a person decides), fresh or resumed, and never runs. Before it advances anything the tick verifies the decision log; a
 log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
 
