@@ -529,7 +529,9 @@ service it started is meant to live. A record without a pid (gatetrain died betw
 start token (it could not be read), or a record file that cannot be read, cannot be told from a live deploy and never clears by itself:
 every batch is refused `deploy.record-unverifiable` (a person decides, the tick exits 1). **Clearing a record by hand:** the refusal names the
 step, the batch and the process group; a person checks that it is gone or ends it (`kill -KILL -- -<pgid>` on Unix,
-`taskkill /T /F /PID <pid>` on Windows), then runs `gatetrain batch advance <batch> --retry --reason <why>`, which removes that batch's
+`taskkill /T /F /PID <pid>` on Windows; for a gentle stop on Linux, `kill -TERM <pid>` or `kill -INT <pid>` to the recorded pid
+alone, the watchdog, which passes it on to the group once; never an INT or TERM to the whole group, `kill -TERM -- -<pgid>`, which
+reaches the plugin twice, and tools such as terraform or docker compose read a second interrupt as a force-quit), then runs `gatetrain batch advance <batch> --retry --reason <why>`, which removes that batch's
 records with an override row naming them (`retry.person`, `cleared_records`); the next advance probes the deploy as after any crash.
 The retry checks first: while a recorded process (or, for a step that does not survive its parent, a member of its process group)
 still runs, it is refused `deploy.record-live`, names the pid and the command that ends it, and clears nothing. A record without a pid
