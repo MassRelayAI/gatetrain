@@ -114,6 +114,7 @@ Commands:
   hold       Hold the host lock as the PARENT of a command (the chain); `--status` reads the lock instead
   memory     Memory in the host model: record a step peak, or ask the admission rule
   running    Is a chain running? Reads the host lock, never the process table (exit 0 when held)
+  tick       One bounded pass: doctor and `tidy --auto` per host, ingest finished logs, advance every open batch, one advice line, the storm line (3 to 6 lines; exit 1 when a batch needs a person)
 ```
 
 The three that change your disk have one shape. `check` only reads. `tidy` is a dry run until you ask:
@@ -433,7 +434,7 @@ The binary is the part that measures and guards:
 | plan and stack | `lanes`, `generated`, `batch` |
 | pre-flight and chain | `chain`, `doctor`, `hold`, `memory`, `running`, `stop` |
 | read the run | `ingest`, `report`, `trace`, `eta`, `next-tick`, `status`, `diagnose`, `flaky` |
-| tick | `status`, `next-tick`, `watch` |
+| tick | `tick` (and the read-only `status`, `next-tick`, `watch`) |
 | tidy | `check`, `tidy` |
 | the record | `ledger`, `log` |
 
@@ -441,13 +442,33 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 
 ### What a tick looks like (example)
 
+`gatetrain tick` is one bounded pass. It takes the ledger lock (`<db>.tick.lock`; a second tick prints
+`tick: another tick holds the lock` and exits 0), runs `doctor` on every enabled host of `--hosts`, ingests the finished chain logs
+(and their `.samples.jsonl`) the batches point at, then calls `batch advance` on every open batch until it waits or is refused, runs
+`tidy --auto` per host (the unattended classes only), prints at most one advice line and, when one cause explains at least
+`[chain] storm_reds` (default 20) reds of a running log, a storm line that names the stop command. On the test fixture of two
+batches and three hosts:
+
 ```text
-tick 14:53  batch-42 run 2: 255/440 steps, 0 red, merger armed
-            preflight-1: lane gates idle; builder-1 SSD 176 GB free; 0 leftover containers
-            lane auth-door READY (review: 2 should-fix, fixed; 8/8 gates as the app role)
-            next: stack batch-43 when 42 merges (3 lanes, 1 base)
-            waits on you: nothing
+b1: proving -> proven -> merged -> deploying -> live -> closed
+b2: proving, waits: run b2-p1 is still proving
+hosts: alpha ok, tidy 2.0 GB reclaimed; beta 1 FAIL (ports) 1 WARN (disks), tidy nothing to tidy; gamma no runner (reach 'none'), tidy skipped; ingested 1 run
+advice: none
 ```
+
+A batch blocked by a rule that needs a person reads `b3: proving -> red, BLOCKED floor.zero-red: red step a (rc 1); a person commits a
+fix and restacks`, and the tick exits 1 (a busy host or a base batch still on its way is a wait, exit 0; a config error is exit 2).
+
+It never opens a batch, chooses lanes, applies advice, runs a probe, edits a config file or leaves anything queued to fire later. A
+batch merges only because `advance` found its proof accepted by every guard; the merge, postmerge and deploy commands are the ones
+`gatetrain.toml` already names. Nothing is armed: the schedule is yours. Every 5 minutes from cron:
+
+```text
+*/5 * * * * cd /srv/control && gatetrain tick --db gatetrain.db --config gatetrain.toml --hosts hosts.toml --host builder-1 >> tick.log 2>&1
+```
+
+`--host` names the host whose lock and admission the state machine uses (as `batch --hosts --host`; default `[proof] host`).
+`--json` prints the same report as one JSON object.
 
 ## The basic workflow
 
@@ -663,12 +684,12 @@ Done:
 - [x] E2: shards (`shards`, `shard_check`, `shard_env`, `STEP_SHARD`); ledger v5
 - [x] E3 (batch side): one evidence rule, shadow before hits, the evidence file at launch
 - [x] E5: the launched pre-flight (state `preflighting`), a light run refused on a proving host, batch pipelining
+- [x] E10: `gatetrain tick`, one bounded pass that advances the batches through `batch advance` and prints 3 to 6 lines; the ledger lock; the cause-storm line
 
 Next, in the order of [engine v2](docs/design/engine-v2.md) (a design; nothing below is built):
 
 - [ ] E6, E7, E8: `probe` (measure a disk), the sampler, `advise` (read-only advice from the ledger)
 - [ ] E9: multi-host: a detached holder, `reach = "wsl"`, the fast tier off the proof host
-- [ ] E10: `tick`, one pass that advances the batches and prints a few lines
 - [ ] T9 and the disk floor
 
 Not scheduled: `gatetrain stack` with base detection and artefact repair, `gatetrain plan` (owned files, hidden coupling, critical path), ledger views for cost per batch and an agent scorecard, cloud adapters for the `budget` and `speed` profiles.

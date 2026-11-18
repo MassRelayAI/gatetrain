@@ -99,6 +99,9 @@ pub struct BatchConfig {
     pub tidy_auto: bool,
     /// `[preflight] legacy_stamp_command`: runs once after a green launched pre-flight, with `{sha}` and `{results}`.
     pub legacy_stamp_command: Vec<String>,
+    /// `[chain] storm_reds` (default 20): when one cause explains at least this many reds of a running chain, `tick` reports it and names
+    /// the stop command (engine-v2 section 8). It only reports; nothing is stopped.
+    pub storm_reds: usize,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -145,6 +148,7 @@ impl Default for BatchConfig {
             close_protected_container_prefixes: vec![],
             tidy_auto: false,
             legacy_stamp_command: vec![],
+            storm_reds: 20,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -185,6 +189,12 @@ impl BatchConfig {
         }
         c.cache_verify_command = argv(v.get("chain").and_then(|p| p.get("cache_verify_command")));
         c.chain_target_dirs = argv(v.get("chain").and_then(|p| p.get("target_dirs")));
+        if let Some(n) = v.get("chain").and_then(|c| c.get("storm_reds")) {
+            match n.as_integer() {
+                Some(n) if n >= 1 => c.storm_reds = n as usize,
+                _ => return Err(Error::Batch(format!("gatetrain.toml: [chain] storm_reds is a whole number of at least 1, not {n}"))),
+            }
+        }
         c.chain_repo_root = v.get("chain").and_then(|p| p.get("repo_root")).and_then(|r| r.as_str()).map(String::from);
         if let Some(d) = v.get("batch").and_then(|b| b.get("doctor")).and_then(|d| d.as_bool()) {
             c.doctor = d;

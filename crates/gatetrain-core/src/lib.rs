@@ -29,6 +29,7 @@ pub mod runs;
 pub mod stackcheck;
 pub mod stop;
 pub mod stats;
+pub mod tick;
 pub mod tidy;
 pub mod trace;
 pub mod winprobe;
