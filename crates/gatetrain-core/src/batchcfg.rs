@@ -384,7 +384,26 @@ impl BatchConfig {
             c.protected = p.to_string();
         }
         if let Some(d) = v.get("deploy").and_then(|d| d.as_table()) {
-            for (name, t) in d {
+            // the tiers a target may name: `staging` and `production` (never automatic), plus `[deploy] auto_tiers`; spelled exactly,
+            // so `Production` or `prod` is refused instead of being deployed as an automatic tier
+            let mut tiers: Vec<String> = vec!["staging".into(), "production".into()];
+            if let Some(a) = d.get("auto_tiers") {
+                let extra = argv(Some(a));
+                if extra.is_empty() && a.as_array().is_none_or(|x| !x.is_empty()) {
+                    return Err(Error::Batch(format!("gatetrain.toml: [deploy] auto_tiers is a list of tier names, not {a}")));
+                }
+                if extra.iter().any(|t| t == "production") {
+                    return Err(Error::Batch("gatetrain.toml: [deploy] auto_tiers names production; production is never deployed automatically".into()));
+                }
+                tiers.extend(extra);
+            }
+            for (name, t) in d.iter().filter(|(k, _)| k.as_str() != "auto_tiers") {
+                if let Some(tier) = t.get("tier") {
+                    match tier.as_str() {
+                        Some(x) if tiers.iter().any(|k| k == x) => {}
+                        _ => return Err(Error::Batch(format!("gatetrain.toml: [deploy.{name}] tier is {tier}, which is not a known tier ({}; more automatic tiers go in [deploy] auto_tiers, spelled exactly)", tiers.join(", ")))),
+                    }
+                }
                 if t.get("probe").is_some() && argv(t.get("probe")).is_empty() {
                     return Err(Error::Batch(format!("gatetrain.toml: [deploy.{name}] probe is a command (an argument list), not {}", t.get("probe").map(|x| x.to_string()).unwrap_or_default())));
                 }

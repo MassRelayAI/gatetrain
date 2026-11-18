@@ -1066,3 +1066,21 @@ fn one_health_timer_the_targets_own_limit_decides_not_a_second_one_in_the_tick()
     assert!(r.lines[0].starts_with("b1: deploying, BLOCKED deploy.health-timeout: target sick did not report "), "{:?}", r.lines);
     assert_eq!(r.exit_code(), 1);
 }
+
+// ---------------------------------------------------------------- before tick may be enabled (final review, round 5)
+
+#[test]
+fn m4_a_tier_is_one_of_a_known_set_spelled_exactly() {
+    let t = |tier: &str, extra: &str| BatchConfig::parse(&format!("{extra}[deploy.web]\nidempotent = true\ncommand = [\"x\"]\ntier = \"{tier}\"\n"));
+    for bad in ["Production", "prod", "PRODUCTION", "staging "] {
+        let e = t(bad, "").unwrap_err().to_string();
+        assert!(e.contains(&format!("{bad:?}")) && e.contains("[deploy.web]"), "{bad}: {e}");
+    }
+    assert!(t("staging", "").is_ok());
+    assert!(t("production", "").is_ok());
+    assert!(t("qa", "").is_err(), "not listed");
+    let c = t("qa", "[deploy]\nauto_tiers = [\"qa\"]\n").unwrap();
+    assert_eq!(c.targets.len(), 1, "auto_tiers is not a target");
+    assert_eq!(c.targets["web"].tier, "qa");
+    assert!(BatchConfig::parse("[deploy]\nauto_tiers = [\"production\"]\n").is_err(), "production is never automatic");
+}

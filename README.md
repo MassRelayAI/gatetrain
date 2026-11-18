@@ -446,14 +446,14 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 > until a release says they are closed:
 > 1. If the gatetrain process dies during a deploy, that deploy keeps running, and the next tick may deploy again alongside it.
 > 2. git calls and their hooks have no time limit.
-> 3. Any tier spelling other than exactly `production` is deployed automatically.
 >
 > Until then, `batch advance` by hand is the supported path.
 
 `gatetrain tick` is off until `gatetrain.toml` says `[tick] enabled = true`; without it the tick exits 2 and writes nothing. Turn it on
 only when every deploy target has `timeout_min` and a deploy command that is safe to run twice (a tick that dies mid-deploy may leave a
 target for a person or a probe to settle, and a target the tick deploys again must not break by being deployed twice).
-`gatetrain.toml` is refused at load when an automatic deploy target (any tier but `production`) has neither `idempotent = true` nor a
+A target's `tier` is `staging`, `production` (never deployed by the engine) or a tier listed in `[deploy] auto_tiers`, spelled
+exactly; any other spelling (`Production`, `prod`) is refused at load. `gatetrain.toml` is refused at load when an automatic deploy target (any tier but `production`) has neither `idempotent = true` nor a
 `probe = [...]` that exits 0 when the target already serves `{sha}`, and, with `[tick] enabled`, when it has no `timeout_min` (a
 finite number of minutes, at most 1440). Each target that deployed is a `deploy.checkpoint` row of the decision log, so a later
 attempt for the same sha never deploys it again; a target a crash left in doubt is asked its probe, deployed again only when it is
