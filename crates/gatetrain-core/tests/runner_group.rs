@@ -65,7 +65,9 @@ fn minor1_group_alive_sees_a_member_after_its_leader_exited() {
 fn minor1_a_grandchild_of_a_plugin_dies_with_its_parent() {
     let t = tempfile::tempdir().unwrap();
     let late = t.path().join("late.txt");
-    let line = format!("( sleep 3; echo late >> '{}' ); true", late.to_string_lossy().replace('\\', "/"));
+    // TERM, INT and HUP ignored (the subshell and its sleep inherit that): only the watchdog's SIGKILL of the group ends them on
+    // Linux, so the test fails if that path is gone (round 3: a forwarded TERM alone kept it green)
+    let line = format!("trap '' TERM INT HUP; ( sleep 3; echo late >> '{}' ); true", late.to_string_lossy().replace('\\', "/"));
     std::thread::scope(|s| {
         s.spawn(|| {
             let mut c = std::process::Command::new("sh");
