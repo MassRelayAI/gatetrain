@@ -120,7 +120,7 @@ fn a_pinned_step_really_runs_on_its_reserved_cpus() {
         return;
     }
     let w = tempfile::tempdir().unwrap();
-    let body = format!("[[step]]\nname = 'p'\ntier = 'fast'\ncores = 2\nrun = \"grep Cpus_allowed_list /proc/self/status\"\n");
+    let body = "[[step]]\nname = 'p'\ntier = 'fast'\ncores = 2\nrun = \"grep Cpus_allowed_list /proc/self/status\"\n".to_string();
     let o = run(w.path(), &body, &["--cores", &n.to_string()]);
     assert_eq!(o.status.code(), Some(0));
     let full = std::fs::read_dir(w.path()).unwrap().filter_map(Result::ok).find(|e| e.file_name().to_string_lossy().starts_with("out-")).unwrap().path().join("p.full");
