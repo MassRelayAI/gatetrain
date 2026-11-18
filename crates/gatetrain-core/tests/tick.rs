@@ -1479,6 +1479,14 @@ fn minor2_a_crash_before_the_pid_is_recorded_leaves_a_marker_that_waits() {
     assert_eq!(lines_in(&fx, "deploy.txt"), 0, "nothing deployed beside a deploy that may be running");
     let r = fx.tick();
     assert!(r.lines[0].starts_with("b1: merged, waits: "), "{:?}", r.lines);
+    // MINOR 3: a person who checked that nothing runs clears the marker with a retry override
+    match fx.with(|e| e.retry_failed("b1", "no deploy process runs on the host")).unwrap() {
+        Outcome::Idle(m) => assert!(m.contains("cleared") && m.contains("deploy staging"), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    assert!(!record_path(&fx, "staging").exists());
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"));
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1);
 }
 
 /// MINOR 2: a record that cannot be written before the spawn fails the step with nothing run; one that cannot be written after it
@@ -1511,4 +1519,85 @@ fn minor2_a_record_that_cannot_be_written_fails_the_step_and_nothing_runs_on() {
     std::thread::sleep(std::time::Duration::from_secs(4));
     assert!(!fx.t.path().join("late.txt").exists(), "the plugin whose pid could not be recorded ran on");
     assert!(!record_path(&fx, "staging").exists(), "no record is left for a plugin that was ended");
+}
+
+/// A merged batch whose T8a intent is pending (a crash right after it), with `rec` written as the record of its staging deploy.
+fn pending_with_record(rec: serde_json::Value) -> Fx {
+    let mut fx = Fx::new("");
+    merged_with(&mut fx, |t| t.timeout_min = Some(1.0));
+    crash_seam::set(Some("before:T8a".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err());
+    crash_seam::set(None);
+    std::fs::create_dir_all(fx.state.join("running")).unwrap();
+    std::fs::write(record_path(&fx, "staging"), rec.to_string()).unwrap();
+    fx
+}
+
+/// MINOR 3 and MINOR 7: a record is judged by its leader's start token. A token that could not be read at spawn is not trusted (it
+/// waits); a live leader waits and the message names its group; a person's retry clears the record with an override row.
+#[test]
+fn minor3_a_record_is_judged_by_its_start_token_and_a_person_clears_it() {
+    // no token: unknown, it waits, even with the pid gone
+    let mut gone = std::process::Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+    let dead = gone.id();
+    gone.wait().unwrap();
+    let mut fx = pending_with_record(serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": dead, "token": null}));
+    match fx.adv("b1") {
+        Outcome::Waiting(why) => assert!(why.contains("without a start token"), "{why}"),
+        o => panic!("{o:?}"),
+    }
+    assert_eq!(lines_in(&fx, "deploy.txt"), 0);
+    // a live leader under its own token waits, and the message names it and its process group
+    let mut live = std::process::Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
+    let pid = live.id();
+    let token = gatetrain_core::runner::process_token(pid);
+    let mut fx = pending_with_record(serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": pid, "token": token}));
+    match fx.adv("b1") {
+        Outcome::Waiting(why) => {
+            assert!(why.contains(&format!("pid {pid}")) && why.contains("--retry"), "{why}");
+            if cfg!(unix) {
+                assert!(why.contains(&format!("process group {pid}")), "{why}");
+            }
+        }
+        o => panic!("{o:?}"),
+    }
+    // a person's retry clears it, with an override row
+    match fx.with(|e| e.retry_failed("b1", "the old deploy is stuck; I ended it")).unwrap() {
+        Outcome::Idle(m) => assert!(m.contains("cleared") && m.contains(&format!("pid {pid}")), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    assert!(!record_path(&fx, "staging").exists());
+    assert_eq!(fx.count("decisions WHERE kind='override' AND rule='retry.person' AND json_extract(evidence,'$.cleared_records') IS NOT NULL"), 1);
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"));
+    let _ = live.kill();
+    let _ = live.wait();
+}
+
+/// MINOR 3: a pid that a later process reuses is not the recorded deploy (its token differs), even when that process leads a live
+/// process group; and for a `survives_parent` deploy only the leader is judged (the service it started is expected to live).
+#[cfg(unix)]
+#[test]
+fn minor3_a_reused_pid_or_a_surviving_service_does_not_hold_the_deploy() {
+    use std::os::unix::process::CommandExt;
+    // a live group leader under another start token: a reused pid
+    let mut other = std::process::Command::new("sh");
+    other.args(["-c", "sleep 30 & sleep 30"]).process_group(0);
+    let mut other = other.spawn().unwrap();
+    let pid = other.id();
+    let token = gatetrain_core::runner::process_token(pid).unwrap();
+    let mut fx = pending_with_record(serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": pid, "token": token + 1}));
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"), "a reused pid held the deploy");
+    let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+    let _ = other.wait();
+    // a survives_parent deploy whose leader ended and left its service running in the group
+    let mut svc = std::process::Command::new("sh");
+    svc.args(["-c", "sleep 30 & exit 0"]).process_group(0);
+    let mut leader = svc.spawn().unwrap();
+    let pgid = leader.id();
+    let token = gatetrain_core::runner::process_token(pgid);
+    leader.wait().unwrap();
+    assert!(gatetrain_core::runner::group_alive(pgid), "the service lives");
+    let mut fx = pending_with_record(serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": pgid, "token": token, "survives_parent": true}));
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"), "the service of a finished deploy held the next step");
+    let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pgid}")]).status();
 }

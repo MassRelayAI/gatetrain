@@ -748,7 +748,11 @@ impl<'a> Engine<'a> {
         out
     }
 
-    /// `Some(what)` while the process of this record (or, on Unix, its process group) may still run.
+    /// `Some(what)` while the process of this record (or, on Unix, its process group) may still run. The leader is the recorded pid
+    /// under its recorded start token: a record without a token (it could not be read at spawn) is not trusted, it waits; a pid that a
+    /// later process holds (another token) is gone, its group too (the kernel does not reuse a pid while its process group lives). Its
+    /// process group counts only for a step that does not survive its parent: a `survives_parent` deploy leaves its service running on
+    /// purpose, so only its leader is judged.
     fn record_running(&self, path: &Path, v: &Value) -> Option<String> {
         let step = v["step"].as_str().unwrap_or("a deploy step");
         let Some(batch) = v["batch"].as_str() else {
@@ -759,8 +763,19 @@ impl<'a> Engine<'a> {
                 "{step} of batch {batch} was starting when its gatetrain stopped, before its pid was recorded: it may be running, and nothing can tell; the next step waits. A person checks that it is not running and runs `gatetrain batch advance {batch} --retry --reason <why>`, which clears the record"
             ));
         };
-        let alive = crate::runner::process_alive(pid, v["token"].as_u64()) || crate::runner::group_alive(pid);
-        alive.then(|| format!("{step} of batch {batch} is still running as pid {pid}, started by a gatetrain that is gone; the next step waits for it"))
+        let (group, end) = if cfg!(unix) { (format!(" (process group {pid})"), format!("`kill -KILL -- -{pid}`")) } else { (String::new(), format!("`taskkill /T /F /PID {pid}`")) };
+        let clear = format!("If it is stuck, a person ends it ({end}) and runs `gatetrain batch advance {batch} --retry --reason <why>`, which clears the record");
+        let Some(token) = v["token"].as_u64() else {
+            return Some(format!("{step} of batch {batch} was recorded as pid {pid}{group} without a start token, so it cannot be told from a later process that reuses the pid; the next step waits. {clear}"));
+        };
+        if crate::runner::process_alive(pid, Some(token)) {
+            return Some(format!("{step} of batch {batch} is still running as pid {pid}{group}, started by a gatetrain that is gone; the next step waits for it. {clear}"));
+        }
+        if crate::runner::process_token(pid).is_some_and(|now| now != token) {
+            return None; // a later process holds the pid: the recorded one and its group are gone
+        }
+        let survives = v["survives_parent"].as_bool().unwrap_or(false);
+        (!survives && crate::runner::group_alive(pid)).then(|| format!("{step} of batch {batch}: its leader pid {pid} ended, but its process group {pid} still has members; the next step waits for them. {clear}"))
     }
 
     /// A T8a step of batch `id` a dead process left running: `Some(what)` while it lives.
@@ -1112,6 +1127,29 @@ impl<'a> Engine<'a> {
         if reason.trim().is_empty() {
             return Err(Error::Batch("a retry override needs a reason (--reason)".into()));
         }
+        // a record of a T8a step this batch left behind (a deploy a dead gatetrain started) holds every deploy until it ends; a person
+        // who checked that it is gone clears it here, with an override row that names what was cleared
+        let mine: Vec<(PathBuf, Value)> = self.running_records().into_iter().filter(|(_, v)| v["batch"].as_str() == Some(id)).collect();
+        if !mine.is_empty() {
+            let what: Vec<String> = mine
+                .iter()
+                .map(|(_, v)| {
+                    let step = v["step"].as_str().unwrap_or("a deploy step");
+                    match v["pid"].as_u64() {
+                        Some(pid) if cfg!(unix) => format!("{step} (pid {pid}, process group {pid})"),
+                        Some(pid) => format!("{step} (pid {pid})"),
+                        None => format!("{step} (no pid was recorded)"),
+                    }
+                })
+                .collect();
+            let d = self.decide("override", id, None, "retry.person", "recorded", reason.trim().into(), Some(json!({"transition": "T8a", "from": f.state, "cleared_records": what})))?;
+            for (p, _) in &mine {
+                std::fs::remove_file(p)?;
+            }
+            let n = f.max_attempt.get("retry").copied().unwrap_or(0) + 1;
+            self.event(id, "retry", "done", n, Some(&f.state), None, None, None, Some(d), &json!({"transition": "T8a", "reason": reason.trim(), "cleared_records": what}))?;
+            return Ok(Outcome::Idle(format!("cleared the record of {}; the next advance probes the deploy: {}", what.join(", "), reason.trim())));
+        }
         let Some(tr) = next_effect(&f.state) else { return Ok(Outcome::Idle(format!("batch {id} is {}: no transition with an effect to retry", f.state))) };
         let (crashes, stopped) = self.repeats(id, tr)?;
         if self.failures_since(id, tr)?.is_empty() && crashes.max(stopped) < self.cfg.max_interrupts {
@@ -1413,8 +1451,16 @@ impl<'a> Engine<'a> {
             // finish forward under a new attempt; the partial result is kept, never deleted
             Probe::Partly => self.interrupted(id, &plan, true, "partly done; finishing forward under a new attempt")?,
             Probe::Unknown(why) => {
-                let again = self.idempotent(&plan);
-                let what = if again { "; the effect is declared idempotent, so it runs again under a new attempt" } else { "; a person settles it" };
+                // a person's retry override written after this intent settles it: they looked
+                let person = self.events(id)?.iter().any(|e| e.seq > p.seq && e.transition == "retry" && e.phase == "done" && e.detail["transition"].as_str() == Some(plan.tr.as_str()));
+                let again = self.idempotent(&plan) || person;
+                let what = if person {
+                    "; a person's retry override after it settles it, so it runs again under a new attempt"
+                } else if again {
+                    "; the effect is declared idempotent, so it runs again under a new attempt"
+                } else {
+                    "; a person settles it"
+                };
                 self.interrupted(id, &plan, again, &format!("{why}{what}"))?
             }
         }

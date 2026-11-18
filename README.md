@@ -511,7 +511,15 @@ was signalled; a remote or detached deploy may still run`); a health check past 
 advance of that batch waits (`... is still running as pid N`) and every other batch is refused `deploy.another-batch-deploying`
 (clears by itself) instead of merging or deploying beside it. A batch is not merged either while another batch is `merged` and its
 deploy is not settled, and of two merged batches the older merge deploys first. A deploy whose sha is behind what a newer batch
-already deployed to a target is refused `deploy.superseded` (a person decides), fresh or resumed, and never runs. Before it advances anything the tick verifies the decision log; a
+already deployed to a target is refused `deploy.superseded` (a person decides), fresh or resumed, and never runs. A record is judged
+by its leader: the recorded pid under its recorded start token (a later process that reuses the pid is not it), and, for a step that
+does not survive its parent, any member of its process group (Unix). A `survives_parent` deploy is judged by its leader only: the
+service it started is meant to live. A record without a pid (gatetrain died between the intent marker and the spawn) or without a
+start token (it could not be read) cannot be told from a live deploy, so it waits. **Clearing a record by hand:** the wait names the
+step, the batch and the process group; a person checks that it is gone or ends it (`kill -KILL -- -<pgid>` on Unix,
+`taskkill /T /F /PID <pid>` on Windows), then runs `gatetrain batch advance <batch> --retry --reason <why>`, which removes that batch's
+records with an override row naming them (`retry.person`, `cleared_records`); the next advance probes the deploy as after any crash.
+Before it advances anything the tick verifies the decision log; a
 log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
 
