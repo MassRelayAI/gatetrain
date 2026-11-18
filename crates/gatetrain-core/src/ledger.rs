@@ -339,6 +339,8 @@ impl Ledger {
     /// Open an existing ledger without changing it. A version newer than this binary is refused.
     pub fn open(path: &Path) -> Result<Ledger> {
         let l = Ledger { conn: Connection::open(path)? };
+        // a tick and a person's `batch` command may meet on the file: wait for the other writer instead of failing at once
+        l.conn.busy_timeout(std::time::Duration::from_secs(30))?;
         let v = l.version()?;
         if v > CURRENT_VERSION {
             return Err(Error::SchemaTooNew { found: v, known: CURRENT_VERSION });

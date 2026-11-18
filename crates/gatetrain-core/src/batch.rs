@@ -825,7 +825,7 @@ impl<'a> Engine<'a> {
 
     fn resume(&mut self, id: &str, f: &Folded, p: Ev) -> Result<Outcome> {
         let plan = Plan { tr: p.transition.clone(), to: to_for(&p.transition, &p.detail).into(), input_sha: p.input_sha.clone(), run_id: p.run_id.clone(), attempt: p.attempt, detail: p.detail.clone() };
-        match self.probe(f, &plan)? {
+        match self.probe(id, f, &plan)? {
             Probe::Happened(out) => {
                 let extra = if plan.tr == "T7" { json!({"resumed": "happened", "merge_new": out}) } else { json!({"resumed": "happened"}) };
                 self.finish(id, &plan, out, extra, " (resumed: the probe found the effect done)")
@@ -848,7 +848,7 @@ impl<'a> Engine<'a> {
     }
 
     /// Read-only: git refs and commits, files on disk, the lock.
-    fn probe(&self, f: &Folded, plan: &Plan) -> Result<Probe> {
+    fn probe(&self, id: &str, f: &Folded, plan: &Plan) -> Result<Probe> {
         let wd = PathBuf::from(f.need("workdir")?);
         Ok(match plan.tr.as_str() {
             "T1" => {
@@ -914,11 +914,26 @@ impl<'a> Engine<'a> {
                     Probe::NotHappened
                 }
             }
-            _ => Probe::NotHappened, // T8a: the deploy command must be idempotent (design 7.6)
+            "T8a" => {
+                // the marker the effect writes after the postmerge command and every target succeeded, for this attempt and sha
+                let want = json!({"sha": plan.input_sha, "attempt": plan.attempt, "targets": plan.detail["targets"]});
+                let have = std::fs::read_to_string(self.deploy_marker(id, plan.attempt)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                if have.as_ref() == Some(&want) {
+                    Probe::Happened(plan.input_sha.clone())
+                } else {
+                    Probe::NotHappened // nothing recorded: run again (the deploy command must still be idempotent, design 7.6)
+                }
+            }
+            _ => Probe::NotHappened,
         })
     }
 
     // ------------------------------------------------------------ plans (the guards)
+
+    /// `<state>/deploys/<batch>-T8a-<attempt>.json`: written once the deploy of that attempt succeeded.
+    fn deploy_marker(&self, id: &str, attempt: i64) -> PathBuf {
+        self.state_dir.join("deploys").join(format!("{id}-T8a-{attempt}.json"))
+    }
 
     fn stamp_path(&self, sha: &str) -> PathBuf {
         self.state_dir.join("stamps").join(format!("{sha}.stamp"))
@@ -1476,6 +1491,9 @@ impl<'a> Engine<'a> {
                         return Ok(Err(format!("deploy {name} exited {rc}: {err}")));
                     }
                 }
+                let marker = self.deploy_marker(id, plan.attempt);
+                std::fs::create_dir_all(marker.parent().unwrap_or(Path::new(".")))?;
+                std::fs::write(&marker, json!({"sha": sha, "attempt": plan.attempt, "targets": plan.detail["targets"]}).to_string())?;
                 Ok(Ok(Done { output: Some(sha), extra: json!({}) }))
             }
             t => Err(Error::Batch(format!("no effect for {t}"))),
