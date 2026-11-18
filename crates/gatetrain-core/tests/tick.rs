@@ -1140,3 +1140,67 @@ fn m3_a_git_call_is_named_in_the_heartbeat_while_it_runs() {
     let seen = reader.join().unwrap();
     assert!(seen.iter().any(|e| e.starts_with("b1 git commit")), "{seen:?}");
 }
+
+/// Drive `fx` to `merged`, with the staging deploy changed by `f`.
+fn merged_with(fx: &mut Fx, f: impl FnOnce(&mut gatetrain_core::batchcfg::Target)) {
+    f(fx.cfg.targets.get_mut("staging").unwrap());
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    for want in ["proven", "merged"] {
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+    }
+}
+
+fn wait_for(what: impl Fn() -> bool, secs: u64) -> bool {
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < std::time::Duration::from_secs(secs) {
+        if what() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn m2_a_deploy_that_outlives_a_dead_parent_is_waited_for_and_never_deployed_twice_at_once() {
+    let mut fx = Fx::new("");
+    merged_with(&mut fx, |t| {
+        t.command[2].push_str("; sleep 4");
+        t.survives_parent = true;
+        t.timeout_min = Some(1.0);
+    });
+    // gatetrain "dies" right after it spawned the staging deploy; the deploy keeps running
+    crash_seam::set(Some("T8a:spawned:deploy staging".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err());
+    crash_seam::set(None);
+    assert!(wait_for(|| lines_in(&fx, "deploy.txt") == 1, 10), "the orphaned deploy runs");
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: merged, waits: ") && r.lines[0].contains("still running"), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 0);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1, "no second deploy while the first one lives");
+    // once it is gone the batch moves on (staging is idempotent: it is deployed again under a new attempt)
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 2);
+}
+
+#[test]
+fn m2_without_survives_parent_a_plugin_dies_with_its_parent() {
+    let mut fx = Fx::new("");
+    let late = fwd(&fx.t.path().join("late.txt"));
+    merged_with(&mut fx, |t| {
+        t.command = vec!["sh".into(), "-c".into(), format!("sleep 3; echo late >> '{late}'")];
+        t.timeout_min = Some(1.0);
+    });
+    // the advance runs on a thread of its own that ends with the crash, as a dead parent does
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            crash_seam::set(Some("T8a:spawned:deploy staging".into()));
+            assert!(fx.with(|e| e.advance("b1")).is_err());
+        });
+    });
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert!(!fx.t.path().join("late.txt").exists(), "the deploy outlived its parent");
+}

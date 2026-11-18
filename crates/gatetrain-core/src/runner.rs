@@ -175,16 +175,56 @@ pub enum IsolatedRaw {
     TimedOut,
 }
 
-pub fn run_isolated_raw(mut c: Command, secs: f64) -> Result<IsolatedRaw, String> {
+pub fn run_isolated_raw(c: Command, secs: f64) -> Result<IsolatedRaw, String> {
+    run_isolated_with(c, secs, Opts::default())
+}
+
+/// How [`run_isolated_with`] runs a command beyond its time limit.
+#[derive(Default)]
+pub struct Opts<'a> {
+    /// The command may outlive this process (a deploy that starts a long-lived service). Otherwise it dies with its parent: on Linux
+    /// by `PR_SET_PDEATHSIG` (SIGKILL when the spawning thread ends), on Windows by a job object that kills its processes when the
+    /// last handle to it closes, which is set only while the command runs (one that ended keeps what it started on purpose).
+    pub survives_parent: bool,
+    /// Called once the command runs, with its pid (its process group id on Unix). An `Err` abandons it where it stands, as a dead
+    /// parent would (a test's crash), and is returned.
+    pub on_spawn: Option<&'a mut dyn FnMut(u32) -> Result<(), String>>,
+}
+
+pub fn run_isolated_with(mut c: Command, secs: f64, mut opts: Opts) -> Result<IsolatedRaw, String> {
     let limit = Duration::try_from_secs_f64(secs).ok().filter(|d| !d.is_zero()).ok_or_else(|| format!("{secs} s is not a usable time limit"))?;
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         c.process_group(0);
+        #[cfg(target_os = "linux")]
+        if !opts.survives_parent {
+            // SAFETY: prctl is async-signal-safe and touches no memory of the parent; it runs in the child between fork and exec
+            unsafe {
+                c.pre_exec(|| {
+                    group::set_pdeathsig();
+                    Ok(())
+                });
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // created suspended, put in its job, then resumed: nothing it starts can escape the job in between
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(group::CREATE_SUSPENDED);
     }
     let mut child = c.spawn().map_err(|e| e.to_string())?;
-    let job = group::Job::adopt(&child);
+    let job = group::Job::adopt(&child, !opts.survives_parent);
+    group::resume(&child);
+    if let Some(f) = opts.on_spawn.as_mut() {
+        if let Err(e) = f(child.id()) {
+            // the parent "dies" here: the command is left as it is (the job closes as it would with a dead process)
+            drop(job);
+            return Err(e);
+        }
+    }
     let drain = |mut r: Box<dyn Read + Send>| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -209,8 +249,37 @@ pub fn run_isolated_raw(mut c: Command, secs: f64) -> Result<IsolatedRaw, String
         }
         std::thread::sleep(Duration::from_millis(5));
     };
+    // it ended by itself: what it started on purpose (a service) is not killed when the job closes
+    job.release();
     let (o, e) = (so.recv_timeout(DRAIN).unwrap_or_default(), se.recv_timeout(DRAIN).unwrap_or_default());
     Ok(IsolatedRaw::Done { rc: status.code().unwrap_or(-1), stdout: o, stderr: e })
+}
+
+/// A token of when process `pid` started, to tell it from a later process that reuses the pid (Linux: `starttime` of
+/// `/proc/<pid>/stat`; Windows: the creation time). `None` where it cannot be read.
+pub fn process_token(pid: u32) -> Option<u64> {
+    group::token(pid)
+}
+
+/// Is `pid` running and, when `token` is given, still the process the token was taken from? A zombie is not running.
+pub fn process_alive(pid: u32, token: Option<u64>) -> bool {
+    match group::token(pid) {
+        Some(now) => token.is_none_or(|t| t == now) && group::running(pid),
+        None => token.is_none() && group::running(pid),
+    }
+}
+
+/// Unix: does any process of process group `pgid` live (a grandchild of a plugin whose leader died)? Elsewhere `false`.
+pub fn group_alive(pgid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        Command::new("kill").args(["-0", "--", &format!("-{pgid}")]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pgid;
+        false
+    }
 }
 
 /// The process group (Unix) or job object (Windows) a plugin runs in.
@@ -221,23 +290,187 @@ mod group {
     }
 
     #[cfg(windows)]
+    type Handle = *mut std::ffi::c_void;
+
+    #[cfg(windows)]
+    pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    #[cfg(windows)]
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    #[cfg(windows)]
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+    #[cfg(windows)]
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    #[cfg(windows)]
+    const STILL_ACTIVE: u32 = 259;
+
+    #[cfg(windows)]
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimit {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[cfg(windows)]
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimit {
+        basic: BasicLimit,
+        io: [u64; 6],
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    #[cfg(windows)]
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    #[cfg(windows)]
     extern "system" {
-        fn CreateJobObjectW(attrs: *mut std::ffi::c_void, name: *const u16) -> *mut std::ffi::c_void;
-        fn AssignProcessToJobObject(job: *mut std::ffi::c_void, process: *mut std::ffi::c_void) -> i32;
-        fn TerminateJobObject(job: *mut std::ffi::c_void, code: u32) -> i32;
-        fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
+        fn CreateJobObjectW(attrs: Handle, name: *const u16) -> Handle;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        fn TerminateJobObject(job: Handle, code: u32) -> i32;
+        fn SetInformationJobObject(job: Handle, class: i32, info: *mut std::ffi::c_void, len: u32) -> i32;
+        fn CloseHandle(h: Handle) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn GetExitCodeProcess(h: Handle, code: *mut u32) -> i32;
+        fn GetProcessTimes(h: Handle, creation: *mut FileTime, exit: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
+    }
+
+    #[cfg(windows)]
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtResumeProcess(process: Handle) -> i32;
+    }
+
+    /// Resume a child created suspended (Windows); elsewhere nothing.
+    #[cfg(windows)]
+    pub fn resume(child: &std::process::Child) {
+        use std::os::windows::io::AsRawHandle;
+        // SAFETY: the process handle is borrowed from `child`, which created the process suspended
+        unsafe {
+            NtResumeProcess(child.as_raw_handle());
+        }
+    }
+    #[cfg(not(windows))]
+    pub fn resume(_child: &std::process::Child) {}
+
+    /// Kill this child when its parent dies (Linux; called between fork and exec).
+    #[cfg(target_os = "linux")]
+    pub fn set_pdeathsig() {
+        extern "C" {
+            fn prctl(option: i32, ...) -> i32;
+        }
+        const PR_SET_PDEATHSIG: i32 = 1;
+        const SIGKILL: u64 = 9;
+        // SAFETY: a plain syscall wrapper with integer arguments
+        unsafe {
+            prctl(PR_SET_PDEATHSIG, SIGKILL);
+        }
+    }
+
+    #[cfg(windows)]
+    fn set_kill_on_close(job: Handle, on: bool) -> bool {
+        let mut info = ExtendedLimit::default();
+        info.basic.limit_flags = if on { JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE } else { 0 };
+        // SAFETY: `info` is a live, correctly laid out JOBOBJECT_EXTENDED_LIMIT_INFORMATION; the job handle is ours
+        unsafe { SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS, (&mut info as *mut ExtendedLimit).cast(), std::mem::size_of::<ExtendedLimit>() as u32) != 0 }
+    }
+
+    /// The creation time of `pid` (Windows).
+    #[cfg(windows)]
+    pub fn token(pid: u32) -> Option<u64> {
+        // SAFETY: plain Win32 calls on a handle we own and close
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let (mut c, mut e, mut k, mut u) = (FileTime::default(), FileTime::default(), FileTime::default(), FileTime::default());
+            let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) != 0;
+            CloseHandle(h);
+            ok.then(|| (u64::from(c.high) << 32) | u64::from(c.low))
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn running(pid: u32) -> bool {
+        // SAFETY: plain Win32 calls on a handle we own and close
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code) != 0;
+            CloseHandle(h);
+            ok && code == STILL_ACTIVE
+        }
+    }
+
+    /// `starttime` of `/proc/<pid>/stat`, and whether the process is anything but a zombie (Linux).
+    #[cfg(target_os = "linux")]
+    fn stat(pid: u32) -> Option<(char, u64)> {
+        let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = &s[s.rfind(')')? + 2..];
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        Some((f.first()?.chars().next()?, f.get(19)?.parse().ok()?))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn token(pid: u32) -> Option<u64> {
+        stat(pid).map(|(_, t)| t)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn running(pid: u32) -> bool {
+        stat(pid).is_some_and(|(state, _)| state != 'Z' && state != 'X')
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    pub fn token(_pid: u32) -> Option<u64> {
+        None
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    pub fn running(pid: u32) -> bool {
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn running(_pid: u32) -> bool {
+        false
     }
 
     impl Job {
-        /// Put the child in a job of its own (Windows); on Unix the child leads its own process group already. A job that cannot be
-        /// made leaves the parent-pid walk of `kill_tree` as the only kill.
+        /// Put the child in a job of its own (Windows), killing it with the job's last handle when `kill_on_close`; on Unix the child
+        /// leads its own process group already. A job that cannot be made leaves the parent-pid walk of `kill_tree` as the only kill.
         #[cfg(windows)]
-        pub fn adopt(child: &std::process::Child) -> Job {
+        pub fn adopt(child: &std::process::Child, kill_on_close: bool) -> Job {
             use std::os::windows::io::AsRawHandle;
             // SAFETY: plain Win32 calls; the job handle is ours and closed in Drop; the process handle is borrowed from `child`.
             unsafe {
                 let h = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-                if !h.is_null() && AssignProcessToJobObject(h, child.as_raw_handle()) == 0 {
+                if h.is_null() {
+                    return Job { handle: h };
+                }
+                if kill_on_close {
+                    set_kill_on_close(h, true);
+                }
+                if AssignProcessToJobObject(h, child.as_raw_handle()) == 0 {
                     CloseHandle(h);
                     return Job { handle: std::ptr::null_mut() };
                 }
@@ -245,9 +478,19 @@ mod group {
             }
         }
         #[cfg(not(windows))]
-        pub fn adopt(_child: &std::process::Child) -> Job {
+        pub fn adopt(_child: &std::process::Child, _kill_on_close: bool) -> Job {
             Job {}
         }
+
+        /// The command ended by itself: closing the job must not kill what it started on purpose.
+        #[cfg(windows)]
+        pub fn release(&self) {
+            if !self.handle.is_null() {
+                set_kill_on_close(self.handle, false);
+            }
+        }
+        #[cfg(not(windows))]
+        pub fn release(&self) {}
 
         /// End every process of the group (job).
         #[cfg(windows)]
@@ -277,7 +520,7 @@ mod group {
     impl Drop for Job {
         fn drop(&mut self) {
             if !self.handle.is_null() {
-                // SAFETY: closing our own handle once; without KILL_ON_JOB_CLOSE this leaves the processes of the job running
+                // SAFETY: closing our own handle once; with KILL_ON_JOB_CLOSE still set (the command did not end) its processes end too
                 unsafe {
                     CloseHandle(self.handle);
                 }

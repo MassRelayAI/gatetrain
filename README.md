@@ -444,7 +444,6 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 
 > **Not ready to enable yet (2026-11-18).** The final review of this release found open items. Leave `[tick] enabled` off
 > until a release says they are closed:
-> 1. If the gatetrain process dies during a deploy, that deploy keeps running, and the next tick may deploy again alongside it.
 >
 > Until then, `batch advance` by hand is the supported path.
 
@@ -498,7 +497,11 @@ that step's deadline: a holder that beats but runs a step more than a minute pas
 process group (a job object on Windows) of its own so a timeout ends what it started: a deploy target's `timeout_min` (default 60),
 `[preflight] timeout_min` (60), `[postmerge] timeout_min` (30), and `[timeouts] plugin_min` (30) for the stack command, hub rebuilds,
 regen, health checks, cache verification, the legacy stamp and every git call the engine makes (git runs hooks, which can hang). A command past its limit fails the attempt (`the local process tree
-was signalled; a remote or detached deploy may still run`); a health check past it is a wait. Before it advances anything the tick verifies the decision log; a
+was signalled; a remote or detached deploy may still run`); a health check past it is a wait. A plugin dies with gatetrain (Linux:
+`PR_SET_PDEATHSIG`; Windows: a job object that kills on close while the plugin runs) unless its deploy target says
+`survives_parent = true` (it starts a long-lived service). A deploy step records its process (`<state>/running/<batch>-T8a.json`, pid
+and start time) while it runs: if gatetrain dies and the deploy lives on, the next advance waits (`... is still running as pid N`)
+instead of starting a second deploy beside it. Before it advances anything the tick verifies the decision log; a
 log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
 

@@ -251,7 +251,7 @@ impl Outcome {
 }
 
 /// Refusals that clear by themselves (a busy host, a base batch still on its way); every other refusal needs a person.
-pub const CLEARS_BY_ITSELF: &[&str] = &["host.refuse", "host.refuse-proof-running", "host.refuse-memory", "pipeline.base-unproven", "pipeline.base-not-merged"];
+pub const CLEARS_BY_ITSELF: &[&str] = &["host.refuse", "host.refuse-proof-running", "host.refuse-memory", "pipeline.base-unproven", "pipeline.base-not-merged", "deploy.still-running"];
 
 /// The transition with an effect that `advance` takes from `state`, if any.
 fn next_effect(state: &str) -> Option<&'static str> {
@@ -297,6 +297,8 @@ enum Probe {
     /// The probe cannot tell whether the effect happened (a holder that opened its log but holds no lock yet, a deploy target a crash
     /// may have left half done): the attempt is closed as `interrupted` and is run again only when the effect is declared idempotent.
     Unknown(String),
+    /// The effect is still running in a process a dead gatetrain left behind: neither settled nor safe to start again, so it waits.
+    Running(String),
 }
 
 pub struct Engine<'a> {
@@ -377,6 +379,8 @@ struct GitCtx {
 }
 
 thread_local! {
+    /// Did the current T8a attempt start a plugin (post-merge, a deploy)? A failure after that is `failed-dirty`.
+    static T8A_SPAWNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static GIT_CTX: std::cell::RefCell<Option<GitCtx>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -628,6 +632,14 @@ impl<'a> Engine<'a> {
     /// another process reads it; the limit itself is measured on this process's monotonic clock.
     #[allow(clippy::too_many_arguments)]
     fn plugin(&self, id: &str, tr: &str, step: &str, key: &str, cmd: &[String], dir: &Path, env: &[(String, String)], min: f64) -> Result<std::result::Result<(i32, String), String>> {
+        self.plugin_as(id, tr, step, key, cmd, dir, env, min, false)
+    }
+
+    /// [`Engine::plugin`], for a step that may outlive this process (`survives_parent`). A T8a step (the post-merge command, a deploy)
+    /// also records the process it runs (`<state>/running/<batch>-T8a.json`: pid, its start token) while it runs, so if this process
+    /// dies the next advance waits for that deploy instead of starting a second one beside it.
+    #[allow(clippy::too_many_arguments)]
+    fn plugin_as(&self, id: &str, tr: &str, step: &str, key: &str, cmd: &[String], dir: &Path, env: &[(String, String)], min: f64, survives_parent: bool) -> Result<std::result::Result<(i32, String), String>> {
         let noun = if step == "postmerge" { "post-merge".to_string() } else { step.to_string() };
         let secs = min * 60.0;
         if !(secs.is_finite() && secs > 0.0) || std::time::Duration::try_from_secs_f64(secs).is_err() {
@@ -642,16 +654,55 @@ impl<'a> Engine<'a> {
                 *g = Some(json!({"effect": format!("{id} {tr} {step}"), "since_ms": since, "deadline_ms": since + (secs * 1000.0) as i64}));
             }
         }
-        let r = crate::runner::run_isolated(c, secs);
+        let record = (tr == "T8a").then(|| self.running_path(id));
+        let crashed: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
+        let mut on_spawn = |pid: u32| -> std::result::Result<(), String> {
+            if tr == "T8a" {
+                T8A_SPAWNED.with(|c| c.set(true));
+            }
+            if let Some(p) = &record {
+                let v = json!({"pid": pid, "token": crate::runner::process_token(pid), "step": step, "batch": id, "since_ms": since});
+                let _ = std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")));
+                let _ = std::fs::write(p, v.to_string());
+            }
+            if let Err(e) = crash_point(&format!("{tr}:spawned:{step}")) {
+                *crashed.borrow_mut() = Some(e);
+                return Err("the parent died".into());
+            }
+            Ok(())
+        };
+        let r = crate::runner::run_isolated_with(c, secs, crate::runner::Opts { survives_parent, on_spawn: Some(&mut on_spawn) });
+        if let Some(e) = crashed.borrow_mut().take() {
+            return Err(e); // a test's crash: the process "died" with the plugin running, its record left behind
+        }
+        if let Some(p) = &record {
+            let _ = std::fs::remove_file(p);
+        }
         if let Some(b) = &self.progress {
             if let Ok(mut g) = b.lock() {
                 *g = None;
             }
         }
         Ok(match r.map_err(|e| Error::Batch(format!("{noun}: {e}")))? {
-            crate::runner::Isolated::Done { rc, stdout, stderr } => Ok((rc, if stderr.trim().is_empty() { stdout.trim().to_string() } else { stderr.trim().to_string() })),
-            crate::runner::Isolated::TimedOut => Err(format!("{noun} timed out after {min} min{key}; the local process tree was signalled; a remote or detached deploy may still run")),
+            crate::runner::IsolatedRaw::Done { rc, stdout, stderr } => {
+                let (o, e) = (String::from_utf8_lossy(&stdout).trim().to_string(), String::from_utf8_lossy(&stderr).trim().to_string());
+                Ok((rc, if e.is_empty() { o } else { e }))
+            }
+            crate::runner::IsolatedRaw::TimedOut => Err(format!("{noun} timed out after {min} min{key}; the local process tree was signalled; a remote or detached deploy may still run")),
         })
+    }
+
+    /// Where a running T8a step of batch `id` is recorded.
+    fn running_path(&self, id: &str) -> PathBuf {
+        self.state_dir.join("running").join(format!("{id}-T8a.json"))
+    }
+
+    /// A T8a step a dead process left running: `Some(what)` while the recorded process (or, on Unix, its process group) lives.
+    fn deploy_still_running(&self, id: &str) -> Option<String> {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(self.running_path(id)).ok()?).ok()?;
+        let pid = u32::try_from(v["pid"].as_u64()?).ok()?;
+        let alive = crate::runner::process_alive(pid, v["token"].as_u64()) || crate::runner::group_alive(pid);
+        alive.then(|| format!("{} of batch {id} is still running as pid {pid}, started by a gatetrain that is gone; the next step waits for it", v["step"].as_str().unwrap_or("a deploy step")))
     }
 
     /// The limit of a plugin without one of its own (`[timeouts] plugin_min`).
@@ -1192,6 +1243,7 @@ impl<'a> Engine<'a> {
                 let extra = if plan.tr == "T7" { json!({"resumed": "happened", "merge_new": out}) } else { json!({"resumed": "happened"}) };
                 return self.finish(id, &plan, out, extra, " (resumed: the probe found the effect done)");
             }
+            Probe::Running(why) => return Ok(Outcome::Waiting(why)),
             Probe::NotHappened => self.interrupted(id, &plan, true, "the probe found the effect not done; it runs again under a new attempt")?,
             // finish forward under a new attempt; the partial result is kept, never deleted
             Probe::Partly => self.interrupted(id, &plan, true, "partly done; finishing forward under a new attempt")?,
@@ -1263,6 +1315,7 @@ impl<'a> Engine<'a> {
                     Probe::NotHappened
                 }
             }
+            "T8a" if self.deploy_still_running(id).is_some() => Probe::Running(self.deploy_still_running(id).unwrap_or_default()),
             "T8a" => {
                 // the per-target checkpoints of the ledger, for this sha: every one there is done; the first one missing is the one a crash
                 // may have left half done (they run in order), and the ones after it never started
@@ -1655,6 +1708,9 @@ impl<'a> Engine<'a> {
                 Ok(mk(Some(tip.clone()), None, json!({"merge_old": old, "merge_new": tip, "tested": tested, "protected": self.cfg.protected, "mode": "sha", "checkout": checkout})))
             }
             "T8a" => {
+                if let Some(why) = self.deploy_still_running(id) {
+                    return Ok(Planned::Refuse("deploy.still-running".into(), why));
+                }
                 let (mut auto, mut prod) = (vec![], vec![]);
                 for (n, t) in &self.cfg.targets {
                     if t.tier == "production" {
@@ -1950,8 +2006,8 @@ impl<'a> Engine<'a> {
                     }
                     let t = &self.cfg.targets[name];
                     let cmd = substitute(&t.command, &sha);
-                    let min = t.timeout_min.unwrap_or(DEPLOY_TIMEOUT_MIN);
-                    let (rc, err) = match self.plugin(id, "T8a", &format!("deploy {name}"), &format!(" ([deploy.{name}] timeout_min)"), &cmd, &wd, &env, min)? {
+                    let (min, survives) = (t.timeout_min.unwrap_or(DEPLOY_TIMEOUT_MIN), t.survives_parent);
+                    let (rc, err) = match self.plugin_as(id, "T8a", &format!("deploy {name}"), &format!(" ([deploy.{name}] timeout_min)"), &cmd, &wd, &env, min, survives)? {
                         Ok(x) => x,
                         Err(why) => return Ok(Err(why)),
                     };

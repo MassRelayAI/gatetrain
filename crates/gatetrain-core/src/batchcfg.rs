@@ -22,6 +22,8 @@ pub struct Target {
     /// checkpoint says it was, so a target a crash left in doubt is settled instead of deployed twice. An automatic target needs this
     /// or `idempotent = true` (refused at load otherwise).
     pub probe: Vec<String>,
+    /// `survives_parent = true`: the deploy starts a long-lived service, so it is not killed when gatetrain dies while it runs.
+    pub survives_parent: bool,
 }
 
 /// A shared file ("hub") that is rebuilt, not merged, when two lanes change it: `[stack] hubs = [{ glob, rebuild }]`.
@@ -413,6 +415,10 @@ impl BatchConfig {
                         command: argv(t.get("command")),
                         health: argv(t.get("health")),
                         probe: argv(t.get("probe")),
+                        survives_parent: match t.get("survives_parent") {
+                            None => false,
+                            Some(x) => x.as_bool().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [deploy.{name}] survives_parent is true or false, not {x}")))?,
+                        },
                         idempotent: match t.get("idempotent") {
                             None => false,
                             Some(x) => x.as_bool().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [deploy.{name}] idempotent is true or false, not {x}")))?,
