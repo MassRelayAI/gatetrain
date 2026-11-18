@@ -901,6 +901,35 @@ impl<'a> Engine<'a> {
         Ok(ev.into_iter().filter(|e| e.seq > since && e.transition == tr && e.phase == "failed" && !settled_crash(e)).collect())
     }
 
+    /// A failed merge or deploy may have happened after all: the fast-forward moved the protected branch and only the check after it
+    /// failed (a hook left a file in the checkout), or every target had deployed when a later step failed. Before anything is retried
+    /// or refused, the failed attempt's plan is rebuilt from its intent and probed: an effect that happened finishes that attempt.
+    fn settle_failed(&mut self, id: &str, f: &Folded, tr: &str) -> Result<Option<Outcome>> {
+        if !matches!(tr, "T7" | "T8a") {
+            return Ok(None);
+        }
+        let Some(last) = self.failures_since(id, tr)?.pop() else { return Ok(None) };
+        let Some(intent) = self.events(id)?.into_iter().find(|e| e.transition == tr && e.phase == "intent" && e.attempt == last.attempt) else { return Ok(None) };
+        let plan = Plan { tr: tr.into(), to: to_for(tr, &intent.detail).into(), input_sha: intent.input_sha.clone(), run_id: intent.run_id.clone(), attempt: intent.attempt, detail: intent.detail.clone() };
+        if let Probe::Happened(out) = self.probe(id, f, &plan)? {
+            let extra = if tr == "T7" { json!({"resumed": "failed-but-happened", "merge_new": out}) } else { json!({"resumed": "failed-but-happened"}) };
+            let warning = last.detail.get("error").and_then(Value::as_str).unwrap_or_default().to_string();
+            let mut extra = extra;
+            extra["warning"] = json!(warning);
+            return Ok(Some(self.finish(id, &plan, out, extra, " (the failed attempt's effect had happened; its error is kept as a warning)")?));
+        }
+        Ok(None)
+    }
+
+    /// Does `tip` differ from `tested` only by files under the generated directories, with `tested` an ancestor of it?
+    fn generated_only(&self, wd: &Path, tested: &str, tip: &str) -> Result<bool> {
+        if self.cfg.generated_dirs.is_empty() || !git_raw(wd, &["merge-base", "--is-ancestor", tested, tip])?.0 {
+            return Ok(false);
+        }
+        let names = git(wd, &["diff", "--name-only", "--no-renames", tested, tip])?;
+        Ok(names.lines().all(|p| in_dirs(p, &self.cfg.generated_dirs)))
+    }
+
     /// The engine's one retry decision, used by every path that starts an attempt (`advance`, a tick, `retry`): a transition whose
     /// failed attempts exceed its `[retry] budget` (default 0) is refused (`batch.failed-needs-person`) until a person's override.
     fn failure_gate(&mut self, id: &str, tr: &str) -> Result<Option<Outcome>> {
@@ -996,6 +1025,9 @@ impl<'a> Engine<'a> {
     }
 
     fn go(&mut self, id: &str, f: &Folded, tr: &str) -> Result<Outcome> {
+        if let Some(o) = self.settle_failed(id, f, tr)? {
+            return Ok(o);
+        }
         if let Some(o) = self.failure_gate(id, tr)? {
             return Ok(o);
         }
@@ -1530,7 +1562,9 @@ impl<'a> Engine<'a> {
             "T7" => {
                 let tip = self.tip(f)?;
                 let tested = f.need("tested_sha")?;
-                if tested != tip {
+                // the tip may be ahead of the tested sha only by the engine's own generated-delta commit (an earlier T7 attempt made it):
+                // only files under the generated directories differ, and the effect proves them a fixpoint again before it merges
+                if tested != tip && !self.generated_only(&wd, &tested, &tip)? {
                     return Ok(Planned::Refuse("merge.tested-equals-merged".into(), format!("tested {}, tip {} (mode sha); restack and prove again", short(&tested), short(&tip))));
                 }
                 let pref = format!("refs/heads/{}", self.cfg.protected);
@@ -1555,7 +1589,7 @@ impl<'a> Engine<'a> {
                         return Ok(Planned::Refuse("merge.checkout-dirty".into(), format!("{} is checked out in {c} with uncommitted changes ({}); commit or stash there so the merge can update it", self.cfg.protected, shown.join(", "))));
                     }
                 }
-                Ok(mk(Some(tip.clone()), None, json!({"merge_old": old, "merge_new": tip, "protected": self.cfg.protected, "mode": "sha", "checkout": checkout})))
+                Ok(mk(Some(tip.clone()), None, json!({"merge_old": old, "merge_new": tip, "tested": tested, "protected": self.cfg.protected, "mode": "sha", "checkout": checkout})))
             }
             "T8a" => {
                 let (mut auto, mut prod) = (vec![], vec![]);
@@ -1754,7 +1788,8 @@ impl<'a> Engine<'a> {
                 Ok(Ok(Done { output: None, extra: json!({}) }))
             }
             "T7" => {
-                let tested = plan.detail["merge_new"].as_str().unwrap_or_default().to_string();
+                // what the chain proved: the tip, or (after an attempt that committed the generated delta) an ancestor of it
+                let tested = plan.detail["tested"].as_str().or(plan.detail["merge_new"].as_str()).unwrap_or_default().to_string();
                 let old = plan.detail["merge_old"].as_str().unwrap_or_default();
                 // generated-delta: files the chain itself produced are committed BY NAME (never `add -A`), the generators run again and must
                 // change nothing, and only generated files may differ from what was tested
@@ -1770,6 +1805,10 @@ impl<'a> Engine<'a> {
                     let mut c = vec!["commit".to_string(), "-q".into(), "-m".into(), format!("chore(batch): commit the generated files the chain produced for {id} (generated-delta)"), "--".into()];
                     c.extend(dirty.iter().cloned());
                     git(&wd, &c.iter().map(String::as_str).collect::<Vec<_>>())?; // an explicit pathspec: only these files, whatever else is staged
+                }
+                // whenever the merge would carry generated files the chain did not test (this attempt's commit or an earlier one's), the
+                // generators run again and must change nothing
+                if git(&wd, &["rev-parse", "HEAD"])? != tested {
                     if !self.cfg.regen_command.is_empty() {
                         let env = self.env(id, f, &tested, "", "");
                         let (rc, err) = match self.plugin(id, "T7", "regen", " ([timeouts] plugin_min)", &self.cfg.regen_command, &wd, &env, self.plugin_min())? {

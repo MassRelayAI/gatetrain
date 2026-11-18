@@ -2645,3 +2645,81 @@ fn s6_a_hung_regen_fails_at_the_plugin_timeout() {
     }
     assert!(t0.elapsed() < std::time::Duration::from_secs(20));
 }
+
+// ---- review round 4: a T7 that failed after the protected checkout already moved
+fn install_post_merge_hook(fx: &Fx) {
+    let hooks = std::path::PathBuf::from(g(&fx.repo, &["rev-parse", "--git-common-dir"]));
+    let hooks = if hooks.is_absolute() { hooks } else { fx.repo.join(hooks) }.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("post-merge"), "#!/bin/sh\necho made-by-hook > hook-made.txt\n").unwrap();
+}
+
+#[test]
+fn s7_rev4_t7_failed_after_the_checkout_moved_with_generated_delta() {
+    let mut fx = Fx::new("");
+    proven_with_chain_output(&mut fx, &[("gen/chain-made.txt", "made by the chain\n")]);
+    fx.step("b1", "proven");
+    let main_wt = fx.outside("main-wt");
+    g(&fx.repo, &["worktree", "add", "-q", &fwd(&main_wt), "main"]);
+    install_post_merge_hook(&fx);
+    let m = fx.failed_text("b1");
+    assert!(m.contains("is not at") || m.contains("clean tree"), "{m}");
+    let head = g(&fx.repo, &["rev-parse", "HEAD"]);
+    let main = g(&fx.repo, &["rev-parse", "main"]);
+    assert_eq!(main, head, "the merge already happened");
+    std::fs::remove_file(main_wt.join("hook-made.txt")).unwrap();
+    let o = fx.adv("b1").unwrap();
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "merged"), "the advance after it finishes the merge that happened: {o:?}");
+    assert_eq!(status_fact(&mut fx, "b1", &["merge_new"]), serde_json::json!(head));
+}
+
+#[test]
+fn s7_rev4_t7_failed_after_the_checkout_moved_plain() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    fx.step("b1", "proven");
+    let main_wt = fx.outside("main-wt");
+    g(&fx.repo, &["worktree", "add", "-q", &fwd(&main_wt), "main"]);
+    install_post_merge_hook(&fx);
+    fx.failed_text("b1");
+    std::fs::remove_file(main_wt.join("hook-made.txt")).unwrap();
+    let o = fx.adv("b1").unwrap();
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "merged"), "{o:?}");
+}
+
+#[test]
+fn s7_a_regen_failure_after_the_generated_files_commit_is_recoverable() {
+    let mut fx = Fx::new("");
+    proven_with_chain_output(&mut fx, &[("gen/chain-made.txt", "made by the chain\n")]);
+    fx.step("b1", "proven");
+    let regen = fx.cfg.regen_command.clone();
+    fx.cfg.regen_command = vec!["sh".into(), "-c".into(), "mkdir -p gen && echo more >> gen/grow.txt".into()]; // never a fixpoint
+    let m = fx.failed_text("b1");
+    assert!(m.contains("not a fixpoint"), "{m}");
+    let tested = status_fact(&mut fx, "b1", &["tested_sha"]);
+    assert_ne!(serde_json::json!(g(&fx.repo, &["rev-parse", "HEAD"])), tested, "the generated-files commit moved the batch tip");
+    // a person fixes the generator and removes what the broken one wrote, then retries
+    fx.cfg.regen_command = regen;
+    std::fs::remove_file(fx.repo.join("gen/grow.txt")).unwrap();
+    let adm = AllowAll;
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
+    e.retry_failed("b1", "the generator is fixed").unwrap();
+    let o = fx.adv("b1").unwrap();
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "merged"), "not a permanent merge.tested-equals-merged: {o:?}");
+    assert_eq!(g(&fx.repo, &["rev-parse", "main"]), g(&fx.repo, &["rev-parse", "HEAD"]));
+    // a tip that moved by anything but generated files is still refused
+}
+
+#[test]
+fn s7_a_tip_that_moved_beyond_the_generated_files_is_still_refused() {
+    let mut fx = Fx::new("");
+    proven_with_chain_output(&mut fx, &[("gen/chain-made.txt", "made by the chain\n")]);
+    fx.step("b1", "proven");
+    std::fs::remove_file(fx.repo.join("gen/chain-made.txt")).unwrap();
+    std::fs::write(fx.repo.join("late.txt"), "late\n").unwrap();
+    g(&fx.repo, &["add", "--", "late.txt"]);
+    g(&fx.repo, &["commit", "-q", "-m", "late"]);
+    let (rule, _) = fx.refused("b1");
+    assert_eq!(rule, "merge.tested-equals-merged");
+}
