@@ -367,6 +367,10 @@ keyed `STEP_CACHED`, and the engine checks it against its own stamps. A cache ke
 
 The older `[preflight] command` and the engine's own `<sha>.stamp` still work. A light run is refused on a host whose proof lock is held. `gatetrain batch new --base <batch>` stacks a batch on another; the guard `pipeline.base-not-merged` refuses to merge it before its base is merged. Details and the deviations from the design are in [engine v2](docs/design/engine-v2.md) (section 14).
 
+### Precheck (`gatetrain batch precheck`)
+
+`gatetrain batch precheck --config gatetrain.toml --base main <lane>...` runs every cheap pre-stacking check in parallel and prints all findings at once: pairwise lane conflicts and each lane against the base (`git merge-tree`), per-lane commands in a temporary checkout, host readiness (local base equals the remote base, no untracked file where a lane adds one, host commands) and operator-declared known reds. Read-only; exit 0 green, 1 red, 2 config error. Config block and output in [`docs/precheck.md`](docs/precheck.md).
+
 ### Close (`gatetrain.toml [close]`)
 
 With `[close] tidy = true` the T9 step tidies only what the batch itself recorded, and only below `[close] roots`. A refusal is a decision

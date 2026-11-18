@@ -20,6 +20,7 @@ pub mod ledger;
 pub mod logfmt;
 pub mod memory;
 pub mod portscan;
+pub mod precheck;
 pub mod predict;
 pub mod privacy;
 pub mod pycompat;

@@ -390,6 +390,22 @@ enum BatchCmd {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Every cheap check a batch needs before stacking, in parallel, all findings at once (read-only; exit 1 on a red, 2 on a config error)
+    Precheck {
+        /// The ref the lanes are stacked on
+        #[arg(long, required_unless_present = "self_test")]
+        base: Option<String>,
+        /// The main checkout (default: the current directory)
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Checks run at once (default: the host's cores)
+        #[arg(long)]
+        par: Option<usize>,
+        /// Prove the conflict check on a fixture repository with a known conflicting pair, then exit
+        #[arg(long)]
+        self_test: bool,
+        lanes: Vec<String>,
+    },
     /// Close without a merge; no branch is deleted
     Abandon {
         id: String,
@@ -496,6 +512,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Memory { cmd: MemoryCmd::Record { db, run, step, peak_mb, source } } => holdcmd::memory_record(&db, &run, &step, peak_mb, &source),
         Cmd::Memory { cmd: MemoryCmd::Admit { db, hosts, host, steps } } => holdcmd::memory_admit(&db, &hosts, &host, &steps),
         Cmd::Running { lock, hosts, host } => holdcmd::status(&lock, &hosts, &host),
+        Cmd::Batch { config, cmd: BatchCmd::Precheck { base, repo, par, self_test, lanes }, .. } => Ok(precheck_cmd(&config, base, &repo, par, self_test, &lanes)),
         Cmd::Batch { db, config, lock, hosts, host, cmd } => run_batch(&db, &config, lock, hosts.zip(host), cmd),
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
@@ -549,6 +566,33 @@ fn history_durations(db: &Path, exclude_run: &str) -> Result<diagnose::History> 
         h.entry(n).or_default().push(d);
     }
     Ok(h)
+}
+
+fn precheck_cmd(config: &Path, base: Option<String>, repo: &Path, par: Option<usize>, self_test: bool, lanes: &[String]) -> ExitCode {
+    use gatetrain_core::precheck as pc;
+    if self_test {
+        return match pc::self_test() {
+            Ok(m) => {
+                println!("{m}");
+                ExitCode::SUCCESS
+            }
+            Err(m) => {
+                eprintln!("{m}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    let cfg = match pc::PrecheckConfig::load(config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("config error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let par = par.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let r = pc::run(repo, &cfg, &base.unwrap_or_default(), lanes, par);
+    print!("{}", r.render());
+    ExitCode::from(if r.reds() == 0 { 0 } else { 1 })
 }
 
 fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(PathBuf, String)>, cmd: BatchCmd) -> Result<ExitCode> {
@@ -648,6 +692,7 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
             }
         }
         BatchCmd::Abandon { id, reason } => report(e.abandon(&id, &reason)?),
+        BatchCmd::Precheck { .. } => unreachable!("handled before the ledger is opened"),
     })
 }
 
