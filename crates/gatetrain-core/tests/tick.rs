@@ -1929,3 +1929,26 @@ fn minor8_a_crash_after_a_deploy_before_its_checkpoint_is_still_seen_by_supersed
     assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b2"], "nothing deployed twice, nothing older over newer");
     assert!(rec.as_ref().is_some_and(|r| r["deployed"].as_str().is_some_and(|s| s.len() == 40)), "the record said what was deployed: {rec:?}");
 }
+
+/// Round 3, E: a batch held while its health checks run (held from `deploying`) still holds the next batch's deploy on its target.
+#[test]
+fn round3_e_a_batch_held_in_its_health_checks_still_holds_the_next_deploy() {
+    let mut fx = Fx::new("");
+    let (log, current, healthy) = (fwd(&fx.t.path().join("deploy-log.txt")), fwd(&fx.t.path().join("current")), fwd(&fx.t.path().join("healthy")));
+    b1_merged_b2_proven(&mut fx, |t| {
+        t.command = vec!["sh".into(), "-c".into(), format!("echo $GATETRAIN_SHA > '{current}'; echo deployed $GATETRAIN_BATCH >> '{log}'")];
+        t.health = vec!["sh".into(), "-c".into(), format!("[ \"$(cat '{current}')\" = \"$GATETRAIN_SHA\" ] || echo checked-against-another-sha $GATETRAIN_BATCH >> '{log}'; test -e '{healthy}'")];
+        t.timeout_min = Some(1.0);
+    });
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"));
+    fx.with(|e| e.hold("b1", "looking at the health check")).unwrap();
+    let r = fx.tick();
+    assert!(r.lines[1].starts_with("b2: proven -> merged, BLOCKED deploy.another-batch-deploying: batch b1 is deploying"), "{:?}", r.lines);
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b1"], "b2 did not deploy beside b1's held health checks");
+    fx.with(|e| e.release("b1")).unwrap();
+    std::fs::write(fx.t.path().join("healthy"), "").unwrap();
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(r.lines[1], "b2: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b1", "deployed b2"]);
+}

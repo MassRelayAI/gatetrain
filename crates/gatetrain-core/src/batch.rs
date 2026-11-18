@@ -856,13 +856,15 @@ impl<'a> Engine<'a> {
         for b in self.batch_ids()?.into_iter().filter(|b| b != id) {
             let evs = self.events(&b)?;
             let Some(f) = fold(&evs) else { continue };
-            if tr == "T8a" && f.state == "deploying" {
+            // a batch held while its health checks ran (held from `deploying`) holds the target as if it still ran them (round 3, E)
+            let held_from = (f.state == "held").then(|| evs.iter().rev().find(|e| e.transition == "hold" && e.phase == "done").and_then(|e| e.detail["from"].as_str().map(String::from))).flatten();
+            if tr == "T8a" && (f.state == "deploying" || held_from.as_deref() == Some("deploying")) {
                 let theirs: Vec<String> = f.facts.get("targets").and_then(Value::as_array).into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect();
                 let shared: Vec<&str> = theirs.iter().filter(|t| ours.contains(t)).map(String::as_str).collect();
                 if !shared.is_empty() {
                     return Ok(Some((
                         "deploy.another-batch-deploying",
-                        format!("batch {b} is deploying {} and its health checks have not passed; this batch deploys after it is live (or a person abandons it), so a health check never runs against a newer sha", shared.join(", ")),
+                        format!("batch {b} is deploying {}{} and its health checks have not passed; this batch deploys after it is live (or a person abandons it), so a health check never runs against a newer sha", shared.join(", "), if held_from.is_some() { " (held)" } else { "" }),
                     )));
                 }
                 continue;
