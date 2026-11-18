@@ -324,6 +324,8 @@ pub fn run(repo: &Path, cfg: &PrecheckConfig, base: &str, lanes: &[String], par:
     Report { checks_run, findings: all.into_iter().flat_map(|(_, f)| f).collect() }
 }
 
+static SELF_TEST_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// The self-test: a fixture repository with one known conflicting pair; the check must report it.
 pub fn self_test() -> std::result::Result<String, String> {
     self_test_with(&merge_conflicts)
@@ -331,7 +333,7 @@ pub fn self_test() -> std::result::Result<String, String> {
 
 /// The self-test with the conflict check injected, so a test can prove it fails when the check finds nothing.
 pub fn self_test_with(check: &dyn Fn(&Path, &str, &str) -> std::result::Result<Vec<String>, String>) -> std::result::Result<String, String> {
-    let dir = std::env::temp_dir().join(format!("gatetrain-precheck-selftest-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gatetrain-precheck-selftest-{}-{}", std::process::id(), SELF_TEST_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let _c = Checkout(dir.clone());
