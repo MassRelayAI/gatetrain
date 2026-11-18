@@ -700,13 +700,14 @@ fn rev3_minor1_a_release_starts_the_wait_again() {
 
 #[test]
 fn rev3_minor2_a_deploy_over_its_timeout_ends_as_failed() {
-    let slow = "[deploy.slow]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"sleep 30\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\ntimeout_min = 0.02\n";
+    let slow = "[deploy.slow]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"sleep 600\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\ntimeout_min = 0.02\n";
     let mut fx = Fx::new(slow);
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
     let t0 = std::time::Instant::now();
     let r = fx.tick();
-    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the deploy was ended at its timeout, not waited for");
+    // the message says it timed out; the bound only catches a `sleep 600` that ran to its end (MINOR 10 of round 2: no tight clock)
+    assert!(t0.elapsed() < std::time::Duration::from_secs(300), "the deploy was ended at its timeout, not waited for");
     assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, FAILED T8a: deploy slow timed out after 0.02 min ([deploy.slow] timeout_min)"), "{:?}", r.lines);
     assert_eq!(r.exit_code(), 1);
 }
@@ -916,13 +917,14 @@ fn sh(cmd: &str) -> Vec<String> {
 #[test]
 fn s6_a_hung_postmerge_fails_at_its_timeout() {
     let mut fx = Fx::new("");
-    fx.cfg.postmerge_command = sh("sleep 30");
+    fx.cfg.postmerge_command = sh("sleep 600");
     fx.cfg.postmerge_timeout_min = 0.02;
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
     let t0 = std::time::Instant::now();
     let r = fx.tick();
-    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the post-merge command was ended at its timeout");
+    // the message proves the timeout; the bound only catches a `sleep 600` that ran to its end (MINOR 10 of round 2)
+    assert!(t0.elapsed() < std::time::Duration::from_secs(300), "the post-merge command was ended at its timeout");
     assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, FAILED T8a: post-merge timed out after 0.02 min"), "{:?}", r.lines);
     assert!(r.lines[0].contains("the local process tree was signalled; a remote or detached deploy may still run"), "{:?}", r.lines);
     assert_eq!(lines_in(&fx, "deploy.txt"), 0);
@@ -931,13 +933,13 @@ fn s6_a_hung_postmerge_fails_at_its_timeout() {
 #[test]
 fn s6_a_hung_health_check_is_a_wait_not_a_hang() {
     let mut fx = Fx::new("");
-    fx.cfg.targets.get_mut("staging").unwrap().health = sh("sleep 30");
+    fx.cfg.targets.get_mut("staging").unwrap().health = sh("sleep 600");
     fx.cfg.plugin_timeout_min = 0.1; // the health call's limit (git calls have their own, `git_min`): room for a loaded host
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
     let t0 = std::time::Instant::now();
     let r = fx.tick();
-    assert!(t0.elapsed() < std::time::Duration::from_secs(20));
+    assert!(t0.elapsed() < std::time::Duration::from_secs(300), "the health call was ended at its limit, not run to its end");
     assert!(r.lines[0].starts_with("b1: proving -> proven -> merged -> deploying, waits: target staging: health timed out after 0.1 min"), "{:?}", r.lines);
 }
 
@@ -968,15 +970,33 @@ fn s6_a_failing_deploy_reports_its_stderr() {
 #[test]
 fn s6_a_timed_out_plugin_takes_its_orphaned_grandchildren_with_it() {
     let mut fx = Fx::new("");
-    let late = fwd(&fx.t.path().join("late.txt"));
-    // the inner subshell is orphaned at once (its parent exits), so a walk over parent pids cannot find it; its group or job can
-    fx.cfg.postmerge_command = sh(&format!("( (sleep 3; echo late >> '{late}') & ); sleep 30"));
+    let beat = fwd(&fx.t.path().join("beat.txt"));
+    // the inner subshell is orphaned at once (its parent exits), so a walk over parent pids cannot find it; its group or job can. It
+    // writes a heartbeat until it dies: the test waits for the heartbeat to stop (an event), not for a wall-clock moment
+    fx.cfg.postmerge_command = sh(&format!("( (while :; do echo beat >> '{beat}'; sleep 0.2; done) & ); sleep 600"));
     fx.cfg.postmerge_timeout_min = 0.02;
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
-    fx.tick();
-    std::thread::sleep(std::time::Duration::from_secs(4));
-    assert!(!fx.t.path().join("late.txt").exists(), "the orphaned grandchild outlived the timeout kill");
+    let r = fx.tick();
+    assert!(r.lines[0].contains("post-merge timed out"), "{:?}", r.lines);
+    assert!(stops_growing(&fx.t.path().join("beat.txt"), 3, 120), "the orphaned grandchild outlived the timeout kill");
+}
+
+/// True once `file` has not grown for `quiet` seconds in a row (a writer that appends every 0.2 s is dead), within `limit` seconds.
+fn stops_growing(file: &Path, quiet: u64, limit: u64) -> bool {
+    let size = || std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    let t0 = std::time::Instant::now();
+    let (mut last, mut since) = (size(), std::time::Instant::now());
+    while t0.elapsed() < std::time::Duration::from_secs(limit) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let now = size();
+        if now != last {
+            (last, since) = (now, std::time::Instant::now());
+        } else if since.elapsed() >= std::time::Duration::from_secs(quiet) {
+            return true;
+        }
+    }
+    false
 }
 
 #[test]
@@ -1135,13 +1155,13 @@ fn m3_a_hung_git_hook_ends_as_failed_within_the_limit_and_the_tick_reports_it() 
     assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "stacked"));
     // the regen commit runs the pre-commit hook, which never ends; the limit is set only now, and with room for a loaded host, so
     // the other git calls of the transition never meet it
-    hook(&fx, "pre-commit", "sleep 30");
-    fx.cfg.git_timeout_min = 0.1;
+    hook(&fx, "pre-commit", "sleep 600");
+    fx.cfg.git_timeout_min = 0.25;
     let t0 = std::time::Instant::now();
     let r = fx.tick();
-    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the hook was ended at the limit");
+    assert!(t0.elapsed() < std::time::Duration::from_secs(300), "the hook was ended at the limit, not run to its end");
     assert!(r.lines[0].starts_with("b1: stacked, FAILED T2: git commit"), "{:?}", r.lines);
-    assert!(r.lines[0].contains("timed out after 0.1 min"), "{:?}", r.lines);
+    assert!(r.lines[0].contains("timed out after 0.25 min"), "{:?}", r.lines);
     assert_eq!(r.exit_code(), 1);
 }
 
@@ -1154,20 +1174,20 @@ fn minor4_git_calls_run_under_their_own_git_min_limit() {
     let mut fx = Fx::new("[regen]\ncommand = [\"sh\", \"-c\", \"mkdir -p gen && echo x > gen/out.txt\"]\ngenerated_dirs = [\"gen\"]\n");
     fx.open("b1", "lane1");
     assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "stacked"));
-    hook(&fx, "pre-commit", "sleep 30");
-    fx.cfg = BatchConfig::parse(&format!("{}\n[timeouts]\ngit_min = 0.1\n", fx_toml(&fx))).unwrap();
+    hook(&fx, "pre-commit", "sleep 600");
+    fx.cfg = BatchConfig::parse(&format!("{}\n[timeouts]\ngit_min = 0.25\n", fx_toml(&fx))).unwrap();
     assert_eq!(fx.cfg.plugin_timeout_min, 30.0);
     let t0 = std::time::Instant::now();
     let r = fx.tick();
-    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the hook was ended at git_min");
-    assert!(r.lines[0].contains("timed out after 0.1 min ([timeouts] git_min"), "{:?}", r.lines);
+    assert!(t0.elapsed() < std::time::Duration::from_secs(300), "the hook was ended at git_min, not run to its end");
+    assert!(r.lines[0].contains("timed out after 0.25 min ([timeouts] git_min"), "{:?}", r.lines);
     // and a short plugin_min does not cut a git call short
     let mut fx = Fx::new("");
     fx.open("b1", "lane1");
     assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "stacked"));
-    // the regen command itself is quick; the commit's hook runs past plugin_min
-    fx.cfg = BatchConfig::parse(&format!("{}\n[timeouts]\nplugin_min = 0.03\n", fx_toml(&fx))).unwrap();
-    hook(&fx, "pre-commit", "sleep 4");
+    // the regen command itself is quick (6 s is room for a loaded host); the commit's hook runs past plugin_min
+    fx.cfg = BatchConfig::parse(&format!("{}\n[timeouts]\nplugin_min = 0.1\n", fx_toml(&fx))).unwrap();
+    hook(&fx, "pre-commit", "sleep 9");
     let o = fx.adv("b1");
     assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "settled"), "{o:?}");
 }
@@ -1237,8 +1257,9 @@ fn wait_for(what: impl Fn() -> bool, secs: u64) -> bool {
 #[test]
 fn m2_a_deploy_that_outlives_a_dead_parent_is_waited_for_and_never_deployed_twice_at_once() {
     let mut fx = Fx::new("");
+    let release = fwd(&fx.t.path().join("release"));
     merged_with(&mut fx, |t| {
-        t.command[2].push_str("; sleep 4");
+        t.command[2].push_str(&format!("; while [ ! -e '{release}' ]; do sleep 0.1; done"));
         t.survives_parent = true;
         t.timeout_min = Some(1.0);
     });
@@ -1246,13 +1267,16 @@ fn m2_a_deploy_that_outlives_a_dead_parent_is_waited_for_and_never_deployed_twic
     crash_seam::set(Some("T8a:spawned:deploy staging".into()));
     assert!(fx.with(|e| e.advance("b1")).is_err());
     crash_seam::set(None);
-    assert!(wait_for(|| lines_in(&fx, "deploy.txt") == 1, 10), "the orphaned deploy runs");
+    assert!(wait_for(|| lines_in(&fx, "deploy.txt") == 1, 120), "the orphaned deploy runs");
     let r = fx.tick();
     assert!(r.lines[0].starts_with("b1: merged, waits: ") && r.lines[0].contains("still running"), "{:?}", r.lines);
     assert_eq!(r.exit_code(), 0);
     assert_eq!(lines_in(&fx, "deploy.txt"), 1, "no second deploy while the first one lives");
     // once it is gone the batch moves on (staging is idempotent: it is deployed again under a new attempt)
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    let rec: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(fx.state.join("running").join("staging.json")).unwrap()).unwrap();
+    let (pid, token) = (rec["pid"].as_u64().unwrap() as u32, rec["token"].as_u64());
+    std::fs::write(fx.t.path().join("release"), "").unwrap();
+    assert!(wait_for(|| !gatetrain_core::runner::process_alive(pid, token), 120), "the released deploy ends");
     let r = fx.tick();
     assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
     assert_eq!(lines_in(&fx, "deploy.txt"), 2);
@@ -1407,22 +1431,27 @@ fn b1_merged_b2_proven(fx: &mut Fx, f: impl FnOnce(&mut gatetrain_core::batchcfg
 fn major1_a_second_batch_never_deploys_beside_or_after_an_orphaned_deploy_of_the_first() {
     let mut fx = Fx::new("");
     let log = fwd(&fx.t.path().join("deploy-log.txt"));
+    // the deploy runs until the test releases it: an event, not 4 s of wall clock a loaded host may spend before the next tick
+    let release = fwd(&fx.t.path().join("release"));
     b1_merged_b2_proven(&mut fx, |t| {
-        t.command = vec!["sh".into(), "-c".into(), format!("echo start $GATETRAIN_BATCH >> '{log}'; sleep 4; echo end $GATETRAIN_BATCH >> '{log}'")];
+        t.command = vec!["sh".into(), "-c".into(), format!("echo start $GATETRAIN_BATCH >> '{log}'; while [ ! -e '{release}' ]; do sleep 0.1; done; echo end $GATETRAIN_BATCH >> '{log}'")];
         t.survives_parent = true;
         t.timeout_min = Some(1.0);
     });
     crash_seam::set(Some("T8a:spawned:deploy staging".into()));
     assert!(fx.with(|e| e.advance("b1")).is_err());
     crash_seam::set(None);
-    assert!(wait_for(|| log_lines(&fx, "deploy-log.txt").len() == 1, 10), "the orphaned deploy runs");
+    assert!(wait_for(|| log_lines(&fx, "deploy-log.txt").len() == 1, 120), "the orphaned deploy runs");
     let r = fx.tick();
     assert!(r.lines[0].starts_with("b1: merged, waits: ") && r.lines[0].contains("still running"), "{:?}", r.lines);
     assert!(r.lines[1].starts_with("b2: proven, BLOCKED deploy.another-batch-deploying: "), "{:?}", r.lines);
     assert!(r.lines[1].contains("b1"), "the wait names the batch it waits for: {:?}", r.lines);
     assert_eq!(r.exit_code(), 0, "a wait that clears by itself");
     assert_eq!(fx.state("b2"), "proven", "b2 is not merged while b1's deploy is unsettled");
-    assert!(wait_for(|| log_lines(&fx, "deploy-log.txt").len() == 2, 10), "the orphaned deploy ends");
+    let rec: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(record_path(&fx, "staging")).unwrap()).unwrap();
+    let (pid, token) = (rec["pid"].as_u64().unwrap() as u32, rec["token"].as_u64());
+    std::fs::write(fx.t.path().join("release"), "").unwrap();
+    assert!(wait_for(|| log_lines(&fx, "deploy-log.txt").len() == 2 && !gatetrain_core::runner::process_alive(pid, token), 120), "the orphaned deploy ends");
     let r = fx.tick();
     assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
     assert_eq!(r.lines[1], "b2: proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
