@@ -221,8 +221,7 @@ pub fn run_isolated_with(mut c: Command, secs: f64, mut opts: Opts) -> Result<Is
     if let Some(f) = opts.on_spawn.as_mut() {
         if let Err(e) = f(child.id()) {
             // the parent "dies" here: the command is left as it is (the job closes as it would with a dead process)
-            #[cfg(windows)]
-            drop(job);
+            job.abandon();
             return Err(e);
         }
     }
@@ -493,6 +492,9 @@ mod group {
         pub fn adopt(_child: &std::process::Child, _kill_on_close: bool) -> Job {
             Job {}
         }
+
+        /// Let go of the job as a parent that died would: on Windows its handle closes (and kill-on-close fires when it is set).
+        pub fn abandon(self) {}
 
         /// The command ended by itself: closing the job must not kill what it started on purpose.
         #[cfg(windows)]
