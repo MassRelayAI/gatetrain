@@ -1219,8 +1219,9 @@ impl<'a> Engine<'a> {
                     // the post-merge command prepares a checkout and runs again (it is idempotent by contract, like regen)
                     None => Probe::NotHappened,
                     Some(_) if !postmerged => Probe::NotHappened,
-                    Some(name) if self.cfg.targets.get(&name).is_some_and(|t| t.idempotent) => Probe::NotHappened,
-                    Some(name) => Probe::Unknown(format!("a crash may have left deploy target {name} of {} half deployed, and it is not declared idempotent", short(&sha))),
+                    // the next attempt settles it: its probe is asked first, or it is safe to deploy twice
+                    Some(name) if self.cfg.targets.get(&name).is_some_and(|t| t.idempotent || !t.probe.is_empty()) => Probe::NotHappened,
+                    Some(name) => Probe::Unknown(format!("a crash may have left deploy target {name} of {} half deployed, and it is neither declared idempotent nor probed", short(&sha))),
                 }
             }
             _ => Probe::NotHappened,
@@ -1876,6 +1877,18 @@ impl<'a> Engine<'a> {
                     }
                     let t = &self.cfg.targets[name];
                     let env = self.env(id, f, &sha, "", "");
+                    if !t.probe.is_empty() {
+                        // no checkpoint: ask the target whether it already serves the sha (a crash after its deploy, before its row)
+                        let (rc, _) = match self.plugin(id, "T8a", &format!("probe {name}"), " ([timeouts] plugin_min)", &substitute(&t.probe, &sha), &wd, &env, self.plugin_min())? {
+                            Ok(x) => x,
+                            Err(why) => return Ok(Err(why)),
+                        };
+                        if rc == 0 {
+                            self.checkpoint(id, &sha, plan.attempt, name)?;
+                            continue;
+                        }
+                    }
+                    let t = &self.cfg.targets[name];
                     let cmd = substitute(&t.command, &sha);
                     let min = t.timeout_min.unwrap_or(DEPLOY_TIMEOUT_MIN);
                     let (rc, err) = match self.plugin(id, "T8a", &format!("deploy {name}"), &format!(" ([deploy.{name}] timeout_min)"), &cmd, &wd, &env, min)? {

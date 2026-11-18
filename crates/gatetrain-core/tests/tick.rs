@@ -96,7 +96,7 @@ impl Fx {
         let toml = format!(
             "[preflight]\ncommand = [\"sh\", \"-c\", \"true\"]\n[chain]\ncommand = [\"fake-chain\"]\n\
              [postmerge]\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_BATCH >> '{}'\"]\n\
-             [deploy.staging]\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_BATCH >> '{}'\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n{extra_toml}",
+             [deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_BATCH >> '{}'\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n{extra_toml}",
             fwd(&marker),
             fwd(&t.path().join("deploy.txt"))
         );
@@ -486,7 +486,7 @@ fn lines_in(fx: &Fx, file: &str) -> usize {
 
 #[test]
 fn major1_a_failed_transition_is_not_retried_by_the_next_ticks() {
-    let broken = "[deploy.broken]\ncommand = [\"sh\", \"-c\", \"echo x >> ../broken.txt; exit 1\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
+    let broken = "[deploy.broken]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"echo x >> ../broken.txt; exit 1\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
     let mut fx = Fx::new(broken);
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
@@ -522,7 +522,7 @@ fn major2_a_proving_run_that_never_finishes_needs_a_person_after_max_run_minutes
 
 #[test]
 fn major2_a_deploy_that_never_turns_healthy_needs_a_person_after_max_wait_minutes() {
-    let sick = "[deploy.sick]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"exit 1\"]\ntier = \"staging\"\n";
+    let sick = "[deploy.sick]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"exit 1\"]\ntier = \"staging\"\n";
     let mut fx = Fx::new(sick);
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
@@ -640,7 +640,7 @@ fn three_ticks(fx: &mut Fx) -> Vec<u8> {
 
 #[test]
 fn rev3_b1_a_target_that_cannot_be_spawned_fails_once_and_is_not_rerun() {
-    let zz = "[deploy.zz]\ncommand = [\"gatetrain-no-such-binary-rev3\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
+    let zz = "[deploy.zz]\nidempotent = true\ncommand = [\"gatetrain-no-such-binary-rev3\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
     let mut fx = Fx::new(zz);
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
@@ -667,7 +667,7 @@ fn rev3_minor1_the_wait_age_runs_from_the_row_that_entered_the_state() {
 
 #[test]
 fn rev3_minor1_a_release_starts_the_wait_again() {
-    let sick = "[deploy.sick]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"exit 1\"]\ntier = \"staging\"\n";
+    let sick = "[deploy.sick]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"exit 1\"]\ntier = \"staging\"\n";
     let mut fx = Fx::new(sick);
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
@@ -683,7 +683,7 @@ fn rev3_minor1_a_release_starts_the_wait_again() {
 
 #[test]
 fn rev3_minor2_a_deploy_over_its_timeout_ends_as_failed() {
-    let slow = "[deploy.slow]\ncommand = [\"sh\", \"-c\", \"sleep 30\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\ntimeout_min = 0.02\n";
+    let slow = "[deploy.slow]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"sleep 30\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\ntimeout_min = 0.02\n";
     let mut fx = Fx::new(slow);
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
@@ -757,7 +757,7 @@ fn s1_rev4_a_held_batch_with_a_pending_t7_intent_is_not_moved_by_a_tick() {
     assert_eq!(lines_in(&fx, "deploy.txt"), 1);
 }
 
-const BROKEN: &str = "[deploy.broken]\ncommand = [\"sh\", \"-c\", \"echo x >> ../broken.txt; exit 1\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
+const BROKEN: &str = "[deploy.broken]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"echo x >> ../broken.txt; exit 1\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
 
 #[test]
 fn s2_a_plain_advance_after_a_failed_attempt_is_refused_and_a_retry_override_tries_once_more() {
@@ -819,8 +819,8 @@ fn s2_a_retry_budget_lets_the_engine_try_a_failed_transition_again_that_many_tim
 #[test]
 fn s4_a_target_that_deployed_is_not_deployed_again_after_a_later_target_fails() {
     // `a-first` always works; `b-flaky` fails until the file `b.ok` exists
-    let two = "[deploy.a-first]\ncommand = [\"sh\", \"-c\", \"echo a >> ../a.txt\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n\
-               [deploy.b-flaky]\ncommand = [\"sh\", \"-c\", \"echo b >> ../b.txt; test -f ../b.ok\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
+    let two = "[deploy.a-first]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"echo a >> ../a.txt\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n\
+               [deploy.b-flaky]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"echo b >> ../b.txt; test -f ../b.ok\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
     let mut fx = Fx::new(two);
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
@@ -1003,4 +1003,46 @@ fn s6_the_heartbeat_names_the_running_step_and_its_deadline() {
     assert!(deadline > beat_ms, "the deadline lies ahead of the beat: {deadline} vs {beat_ms}");
     drop(held);
     assert!(tick::read_info(&lp).is_none());
+}
+
+#[test]
+fn s8_a_deploy_target_must_be_idempotent_or_probed_and_its_limit_finite() {
+    let t = |extra: &str| BatchConfig::parse(&format!("[deploy.web]\ncommand = [\"x\"]\nhealth = [\"y\"]\n{extra}"));
+    let e = t("").unwrap_err().to_string();
+    assert!(e.contains("[deploy.web]") && e.contains("idempotent = true") && e.contains("probe"), "{e}");
+    assert!(t("idempotent = true\n").is_ok());
+    assert!(t("probe = [\"sh\", \"-c\", \"true\"]\n").is_ok());
+    assert!(t("probe = []\n").is_err(), "an empty probe is no probe");
+    assert!(t("tier = \"production\"\n").is_ok(), "a production target is never deployed by the engine");
+    // review round 4: `inf` (and a huge value) panicked in Duration::from_secs_f64 inside T8a, after postmerge and earlier targets ran
+    for bad in ["inf", "nan", "1e12", "0", "-1"] {
+        assert!(t(&format!("idempotent = true\ntimeout_min = {bad}\n")).is_err(), "timeout_min = {bad}");
+    }
+    assert!(t("idempotent = true\ntimeout_min = 1440\n").is_ok());
+    // with the tick on, every automatic target says how long it may take
+    let e = t("idempotent = true\n[tick]\nenabled = true\n").unwrap_err().to_string();
+    assert!(e.contains("timeout_min") && e.contains("[tick] enabled"), "{e}");
+    assert!(t("idempotent = true\ntimeout_min = 10\n[tick]\nenabled = true\n").is_ok());
+}
+
+#[test]
+fn s8_a_probe_settles_a_target_a_crash_left_in_doubt() {
+    let mut fx = Fx::new("");
+    {
+        let t = fx.cfg.targets.get_mut("staging").unwrap();
+        t.idempotent = false;
+        t.probe = vec!["sh".into(), "-c".into(), "test -f ../deploy.txt".into()];
+    }
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    for want in ["proven", "merged"] {
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+    }
+    crash_seam::set(Some("T8a:staging".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err());
+    crash_seam::set(None);
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1, "the probe found staging deployed: not deployed again");
+    assert_eq!(fx.count("decisions WHERE rule='deploy.checkpoint' AND subject='staging'"), 1);
 }

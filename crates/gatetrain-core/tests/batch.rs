@@ -133,8 +133,8 @@ fn happy_path_open_to_proven() {
 #[test]
 fn merge_then_deploy_to_live_and_production_stays_manual() {
     let mut fx = Fx::new(
-        "[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n\
-         [deploy.prod]\ncommand = [\"sh\", \"-c\", \"exit 9\"]\ntier = \"production\"\n",
+        "[deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n\
+         [deploy.prod]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"exit 9\"]\ntier = \"production\"\n",
     );
     fx.drive_to_proving("b1");
     fx.write_log(GREEN);
@@ -616,14 +616,14 @@ fn deployed(extra: &str) -> Fx {
 fn the_post_merge_command_runs_before_the_first_deploy_and_its_failure_stops_the_deploy() {
     let mut fx = deployed(
         "[postmerge]\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_SHA > ../postmerge.ran\"]\n\
-         [deploy.staging]\ncommand = [\"sh\", \"-c\", \"test -f ../postmerge.ran && echo deployed > ../deploy.ran\"]\nhealth = [\"sh\", \"-c\", \"true\"]\n",
+         [deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"test -f ../postmerge.ran && echo deployed > ../deploy.ran\"]\nhealth = [\"sh\", \"-c\", \"true\"]\n",
     );
     fx.step("b1", "deploying");
     let tip = g(&fx.repo, &["rev-parse", "main"]);
     assert_eq!(std::fs::read_to_string(fx.outside("postmerge.ran")).unwrap().trim(), tip, "it got the merged sha");
     assert!(fx.outside("deploy.ran").exists(), "the deploy saw the post-merge result");
     // a failing post-merge: the deploy never runs
-    let mut fx = deployed("[postmerge]\ncommand = [\"sh\", \"-c\", \"echo no deps >&2; exit 5\"]\n[deploy.staging]\ncommand = [\"sh\", \"-c\", \"echo x > ../deploy.ran\"]\nhealth = [\"sh\", \"-c\", \"true\"]\n");
+    let mut fx = deployed("[postmerge]\ncommand = [\"sh\", \"-c\", \"echo no deps >&2; exit 5\"]\n[deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"echo x > ../deploy.ran\"]\nhealth = [\"sh\", \"-c\", \"true\"]\n");
     let m = fx.failed_text("b1");
     assert!(m.contains("post-merge command exited 5") && m.contains("no deps"), "{m}");
     assert!(!fx.outside("deploy.ran").exists());
@@ -633,7 +633,7 @@ fn the_post_merge_command_runs_before_the_first_deploy_and_its_failure_stops_the
 #[test]
 fn health_is_asked_about_the_merged_sha_and_the_batch_waits_until_it_answers() {
     let mut fx = deployed(
-        "[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\n\
+        "[deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\n\
          health = [\"sh\", \"-c\", \"echo $1 > ../health.asked; test -f ../ready\", \"sh\", \"{sha}\"]\n",
     );
     fx.step("b1", "deploying");
@@ -647,7 +647,7 @@ fn health_is_asked_about_the_merged_sha_and_the_batch_waits_until_it_answers() {
 
 #[test]
 fn a_target_with_no_health_check_cannot_go_live() {
-    let mut fx = deployed("[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\n");
+    let mut fx = deployed("[deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\n");
     fx.step("b1", "deploying");
     assert_eq!(fx.refused("b1").0, "deploy.health-missing");
     assert_eq!(fx.state("b1"), "deploying");
@@ -655,7 +655,7 @@ fn a_target_with_no_health_check_cannot_go_live() {
 
 #[test]
 fn health_that_stays_down_past_its_timeout_is_refused_once_and_a_late_recovery_still_goes_live() {
-    let mut fx = deployed("[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"test -f ../ready\"]\nhealth_timeout_min = 30\n");
+    let mut fx = deployed("[deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"test -f ../ready\"]\nhealth_timeout_min = 30\n");
     fx.step("b1", "deploying");
     // 10:00 deployed; at 10:00 the wait is fresh, at 11:00 it is over the 30 minutes
     assert!(matches!(fx.adv("b1").unwrap(), Outcome::Waiting(_)));
@@ -1838,7 +1838,7 @@ const OWN: &str = "batch/b1/s1";
 
 /// A batch that is `live`, with the tidy rule on and the run's target folder recorded; its run named a container and a temp folder.
 fn live_fx() -> Fx {
-    let mut fx = Fx::new("[deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n");
+    let mut fx = Fx::new("[deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n");
     fx.cfg.close_tidy = true;
     fx.cfg.close_roots = vec!["/build".into(), "/tmp".into(), "/wt".into()];
     fx.cfg.chain_target_dirs = vec![SHARED.into()]; // the shared chain target sits under a root: only the shared-target rule keeps it

@@ -17,6 +17,10 @@ pub struct Target {
     /// `idempotent = true`: the deploy command is safe to run twice, so a resume that cannot tell whether a crash left this target
     /// half deployed may deploy it again; otherwise the interrupted attempt waits for a person.
     pub idempotent: bool,
+    /// `probe = [...]` (`{sha}` substituted): exit 0 = this target already serves `sha`. Asked before the target is deployed when no
+    /// checkpoint says it was, so a target a crash left in doubt is settled instead of deployed twice. An automatic target needs this
+    /// or `idempotent = true` (refused at load otherwise).
+    pub probe: Vec<String>,
 }
 
 /// A shared file ("hub") that is rebuilt, not merged, when two lanes change it: `[stack] hubs = [{ glob, rebuild }]`.
@@ -380,11 +384,15 @@ impl BatchConfig {
         }
         if let Some(d) = v.get("deploy").and_then(|d| d.as_table()) {
             for (name, t) in d {
+                if t.get("probe").is_some() && argv(t.get("probe")).is_empty() {
+                    return Err(Error::Batch(format!("gatetrain.toml: [deploy.{name}] probe is a command (an argument list), not {}", t.get("probe").map(|x| x.to_string()).unwrap_or_default())));
+                }
                 c.targets.insert(
                     name.clone(),
                     Target {
                         command: argv(t.get("command")),
                         health: argv(t.get("health")),
+                        probe: argv(t.get("probe")),
                         idempotent: match t.get("idempotent") {
                             None => false,
                             Some(x) => x.as_bool().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [deploy.{name}] idempotent is true or false, not {x}")))?,
@@ -393,15 +401,30 @@ impl BatchConfig {
                         health_timeout_min: t.get("health_timeout_min").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).unwrap_or(0.0),
                         timeout_min: match t.get("timeout_min") {
                             None => None,
-                            Some(x) => match x.as_float().or_else(|| x.as_integer().map(|i| i as f64)) {
-                                Some(m) if m > 0.0 => Some(m),
-                                _ => return Err(Error::Batch(format!("gatetrain.toml: [deploy.{name}] timeout_min is a number of minutes above 0, not {x}"))),
-                            },
+                            Some(x) => Some(limit_min(x).ok_or_else(|| Error::Batch(format!("gatetrain.toml: [deploy.{name}] timeout_min is a number of minutes above 0 and at most {MAX_LIMIT_MIN}, not {x}")))?),
                         },
                     },
                 );
             }
         }
+        c.check_targets()?;
         Ok(c)
+    }
+
+    /// The deploy floor at load (review of the tick, S8): an automatic target (any tier but `production`) is either declared safe to
+    /// run twice (`idempotent = true`) or has a `probe` that says whether it already serves the sha, so a crash mid-deploy is never
+    /// settled by guessing; with `[tick] enabled` it also has a `timeout_min`, so an unattended deploy cannot hang for its default.
+    fn check_targets(&self) -> Result<()> {
+        for (name, t) in self.targets.iter().filter(|(_, t)| t.tier != "production") {
+            if t.probe.is_empty() && !t.idempotent {
+                return Err(Error::Batch(format!(
+                    "gatetrain.toml: [deploy.{name}] needs idempotent = true (its command is safe to run twice) or a probe = [...] that exits 0 when the target already serves {{sha}}; without either a crash mid-deploy cannot be settled"
+                )));
+            }
+            if self.tick_enabled && t.timeout_min.is_none() {
+                return Err(Error::Batch(format!("gatetrain.toml: [deploy.{name}] needs timeout_min while [tick] enabled = true (an unattended deploy must say how long it may take)")));
+            }
+        }
+        Ok(())
     }
 }
