@@ -475,7 +475,8 @@ The ledger lock is shared with people: every `batch` command that writes (`new`,
 `batch` command that holds it) and **exit 73** (75 stays the busy host lock of `hold`), or waits with `--wait <secs>`. The lock file is
 `<canonical db path>.tick.lock`; the holder writes `<lock>.info` (pid, start time, who) whole, through a rename, and removes it when it
 lets go. A sidecar whose pid is dead is ignored. A tick that finds the lock held longer than `[tick] stuck_minutes` (default 60), by the
-sidecar or, with none, by the lock file's age, says so and exits 1. Before it advances anything the tick verifies the decision log; a
+sidecar's heartbeat (`beat_ms`, refreshed every 30 s while the holder runs, so a long healthy deploy is not stuck) or, with none, by
+the lock file's age, says so and exits 1. A hung deploy is ended by `[deploy.<name>] timeout_min` (default: no limit) and fails. Before it advances anything the tick verifies the decision log; a
 log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
 
