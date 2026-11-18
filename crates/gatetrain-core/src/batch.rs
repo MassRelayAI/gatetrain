@@ -371,7 +371,7 @@ pub fn iso_of(secs: i64) -> String {
 }
 
 /// What a git call runs under: its time limit, the heartbeat cell it is named in, and the batch it is for. Set per thread by the
-/// engine's entry points ([`Engine::git_scope`]); without one a git call still has the default plugin limit.
+/// engine's entry points ([`Engine::git_scope`]); without one a git call still has the default `git_min` limit (30 min).
 struct GitCtx {
     secs: f64,
     progress: Option<crate::tick::Beat>,
@@ -394,7 +394,7 @@ impl Drop for GitScope {
     }
 }
 
-/// Every git call of the engine: a time limit (`[timeouts] plugin_min`; git runs hooks, which can hang), a process group of its
+/// Every git call of the engine: a time limit (`[timeouts] git_min`; git runs hooks, which can hang), a process group of its
 /// own so the limit ends the hook too, and named in the heartbeat while it runs (`<batch> git <subcommand>`, its deadline).
 fn git_run(dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>, Vec<u8>)> {
     let (secs, progress, batch) = GIT_CTX.with(|c| c.borrow().as_ref().map(|g| (g.secs, g.progress.clone(), g.batch.clone()))).unwrap_or((30.0 * 60.0, None, String::new()));
@@ -416,7 +416,7 @@ fn git_run(dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>, Vec<u8>)> {
     match r.map_err(|e| Error::Batch(format!("git {}: {e}", args.join(" "))))? {
         crate::runner::IsolatedRaw::Done { rc, stdout, stderr } => Ok((rc == 0, stdout, stderr)),
         crate::runner::IsolatedRaw::TimedOut => Err(Error::Batch(format!(
-            "git {} timed out after {} min ([timeouts] plugin_min; its hooks included); the local process tree was signalled",
+            "git {} timed out after {} min ([timeouts] git_min; its hooks included); the local process tree was signalled",
             args.join(" "),
             secs / 60.0
         ))),
@@ -710,9 +710,9 @@ impl<'a> Engine<'a> {
         self.cfg.plugin_timeout_min
     }
 
-    /// The git context of one engine call: every git call below it runs with `[timeouts] plugin_min` and is named in the heartbeat.
+    /// The git context of one engine call: every git call below it runs with `[timeouts] git_min` and is named in the heartbeat.
     fn git_scope(&self, id: &str) -> GitScope {
-        let ctx = GitCtx { secs: self.cfg.plugin_timeout_min * 60.0, progress: self.progress.clone(), batch: id.to_string() };
+        let ctx = GitCtx { secs: self.cfg.git_timeout_min * 60.0, progress: self.progress.clone(), batch: id.to_string() };
         GitScope(GIT_CTX.with(|c| c.borrow_mut().replace(ctx)))
     }
 

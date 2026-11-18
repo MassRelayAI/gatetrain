@@ -917,7 +917,7 @@ fn s6_a_hung_postmerge_fails_at_its_timeout() {
 fn s6_a_hung_health_check_is_a_wait_not_a_hang() {
     let mut fx = Fx::new("");
     fx.cfg.targets.get_mut("staging").unwrap().health = sh("sleep 30");
-    fx.cfg.plugin_timeout_min = 0.1; // every git call of the drive shares the limit: room for a loaded host
+    fx.cfg.plugin_timeout_min = 0.1; // the health call's limit (git calls have their own, `git_min`): room for a loaded host
     fx.drive_to_proving("b1", "lane1");
     fx.write_log("b1", GREEN);
     let t0 = std::time::Instant::now();
@@ -1104,13 +1104,52 @@ fn m3_a_hung_git_hook_ends_as_failed_within_the_limit_and_the_tick_reports_it() 
     // the regen commit runs the pre-commit hook, which never ends; the limit is set only now, and with room for a loaded host, so
     // the other git calls of the transition never meet it
     hook(&fx, "pre-commit", "sleep 30");
-    fx.cfg.plugin_timeout_min = 0.1;
+    fx.cfg.git_timeout_min = 0.1;
     let t0 = std::time::Instant::now();
     let r = fx.tick();
     assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the hook was ended at the limit");
     assert!(r.lines[0].starts_with("b1: stacked, FAILED T2: git commit"), "{:?}", r.lines);
     assert!(r.lines[0].contains("timed out after 0.1 min"), "{:?}", r.lines);
     assert_eq!(r.exit_code(), 1);
+}
+
+/// Enable-readiness MINOR 4: git calls have their own limit, `[timeouts] git_min`, not the health checks' `plugin_min`.
+#[test]
+fn minor4_git_calls_run_under_their_own_git_min_limit() {
+    assert_eq!(BatchConfig::parse("").unwrap().git_timeout_min, 30.0, "default 30");
+    assert!(BatchConfig::parse("[timeouts]\ngit_min = 0\n").is_err(), "a limit above 0");
+    // a hung hook ends at git_min, though plugin_min stays at its default of 30 min
+    let mut fx = Fx::new("[regen]\ncommand = [\"sh\", \"-c\", \"mkdir -p gen && echo x > gen/out.txt\"]\ngenerated_dirs = [\"gen\"]\n");
+    fx.open("b1", "lane1");
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "stacked"));
+    hook(&fx, "pre-commit", "sleep 30");
+    fx.cfg = BatchConfig::parse(&format!("{}\n[timeouts]\ngit_min = 0.1\n", fx_toml(&fx))).unwrap();
+    assert_eq!(fx.cfg.plugin_timeout_min, 30.0);
+    let t0 = std::time::Instant::now();
+    let r = fx.tick();
+    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the hook was ended at git_min");
+    assert!(r.lines[0].contains("timed out after 0.1 min ([timeouts] git_min"), "{:?}", r.lines);
+    // and a short plugin_min does not cut a git call short
+    let mut fx = Fx::new("");
+    fx.open("b1", "lane1");
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "stacked"));
+    // the regen command itself is quick; the commit's hook runs past plugin_min
+    fx.cfg = BatchConfig::parse(&format!("{}\n[timeouts]\nplugin_min = 0.03\n", fx_toml(&fx))).unwrap();
+    hook(&fx, "pre-commit", "sleep 4");
+    let o = fx.adv("b1");
+    assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "settled"), "{o:?}");
+}
+
+/// The gatetrain.toml the fixture was built from, without the extra table.
+fn fx_toml(fx: &Fx) -> String {
+    format!(
+        "[preflight]\ncommand = [\"sh\", \"-c\", \"true\"]\n[chain]\ncommand = [\"fake-chain\"]\n\
+         [postmerge]\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_BATCH >> '{}'\"]\n\
+         [deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_BATCH >> '{}'\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n\
+         [regen]\ncommand = [\"sh\", \"-c\", \"mkdir -p gen && echo x > gen/out.txt\"]\ngenerated_dirs = [\"gen\"]\n",
+        fwd(&fx.t.path().join("postmerge.txt")),
+        fwd(&fx.t.path().join("deploy.txt"))
+    )
 }
 
 #[test]

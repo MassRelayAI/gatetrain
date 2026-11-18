@@ -500,8 +500,9 @@ the lock file's age, says so and exits 1. The heartbeat also names the step the 
 that step's deadline: a holder that beats but runs a step more than a minute past its deadline, or that has held the lock longer than
 `[tick] max_hold_minutes` (default 720) however recently it beat, makes the tick exit 1 too. Every plugin runs with a time limit, in a
 process group (a job object on Windows) of its own so a timeout ends what it started: a deploy target's `timeout_min` (default 60),
-`[preflight] timeout_min` (60), `[postmerge] timeout_min` (30), and `[timeouts] plugin_min` (30) for the stack command, hub rebuilds,
-regen, health checks, cache verification, the legacy stamp and every git call the engine makes (git runs hooks, which can hang). A command past its limit fails the attempt (`the local process tree
+`[preflight] timeout_min` (60), `[postmerge] timeout_min` (30), `[timeouts] plugin_min` (30) for the stack command, hub rebuilds,
+regen, health checks, deploy probes, cache verification and the legacy stamp, and `[timeouts] git_min` (30) for every git call the
+engine makes (git runs hooks, which can hang; a key of its own, so a short health-check limit never cuts a slow hook short). A command past its limit fails the attempt (`the local process tree
 was signalled; a remote or detached deploy may still run`); a health check past it is a wait. A plugin dies with gatetrain (Linux:
 `PR_SET_PDEATHSIG`, which reaches the plugin's leader process only, not the processes it starts; Windows: a job object that kills on close while the plugin runs) unless its deploy target says
 `survives_parent = true` (it starts a long-lived service). A deploy step records its process (`<state>/running/<batch>-T8a.json`, pid

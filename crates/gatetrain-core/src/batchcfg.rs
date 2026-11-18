@@ -131,9 +131,12 @@ pub struct BatchConfig {
     /// in the log) before the launch fails clean and the holder is stopped.
     pub launch_ack_secs: f64,
     /// `[timeouts] plugin_min` (default 30): the limit of every plugin without one of its own (stack, hub rebuild, regen, health,
-    /// cache verify, legacy stamp). `[preflight] timeout_min` (default 60) and `[postmerge] timeout_min` (default 30) for those two;
+    /// cache verify, legacy stamp, a deploy probe); git calls have `git_min`. `[preflight] timeout_min` (default 60) and `[postmerge] timeout_min` (default 30) for those two;
     /// a deploy target has its own `timeout_min` (default 60). Every limit is a finite number of minutes above 0, at most 1440.
     pub plugin_timeout_min: f64,
+    /// `[timeouts] git_min` (default 30): the limit of every git call the engine makes (git runs hooks, which can hang). Its own key,
+    /// so a short health-check limit (`plugin_min`) never cuts a slow but healthy fetch or commit hook short, and the reverse.
+    pub git_timeout_min: f64,
     pub preflight_timeout_min: f64,
     pub postmerge_timeout_min: f64,
     /// `[tick] max_hold_minutes` (default 720): a holder of the ledger lock older than this needs a person even while it beats.
@@ -200,6 +203,7 @@ impl Default for BatchConfig {
             retry_budgets: BTreeMap::new(),
             launch_ack_secs: 60.0,
             plugin_timeout_min: 30.0,
+            git_timeout_min: 30.0,
             preflight_timeout_min: 60.0,
             postmerge_timeout_min: 30.0,
             max_hold_minutes: 720.0,
@@ -355,6 +359,7 @@ impl BatchConfig {
         }
         for (table, key, slot) in [
             ("timeouts", "plugin_min", &mut c.plugin_timeout_min),
+            ("timeouts", "git_min", &mut c.git_timeout_min),
             ("preflight", "timeout_min", &mut c.preflight_timeout_min),
             ("postmerge", "timeout_min", &mut c.postmerge_timeout_min),
         ] {

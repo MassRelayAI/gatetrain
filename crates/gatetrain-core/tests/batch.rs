@@ -2637,7 +2637,7 @@ fn s6_a_hung_regen_fails_at_the_plugin_timeout() {
     fx.cfg.regen_command = vec!["sh".into(), "-c".into(), "sleep 30".into()];
     fx.open("b1");
     fx.step("b1", "stacked");
-    fx.cfg.plugin_timeout_min = 0.1; // set only now (git calls share the limit), with room for a loaded host
+    fx.cfg.plugin_timeout_min = 0.1; // set only now, with room for a loaded host
     let t0 = std::time::Instant::now();
     match fx.adv("b1").unwrap() {
         Outcome::Failed(m) => assert!(m.contains("regen timed out after 0.1 min"), "{m}"),
@@ -2736,7 +2736,7 @@ fn s7_a_tip_that_moved_beyond_the_generated_files_is_still_refused() {
 #[test]
 fn rev5_a_health_check_that_always_times_out_is_refused_past_the_health_timeout() {
     let mut fx = deployed("[deploy.staging]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"sleep 30\"]\nhealth_timeout_min = 30\n");
-    // the limit is short only for the health call (a git call of the drive above shares it), with room for a loaded host
+    // the limit is short only for the health call (git calls have their own, `git_min`), with room for a loaded host
     fx.cfg.plugin_timeout_min = 0.1;
     fx.step("b1", "deploying");
     let o = fx.adv_at("b1", &LATER).unwrap();
