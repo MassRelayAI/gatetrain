@@ -442,14 +442,20 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 
 ### What a tick looks like (example)
 
-> **Not ready to enable yet (2026-11-18).** The enable-readiness review of this release found open items. Leave `[tick] enabled`
-> off until a release says they are closed:
-> 1. A second batch can deploy alongside the first batch's orphaned deploy, after gatetrain dies mid-deploy. The first batch can then
->    deploy its older sha over the second's, with nothing flagged.
-> 2. On Linux, only the deploy's leader process dies with gatetrain; its children can live on.
-> 3. A crash between starting a deploy and recording it leaves no record.
+> **Before you enable it (2026-11-18).** The items of the enable-readiness review are closed in this release. `[tick] enabled`
+> stays off by default: turning it on is your decision, for your deploy targets. What each guarantee covers, and what it does not:
 >
-> Until then, `batch advance` by hand is the supported path.
+> | guarantee | Linux | Windows |
+> |---|---|---|
+> | a plugin that does not survive its parent dies with gatetrain, its children too | its leader is a watchdog `/bin/sh` that `PR_SET_PDEATHSIG` signals when the spawning thread ends; it kills its process group. Not covered: a process that left the group (`setsid`, a process group of its own), one running as another user (a setuid program such as `sudo`: the kernel clears the parent-death signal across a setuid exec, and the watchdog may not signal it), and a watchdog that is itself killed with SIGKILL before gatetrain dies | a job object that kills its processes when gatetrain's handle closes, set while the plugin runs. Not covered: a process started outside the job (through a service, the task scheduler or WMI) |
+> | a deploy is recorded before it runs | an intent marker before the spawn; the pid and its start token right after the spawn (the command has started; a crash in between leaves a marker without a pid, which waits) | an intent marker before the spawn; the pid and its start token while the process is still suspended, before it runs |
+> | a recorded deploy is told from a dead one | the leader's pid under its start token (`/proc/<pid>/stat` starttime); a pid reused by a later process is not it; members of its process group count unless the target says `survives_parent` | the leader's pid under its creation time, alive by its wait state (an exit code of 259 is not "alive"); only the leader is judged |
+> | one deploy per target at a time, across batches | the per-target record and `deploy.another-batch-deploying`; a batch merges only after the batch merged before it settled its deploy | the same |
+> | an older sha is never deployed over a newer one | `deploy.superseded`, from the ledger's per-target checkpoints, for a fresh and a resumed attempt | the same |
+>
+> Neither platform sees a deploy that runs on another machine (an ssh or API deploy that outlives its local command), and a record
+> without a pid or start token always waits for a person. On macOS and BSD nothing ties a plugin to its parent and no start token is
+> read, so every crash mid-deploy waits for a person. Until you enable the tick, `batch advance` by hand is the supported path.
 
 `gatetrain tick` is off until `gatetrain.toml` says `[tick] enabled = true`; without it the tick exits 2 and writes nothing. Turn it on
 only when every deploy target has `timeout_min` and a deploy command that is safe to run twice (a tick that dies mid-deploy may leave a
@@ -504,9 +510,10 @@ process group (a job object on Windows) of its own so a timeout ends what it sta
 `[preflight] timeout_min` (60), `[postmerge] timeout_min` (30), `[timeouts] plugin_min` (30) for the stack command, hub rebuilds,
 regen, health checks, deploy probes, cache verification and the legacy stamp, and `[timeouts] git_min` (30) for every git call the
 engine makes (git runs hooks, which can hang; a key of its own, so a short health-check limit never cuts a slow hook short). A command past its limit fails the attempt (`the local process tree
-was signalled; a remote or detached deploy may still run`); a health check past it is a wait. A plugin dies with gatetrain (Linux:
-`PR_SET_PDEATHSIG`, which reaches the plugin's leader process only, not the processes it starts; Windows: a job object that kills on close while the plugin runs) unless its deploy target says
-`survives_parent = true` (it starts a long-lived service). A deploy step records its process per target, whichever batch runs it
+was signalled; a remote or detached deploy may still run`); a health check past it is a wait. A plugin dies with gatetrain, with the
+processes it started in its process group (Linux: a watchdog leader that `PR_SET_PDEATHSIG` signals and that kills its group;
+Windows: a job object that kills on close while the plugin runs; see the table above for what is not covered) unless its deploy target
+says `survives_parent = true` (it starts a long-lived service). A deploy step records its process per target, whichever batch runs it
 (`<state>/running/<target>.json`: batch, sha, pid and start time) while it runs: if gatetrain dies and the deploy lives on, the next
 advance of that batch waits (`... is still running as pid N`) and every other batch is refused `deploy.another-batch-deploying`
 (clears by itself) instead of merging or deploying beside it. A batch is not merged either while another batch is `merged` and its
