@@ -292,6 +292,18 @@ printed as `RED_NOW` when it happens and listed in `RED_SUMMARY`; each step's wh
 its `timeout_s` has its whole process tree killed, on Linux and on Windows. The exit code is 0 green, 1 red, 2 a bad steps file. A green
 run on a clean tree writes `stamp-<sha>.json`. A step with `inputs` can be skipped by the cache below.
 
+### Scheduling: longest first, and cores
+
+With `--db`, `chain` starts the longest ready step first (the median of its earlier runs; `--order file` keeps file order, and without history the order is the file's). A step may declare `cores = 4`; the run has a budget, `--cores K` (default: the host's cores), a step never starts unless its cores are free, and on Linux it runs under `taskset` on CPUs reserved for it. A step asking for more than the budget is a config error (exit 2).
+
+```text
+$ gatetrain chain --steps steps.toml --out out --db ledger.db --cores 12
+CHAIN_ORDER longest
+CHAIN_CORES 12
+```
+
+See [`docs/chain.md`](docs/chain.md#scheduling-longest-first-and-cores).
+
 ### The step cache (pre-flight only)
 
 `gatetrain chain --cache <dir>` skips a step whose inputs have not changed since it last passed. A step opts in with `inputs = ["apps/web/**", "package-lock.json"]` (git pathspecs, relative to the plan's `cwd`) and may add `cache_salt = "..."` to invalidate its entries. A step without `inputs` always runs.

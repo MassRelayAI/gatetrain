@@ -17,6 +17,7 @@ Steps may run in parallel and their lines may interleave: lines are matched to a
 | `STEP_SHARD <step> <i>/<n> START <ISO time>` | optional: shard i of n of a sharded step began; the step itself still has one `STEP_START`, one `STEP_TIME` (first shard start to last shard end) and one `STEP_EXIT` (0 only when every shard and the `shard_check` are 0, else the exit code of the lowest-numbered red shard). Readers that do not know the line skip it |
 | `STEP_SHARD <step> <i>/<n> EXIT <rc> <N>s` | optional: shard i ended with this exit code after N seconds; each shard's output is in `<step>.<i>of<n>.full`; `RED_NOW` is printed once per logical step, at its first red shard |
 | `CHAIN_OUT <folder>` | optional, once, after `CHAIN_PARALLEL`: the absolute `--out` folder holding the run's `<step>.full` files, so `diagnose` can read a red step's output from the log alone (a log copied to another machine names a folder that is not there, and `--out` names the right one) |
+| `CHAIN_ORDER longest\|file` | optional, once: which rule started ready steps first (`longest` = by the ledger's median duration). `CHAIN_CORES <k>` follows when a step declared `cores`: the run's core budget |
 | `RED_NOW <step> rc=<n> at <ISO time> (<note>)` | printed the moment a step fails, so a watcher can react before the run ends |
 | `RED_SUMMARY: <step>(rc=<n>) ... \| none` | once, at the end: every red, or `none` |
 | `GATES_DONE` | once, last: the run finished (green or red) |

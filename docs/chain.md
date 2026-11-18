@@ -128,6 +128,35 @@ On Windows a `run` string goes to the Windows shell, so use `argv` (for example 
 - `--only a,b` runs just those steps, `--skip c` leaves steps out. A name that is no step is refused. A step that needs a step outside the
   selection does not wait for it.
 
+## Scheduling: longest first, and cores
+
+**Longest first.** When several steps are ready (their `needs` are met and a slot is free), `chain` starts the one expected to take longest.
+The expectation is the step's median over the finished runs in the ledger, so it needs `--db`; a step the ledger has not seen counts as
+the median of the known ones. `--order longest|file` picks the rule: `longest` is the default when `--db` has history, `file` (the steps
+file's order, exactly as before) otherwise. Ties keep file order. The run's log says which rule it used, once: `CHAIN_ORDER longest` or
+`CHAIN_ORDER file`. Why: a long step listed last starts last and runs alone at the end.
+
+**Cores.** A step may say `cores = N`. The run has a core budget, `--cores K` (default: this host's core count), and `chain` never starts
+a step whose `cores` would exceed what is free; a step without `cores` counts as 1. A step whose `cores` exceeds the whole budget is a
+config error (exit 2). A run that declares no `cores` anywhere has no budget gate at all, so existing steps files behave as before. On
+Linux with `taskset` installed, a step with `cores` runs under `taskset -c <its reserved CPUs>` (the first contiguous free run), steps
+without `cores` are confined to the CPUs no running pinned step holds, and the CPUs are released when the step ends. Elsewhere only the
+budget applies. The log gets `CHAIN_CORES <K>` when any step declares `cores`.
+
+```toml
+[[step]]
+name = "web-e2e"      # a CPU-sensitive suite: give it room, and keep the unpinned steps off its CPUs
+tier = "slow"
+cores = 4
+run = "npm run e2e"
+```
+
+```text
+$ gatetrain chain --steps steps.toml --out out --db ledger.db --cores 12 --par 12
+CHAIN_ORDER longest
+CHAIN_CORES 12
+```
+
 ## Shards
 
 A slow step that is one long suite can be split: `shards = 4` runs the command four times at once, each with its own `{shard}` of
