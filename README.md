@@ -458,6 +458,8 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 > its own batch and for every other one. On macOS and BSD nothing ties a plugin to its parent and no start token is
 > read, so every crash mid-deploy needs a person. Until you enable the tick, `batch advance` by hand is the supported path.
 
+**Before turning it on:** run one batch end to end as a shadow. Run `gatetrain tick` by hand at each step, with deploy targets pointed at a throwaway target or a no-op command. Compare each transition and refusal with what you would have done by hand. Turn it on only when they match.
+
 `gatetrain tick` is off until `gatetrain.toml` says `[tick] enabled = true`; without it the tick exits 2 and writes nothing. Turn it on
 only when every deploy target has `timeout_min` and a deploy command that is safe to run twice (a tick that dies mid-deploy may leave a
 target for a person or a probe to settle, and a target the tick deploys again must not break by being deployed twice).
