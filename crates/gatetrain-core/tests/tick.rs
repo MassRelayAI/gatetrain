@@ -652,18 +652,6 @@ fn rev3_b1_a_target_that_cannot_be_spawned_fails_once_and_is_not_rerun() {
 }
 
 #[test]
-fn rev3_b1_a_marker_that_cannot_be_written_fails_once_and_is_not_rerun() {
-    let mut fx = Fx::new("");
-    fx.drive_to_proving("b1", "lane1");
-    fx.write_log("b1", GREEN);
-    // a folder where the marker file must go: the write fails after every target deployed
-    std::fs::create_dir_all(fx.state.join("deploys").join("b1-T8a-1.json")).unwrap();
-    assert_eq!(three_ticks(&mut fx), vec![1, 1, 1]);
-    assert_eq!(lines_in(&fx, "deploy.txt"), 1);
-    assert_eq!(postmerge_runs(&fx), 1);
-}
-
-#[test]
 fn rev3_minor1_the_wait_age_runs_from_the_row_that_entered_the_state() {
     let mut fx = Fx::new("[tick]\nmax_run_minutes = 120\n");
     fx.open("b1", "lane1");
@@ -826,4 +814,29 @@ fn s2_a_retry_budget_lets_the_engine_try_a_failed_transition_again_that_many_tim
     assert!(BatchConfig::parse("[retry]\nbudget = { T4 = -1 }\n").is_err(), "a negative budget");
     let d = BatchConfig::parse("").unwrap();
     assert_eq!((d.retry_budget("T7"), d.retry_budget("T8a"), d.retry_budget("T4")), (0, 0, 0), "default 0");
+}
+
+#[test]
+fn s4_a_target_that_deployed_is_not_deployed_again_after_a_later_target_fails() {
+    // `a-first` always works; `b-flaky` fails until the file `b.ok` exists
+    let two = "[deploy.a-first]\ncommand = [\"sh\", \"-c\", \"echo a >> ../a.txt\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n\
+               [deploy.b-flaky]\ncommand = [\"sh\", \"-c\", \"echo b >> ../b.txt; test -f ../b.ok\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
+    let mut fx = Fx::new(two);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    assert_eq!(fx.tick().exit_code(), 1);
+    assert_eq!((lines_in(&fx, "a.txt"), lines_in(&fx, "b.txt"), postmerge_runs(&fx)), (1, 1, 1));
+    // each target that deployed is a `deploy` row of the ledger, not a file
+    assert_eq!(fx.count("decisions WHERE kind='deploy' AND rule='deploy.checkpoint' AND subject='a-first'"), 1);
+    assert_eq!(fx.count("decisions WHERE kind='deploy' AND rule='deploy.checkpoint' AND subject='b-flaky'"), 0);
+    assert!(!fx.state.join("deploys").exists(), "no marker file");
+    std::fs::write(fx.t.path().join("b.ok"), "").unwrap();
+    fx.with(|e| e.retry_failed("b1", "b-flaky was fixed")).unwrap();
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "a.txt"), 1, "a-first deployed once: its checkpoint says so");
+    assert_eq!(lines_in(&fx, "b.txt"), 2);
+    assert_eq!(postmerge_runs(&fx), 1, "the postmerge command has its checkpoint too");
+    let outcome: String = fx.ledger.conn.query_row("SELECT json_extract(detail,'$.outcome') FROM batch_events WHERE transition='T8a' AND phase='failed'", [], |r| r.get(0)).unwrap();
+    assert_eq!(outcome, "failed-dirty", "a-first was deployed when b-flaky failed");
 }

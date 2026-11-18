@@ -234,6 +234,9 @@ fn next_effect(state: &str) -> Option<&'static str> {
     })
 }
 
+/// The checkpoint subject of the post-merge command (a target name never starts with `(`).
+const POSTMERGE: &str = "(postmerge)";
+
 enum Planned {
     Go(Plan),
     Refuse(String, String),
@@ -950,13 +953,13 @@ impl<'a> Engine<'a> {
     /// A failed attempt: `failed-clean` when the world is as it was before the attempt, `failed-dirty` when the attempt left something
     /// behind (a stack branch, a commit, a moved ref, a deployed target), so a person knows what a retry starts from.
     fn failed(&mut self, id: &str, f: &Folded, plan: &Plan, msg: String) -> Result<Outcome> {
-        let outcome = if self.left_dirty(f, plan) { "failed-dirty" } else { "failed-clean" };
+        let outcome = if self.left_dirty(id, f, plan) { "failed-dirty" } else { "failed-clean" };
         self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": msg, "outcome": outcome}))?;
         Ok(Outcome::Failed(format!("{}: {msg}", plan.tr)))
     }
 
     /// Did the failed attempt leave the world changed? A check that cannot be made counts as changed.
-    fn left_dirty(&self, f: &Folded, plan: &Plan) -> bool {
+    fn left_dirty(&self, id: &str, f: &Folded, plan: &Plan) -> bool {
         let Some(wd) = f.s("workdir").map(PathBuf::from) else { return true };
         let rev = |r: &str| git(&wd, &["rev-parse", "--verify", "-q", r]).ok();
         match plan.tr.as_str() {
@@ -966,7 +969,7 @@ impl<'a> Engine<'a> {
                 let branch = f.s("branch").unwrap_or_default();
                 rev(&format!("refs/heads/{branch}")) != plan.input_sha || rev(&format!("refs/heads/{}", self.cfg.protected)).as_deref() != plan.detail["merge_old"].as_str()
             }
-            "T8a" => true,
+            "T8a" => self.checkpoints_of(id, plan.attempt).map(|n| n > 0).unwrap_or(true),
             _ => false,
         }
     }
@@ -1091,14 +1094,24 @@ impl<'a> Engine<'a> {
                 }
             }
             "T8a" => {
-                // the marker the effect writes after the postmerge command and every target succeeded, for this attempt and sha
-                let want = json!({"sha": plan.input_sha, "attempt": plan.attempt, "targets": plan.detail["targets"]});
-                let have = std::fs::read_to_string(self.deploy_marker(id, plan.attempt)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
-                if have.as_ref() == Some(&want) {
-                    Probe::Happened(plan.input_sha.clone())
-                } else {
-                    // no marker: a crash may have left a target half deployed
-                    Probe::Unknown(format!("a crash may have left a deploy target of {} half deployed", short(plan.input_sha.as_deref().unwrap_or_default())))
+                // the per-target checkpoints of the ledger, for this sha: every one there is done; the first one missing is the one a crash
+                // may have left half done (they run in order), and the ones after it never started
+                let sha = plan.input_sha.clone().unwrap_or_default();
+                let mut doubt: Option<String> = None;
+                for name in plan.detail["targets"].as_array().into_iter().flatten().filter_map(|n| n.as_str()) {
+                    if !self.checkpointed(id, &sha, name)? {
+                        doubt = Some(name.to_string());
+                        break;
+                    }
+                }
+                let postmerged = self.cfg.postmerge_command.is_empty() || self.checkpointed(id, &sha, POSTMERGE)?;
+                match doubt {
+                    None if postmerged => Probe::Happened(plan.input_sha.clone()),
+                    // the post-merge command prepares a checkout and runs again (it is idempotent by contract, like regen)
+                    None => Probe::NotHappened,
+                    Some(_) if !postmerged => Probe::NotHappened,
+                    Some(name) if self.cfg.targets.get(&name).is_some_and(|t| t.idempotent) => Probe::NotHappened,
+                    Some(name) => Probe::Unknown(format!("a crash may have left deploy target {name} of {} half deployed, and it is not declared idempotent", short(&sha))),
                 }
             }
             _ => Probe::NotHappened,
@@ -1123,9 +1136,29 @@ impl<'a> Engine<'a> {
 
     // ------------------------------------------------------------ plans (the guards)
 
-    /// `<state>/deploys/<batch>-T8a-<attempt>.json`: written once the deploy of that attempt succeeded.
-    fn deploy_marker(&self, id: &str, attempt: i64) -> PathBuf {
-        self.state_dir.join("deploys").join(format!("{id}-T8a-{attempt}.json"))
+    /// A deploy checkpoint: a `deploy` decision row (`deploy.checkpoint`, subject the target or [`POSTMERGE`]) written right after it
+    /// succeeded for `sha`. The T8a probe and every later attempt for the same sha read it, so a target is never deployed twice.
+    fn checkpoint(&mut self, id: &str, sha: &str, attempt: i64, target: &str) -> Result<i64> {
+        let what = if target == POSTMERGE { "the post-merge command ran".to_string() } else { format!("target {target} deployed") };
+        self.decide("deploy", id, Some(target.into()), "deploy.checkpoint", "recorded", format!("{what} for {}", short(sha)), Some(json!({"sha": sha, "attempt": attempt, "target": target})))
+    }
+
+    fn checkpointed(&self, id: &str, sha: &str, target: &str) -> Result<bool> {
+        let n: i64 = self.ledger.conn.query_row(
+            "SELECT COUNT(*) FROM decisions WHERE batch=? AND kind='deploy' AND rule='deploy.checkpoint' AND subject=? AND json_extract(evidence,'$.sha')=?",
+            params![id, target, sha],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Checkpoints written by this attempt (a failed T8a that wrote one left a deploy behind: `failed-dirty`).
+    fn checkpoints_of(&self, id: &str, attempt: i64) -> Result<i64> {
+        Ok(self.ledger.conn.query_row(
+            "SELECT COUNT(*) FROM decisions WHERE batch=? AND kind='deploy' AND rule='deploy.checkpoint' AND json_extract(evidence,'$.attempt')=?",
+            params![id, attempt],
+            |r| r.get(0),
+        )?)
     }
 
     fn stamp_path(&self, sha: &str) -> PathBuf {
@@ -1669,7 +1702,7 @@ impl<'a> Engine<'a> {
             }
             "T8a" => {
                 let sha = plan.input_sha.clone().unwrap_or_default();
-                if !self.cfg.postmerge_command.is_empty() {
+                if !self.cfg.postmerge_command.is_empty() && !self.checkpointed(id, &sha, POSTMERGE)? {
                     // the target checkout needs its dependencies and packages before anything is deployed from it
                     let dir = self.cfg.postmerge_dir.as_deref().map(PathBuf::from).unwrap_or_else(|| wd.clone());
                     let env = self.env(id, f, &sha, "", "");
@@ -1677,9 +1710,13 @@ impl<'a> Engine<'a> {
                     if rc != 0 {
                         return Ok(Err(format!("post-merge command exited {rc}: {err}")));
                     }
+                    self.checkpoint(id, &sha, plan.attempt, POSTMERGE)?;
                 }
                 for n in plan.detail["targets"].as_array().cloned().unwrap_or_default() {
                     let name = n.as_str().unwrap_or_default();
+                    if self.checkpointed(id, &sha, name)? {
+                        continue; // deployed by an earlier attempt for this sha: never twice
+                    }
                     let t = &self.cfg.targets[name];
                     let env = self.env(id, f, &sha, "", "");
                     let cmd = substitute(&t.command, &sha);
@@ -1693,12 +1730,10 @@ impl<'a> Engine<'a> {
                     if rc != 0 {
                         return Ok(Err(format!("deploy {name} exited {rc}: {err}")));
                     }
-                    // test seam: the process dies right after this target deployed, before the marker and before `done`
+                    // test seam: the process dies right after this target deployed, before its checkpoint and before `done`
                     crash_point(&format!("T8a:{name}"))?;
+                    self.checkpoint(id, &sha, plan.attempt, name)?;
                 }
-                let marker = self.deploy_marker(id, plan.attempt);
-                std::fs::create_dir_all(marker.parent().unwrap_or(Path::new(".")))?;
-                std::fs::write(&marker, json!({"sha": sha, "attempt": plan.attempt, "targets": plan.detail["targets"]}).to_string())?;
                 Ok(Ok(Done { output: Some(sha), extra: json!({}) }))
             }
             t => Err(Error::Batch(format!("no effect for {t}"))),
