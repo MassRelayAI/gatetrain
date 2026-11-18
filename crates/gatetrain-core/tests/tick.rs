@@ -1459,7 +1459,8 @@ fn record_path(fx: &Fx, target: &str) -> PathBuf {
 }
 
 /// MINOR 2: an intent marker is written before the deploy is spawned. A crash between it and the pid leaves a record without a pid:
-/// every later advance waits (it may be running), never takes it for "not happened", and a person's retry clears it.
+/// every later advance stops on it (it may be running), never takes it for "not happened", and a person's retry clears it. Round 2,
+/// MINOR 6: such a record never clears by itself, so it needs a person at once (exit 1), not a wait.
 #[test]
 fn minor2_a_crash_before_the_pid_is_recorded_leaves_a_marker_that_waits() {
     let mut fx = Fx::new("");
@@ -1472,13 +1473,18 @@ fn minor2_a_crash_before_the_pid_is_recorded_leaves_a_marker_that_waits() {
     assert!(rec.get("pid").is_none(), "{rec}");
     for _ in 0..2 {
         match fx.adv("b1") {
-            Outcome::Waiting(why) => assert!(why.contains("before its pid was recorded") && why.contains("--retry"), "{why}"),
-            o => panic!("a marker without a pid is never 'not happened': {o:?}"),
+            Outcome::Refused { rule, because, clears_by_itself, .. } => {
+                assert_eq!(rule, "deploy.record-unverifiable");
+                assert!(!clears_by_itself, "a record without a pid never clears by itself");
+                assert!(because.contains("before its pid was recorded") && because.contains("--retry --clear-unverifiable-record"), "{because}");
+            }
+            o => panic!("a marker without a pid is never 'not happened', and never a wait: {o:?}"),
         }
     }
     assert_eq!(lines_in(&fx, "deploy.txt"), 0, "nothing deployed beside a deploy that may be running");
     let r = fx.tick();
-    assert!(r.lines[0].starts_with("b1: merged, waits: "), "{:?}", r.lines);
+    assert!(r.lines[0].starts_with("b1: merged, BLOCKED deploy.record-unverifiable: "), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1, "a person is needed at once");
     // MINOR 3: a person who checked that nothing runs clears the marker with a retry override (B1: a marker without a pid only with
     // the explicit flag)
     assert!(matches!(fx.with(|e| e.retry_failed("b1", "no deploy process runs on the host")).unwrap(), Outcome::Refused { .. }));
@@ -1539,13 +1545,16 @@ fn pending_with_record(rec: serde_json::Value) -> Fx {
 /// waits); a live leader waits and the message names its group; a person's retry clears the record with an override row.
 #[test]
 fn minor3_a_record_is_judged_by_its_start_token_and_a_person_clears_it() {
-    // no token: unknown, it waits, even with the pid gone
+    // no token: unknown, even with the pid gone; it never clears by itself, so a person is needed (round 2, MINOR 6)
     let mut gone = std::process::Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
     let dead = gone.id();
     gone.wait().unwrap();
     let mut fx = pending_with_record(serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": dead, "token": null}));
     match fx.adv("b1") {
-        Outcome::Waiting(why) => assert!(why.contains("without a start token"), "{why}"),
+        Outcome::Refused { rule, because, clears_by_itself, .. } => {
+            assert_eq!(rule, "deploy.record-unverifiable");
+            assert!(!clears_by_itself && because.contains("without a start token"), "{because}");
+        }
         o => panic!("{o:?}"),
     }
     assert_eq!(lines_in(&fx, "deploy.txt"), 0);
@@ -1742,4 +1751,25 @@ fn minor1_clear_record_of_an_unverifiable_record_needs_the_flag() {
     assert!(!record_path(&fx, "staging").exists());
     assert!(fx.with(|e| e.clear_record("b1", "", false)).is_err(), "a reason is required");
     assert!(matches!(fx.with(|e| e.clear_record("b1", "again", false)).unwrap(), Outcome::Idle(m) if m.contains("no deploy record")));
+}
+
+/// MINOR 6 (round 2): a record of ANOTHER batch that can never clear by itself (no pid, no start token, or a file that cannot be read)
+/// blocks the next batch as person-needed at once (exit 1), not as a `deploy.another-batch-deploying` wait that only ages out.
+#[test]
+fn minor6_an_unverifiable_record_of_another_batch_needs_a_person_at_once() {
+    for (what, body) in [
+        ("no pid", serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging"}).to_string()),
+        ("no token", serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": 4_000_000_000u32}).to_string()),
+        ("unreadable", "{ half a reco".to_string()),
+    ] {
+        let mut fx = Fx::new("");
+        b1_merged_b2_proven(&mut fx, |t| t.timeout_min = Some(1.0));
+        fx.with(|e| e.abandon("b1", "rebuilt by hand")).unwrap();
+        std::fs::create_dir_all(fx.state.join("running")).unwrap();
+        std::fs::write(record_path(&fx, "staging"), &body).unwrap();
+        let r = fx.tick();
+        assert!(r.lines[0].starts_with("b2: proven, BLOCKED deploy.record-unverifiable: "), "{what}: {:?}", r.lines);
+        assert_eq!(r.exit_code(), 1, "{what}: a person is needed at once");
+        assert_eq!(fx.state("b2"), "proven", "{what}");
+    }
 }

@@ -448,13 +448,14 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 > | guarantee | Linux | Windows |
 > |---|---|---|
 > | a plugin that does not survive its parent dies with gatetrain, its children too | its leader is a watchdog `/bin/sh` that `PR_SET_PDEATHSIG` signals when the spawning thread ends; it kills its process group. Not covered: a process that left the group (`setsid`, a process group of its own), one running as another user (a setuid program such as `sudo`: the kernel clears the parent-death signal across a setuid exec, and the watchdog may not signal it), and a watchdog that is itself killed with SIGKILL before gatetrain dies | a job object that kills its processes when gatetrain's handle closes, set while the plugin runs. Not covered: a process started outside the job (through a service, the task scheduler or WMI) |
-> | a deploy is recorded before it runs | an intent marker before the spawn; the pid and its start token right after the spawn (the command has started; a crash in between leaves a marker without a pid, which waits) | an intent marker before the spawn; the pid and its start token while the process is still suspended, before it runs |
+> | a deploy is recorded before it runs | an intent marker before the spawn; the pid and its start token right after the spawn (the command has started; a crash in between leaves a marker without a pid, which needs a person: `deploy.record-unverifiable`, exit 1) | an intent marker before the spawn; the pid and its start token while the process is still suspended, before it runs |
 > | a recorded deploy is told from a dead one | the leader's pid under its start token (`/proc/<pid>/stat` starttime); a pid reused by a later process is not it; members of its process group count unless the target says `survives_parent` | the leader's pid under its creation time, alive by its wait state (an exit code of 259 is not "alive"); only the leader is judged |
 > | one deploy per target at a time, across batches | the per-target record and `deploy.another-batch-deploying`; a batch merges only after the batch merged before it settled its deploy | the same |
 > | an older sha is never deployed over a newer one | `deploy.superseded`, from the ledger's per-target checkpoints, for a fresh and a resumed attempt | the same |
 >
 > Neither platform sees a deploy that runs on another machine (an ssh or API deploy that outlives its local command), and a record
-> without a pid or start token always waits for a person. On macOS and BSD nothing ties a plugin to its parent and no start token is
+> without a pid or start token, or one that cannot be read, needs a person at once (`deploy.record-unverifiable`, the tick exits 1), for
+> its own batch and for every other one. On macOS and BSD nothing ties a plugin to its parent and no start token is
 > read, so every crash mid-deploy waits for a person. Until you enable the tick, `batch advance` by hand is the supported path.
 
 `gatetrain tick` is off until `gatetrain.toml` says `[tick] enabled = true`; without it the tick exits 2 and writes nothing. Turn it on
@@ -522,7 +523,8 @@ already deployed to a target is refused `deploy.superseded` (a person decides), 
 by its leader: the recorded pid under its recorded start token (a later process that reuses the pid is not it), and, for a step that
 does not survive its parent, any member of its process group (Unix). A `survives_parent` deploy is judged by its leader only: the
 service it started is meant to live. A record without a pid (gatetrain died between the intent marker and the spawn) or without a
-start token (it could not be read) cannot be told from a live deploy, so it waits. **Clearing a record by hand:** the wait names the
+start token (it could not be read), or a record file that cannot be read, cannot be told from a live deploy and never clears by itself:
+every batch is refused `deploy.record-unverifiable` (a person decides, the tick exits 1). **Clearing a record by hand:** the refusal names the
 step, the batch and the process group; a person checks that it is gone or ends it (`kill -KILL -- -<pgid>` on Unix,
 `taskkill /T /F /PID <pid>` on Windows), then runs `gatetrain batch advance <batch> --retry --reason <why>`, which removes that batch's
 records with an override row naming them (`retry.person`, `cleared_records`); the next advance probes the deploy as after any crash.

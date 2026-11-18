@@ -299,6 +299,8 @@ enum Probe {
     Unknown(String),
     /// The effect is still running in a process a dead gatetrain left behind: neither settled nor safe to start again, so it waits.
     Running(String),
+    /// A record of the effect that nothing can verify (no pid, no start token, unreadable): it never clears by itself, a person decides.
+    Unverifiable(String),
 }
 
 /// What clearing a batch's deploy records did.
@@ -776,18 +778,18 @@ impl<'a> Engine<'a> {
     fn record_state(&self, path: &Path, v: &Value) -> Rec {
         let step = v["step"].as_str().unwrap_or("a deploy step");
         let Some(batch) = v["batch"].as_str() else {
-            return Rec::Unverifiable(format!("the record {} cannot be read; a person checks that no deploy runs and removes it", path.display()));
+            return Rec::Unverifiable(format!("the record {} cannot be read; nothing clears it by itself: a person checks that no deploy runs and removes it", path.display()));
         };
         // a held, abandoned or closed batch is never retried: its record is cleared by `clear-record`
         let parked = self.fold(batch).is_ok_and(|f| matches!(f.state.as_str(), "held" | "abandoned" | "closed"));
         let cmd = |flag: &str| if parked { format!("`gatetrain batch clear-record {batch} --reason <why>{flag}`") } else { format!("`gatetrain batch advance {batch} --retry{flag} --reason <why>`") };
         let unverifiable = format!("A person checks that it is not running and runs {}, which clears the record", cmd(" --clear-unverifiable-record"));
         let Some(pid) = v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else {
-            return Rec::Unverifiable(format!("{step} of batch {batch} was starting when its gatetrain stopped, before its pid was recorded: it may be running, and nothing can tell; the next step waits. {unverifiable}"));
+            return Rec::Unverifiable(format!("{step} of batch {batch} was starting when its gatetrain stopped, before its pid was recorded: it may be running, and nothing can tell, so nothing clears it by itself. {unverifiable}"));
         };
         let (group, end) = if cfg!(unix) { (format!(" (process group {pid})"), format!("`kill -KILL -- -{pid}`")) } else { (String::new(), format!("`taskkill /T /F /PID {pid}`")) };
         let Some(token) = v["token"].as_u64() else {
-            return Rec::Unverifiable(format!("{step} of batch {batch} was recorded as pid {pid}{group} without a start token, so it cannot be told from a later process that reuses the pid; the next step waits. {unverifiable}"));
+            return Rec::Unverifiable(format!("{step} of batch {batch} was recorded as pid {pid}{group} without a start token, so it cannot be told from a later process that reuses the pid, and nothing clears it by itself. {unverifiable}"));
         };
         let clear = format!("If it is stuck, a person ends it ({end}) and runs {}, which clears the record", cmd(""));
         if crate::runner::process_alive(pid, Some(token)) {
@@ -803,26 +805,34 @@ impl<'a> Engine<'a> {
         Rec::Gone
     }
 
-    /// `Some(what)` while the process of this record may still run (it is live, or nothing can tell).
-    fn record_running(&self, path: &Path, v: &Value) -> Option<String> {
-        match self.record_state(path, v) {
-            Rec::Gone => None,
-            Rec::Live(w) | Rec::Unverifiable(w) => Some(w),
-        }
+    /// A T8a step of batch `id` a dead process left running: `Some((rule, what))` while it lives (`deploy.still-running`, clears by
+    /// itself) or while nothing can tell (`deploy.record-unverifiable`, a person decides at once). A live record is named first.
+    fn deploy_still_running(&self, id: &str) -> Option<(&'static str, String)> {
+        Self::held_by(self.running_records().iter().filter(|(_, v)| v["batch"].as_str() == Some(id)).map(|(p, v)| self.record_state(p, v)), "deploy.still-running")
     }
 
-    /// A T8a step of batch `id` a dead process left running: `Some(what)` while it lives.
-    fn deploy_still_running(&self, id: &str) -> Option<String> {
-        self.running_records().iter().filter(|(_, v)| v["batch"].as_str() == Some(id)).find_map(|(p, v)| self.record_running(p, v))
+    /// The first record that holds: a live one under `live_rule`, else an unverifiable one under `deploy.record-unverifiable`.
+    fn held_by(recs: impl Iterator<Item = Rec>, live_rule: &'static str) -> Option<(&'static str, String)> {
+        let mut unseen = None;
+        for r in recs {
+            match r {
+                Rec::Live(w) => return Some((live_rule, w)),
+                Rec::Unverifiable(w) => {
+                    unseen.get_or_insert(w);
+                }
+                Rec::Gone => {}
+            }
+        }
+        unseen.map(|w| ("deploy.record-unverifiable", w))
     }
 
     /// Another batch deploys, or will before this one may (MAJOR 1 of the enable-readiness review): a T8a step of another batch that a
     /// dead process left running on any target, or another batch in `merged` whose deploy is not settled (not started, pending, or
     /// interrupted and due to run again; one whose deploy failed and needs a person does not hold the others, `deploy.superseded`
     /// guards it instead). For T8a only a batch merged before this one counts, so the older merge deploys first.
-    fn another_batch_deploying(&self, id: &str, tr: &str) -> Result<Option<String>> {
-        if let Some(why) = self.running_records().iter().filter(|(_, v)| v["batch"].as_str() != Some(id)).find_map(|(p, v)| self.record_running(p, v)) {
-            return Ok(Some(why));
+    fn another_batch_deploying(&self, id: &str, tr: &str) -> Result<Option<(&'static str, String)>> {
+        if let Some(held) = Self::held_by(self.running_records().iter().filter(|(_, v)| v["batch"].as_str() != Some(id)).map(|(p, v)| self.record_state(p, v)), "deploy.another-batch-deploying") {
+            return Ok(Some(held));
         }
         let merged_at = |evs: &[Ev]| evs.iter().rev().find(|e| e.transition == "T7" && e.phase == "done").map(|e| e.seq);
         let mine = merged_at(&self.events(id)?);
@@ -836,7 +846,7 @@ impl<'a> Engine<'a> {
                 continue;
             }
             let how = if f.pending.as_ref().is_some_and(|p| p.transition == "T8a") { "its deploy was interrupted and is not settled" } else { "it has not deployed yet" };
-            return Ok(Some(format!("batch {b} is merged and {how}; this batch {} after it settles, so the newer sha is the last one deployed", if tr == "T7" { "merges" } else { "deploys" })));
+            return Ok(Some(("deploy.another-batch-deploying", format!("batch {b} is merged and {how}; this batch {} after it settles, so the newer sha is the last one deployed", if tr == "T7" { "merges" } else { "deploys" }))));
         }
         Ok(None)
     }
@@ -1518,7 +1528,7 @@ impl<'a> Engine<'a> {
     fn resume(&mut self, id: &str, f: &Folded, p: Ev) -> Result<Outcome> {
         let plan = Plan { tr: p.transition.clone(), to: to_for(&p.transition, &p.detail).into(), input_sha: p.input_sha.clone(), run_id: p.run_id.clone(), attempt: p.attempt, detail: p.detail.clone() };
         let probed = self.probe(id, f, &plan)?;
-        if plan.tr == "T8a" && !matches!(probed, Probe::Happened(_) | Probe::Running(_)) {
+        if plan.tr == "T8a" && !matches!(probed, Probe::Happened(_) | Probe::Running(_) | Probe::Unverifiable(_)) {
             // a resumed deploy whose sha a newer batch already overtook is never run again
             let targets: Vec<String> = plan.detail["targets"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect();
             let wd = PathBuf::from(f.need("workdir")?);
@@ -1532,6 +1542,7 @@ impl<'a> Engine<'a> {
                 return self.finish(id, &plan, out, extra, " (resumed: the probe found the effect done)");
             }
             Probe::Running(why) => return Ok(Outcome::Waiting(why)),
+            Probe::Unverifiable(why) => return self.refuse(id, "deploy.record-unverifiable", why),
             Probe::NotHappened => self.interrupted(id, &plan, true, "the probe found the effect not done; it runs again under a new attempt")?,
             // finish forward under a new attempt; the partial result is kept, never deleted
             Probe::Partly => self.interrupted(id, &plan, true, "partly done; finishing forward under a new attempt")?,
@@ -1611,7 +1622,11 @@ impl<'a> Engine<'a> {
                     Probe::NotHappened
                 }
             }
-            "T8a" if self.deploy_still_running(id).is_some() => Probe::Running(self.deploy_still_running(id).unwrap_or_default()),
+            "T8a" if self.deploy_still_running(id).is_some() => match self.deploy_still_running(id) {
+                Some(("deploy.record-unverifiable", why)) => Probe::Unverifiable(why),
+                Some((_, why)) => Probe::Running(why),
+                None => Probe::NotHappened,
+            },
             "T8a" => {
                 // the per-target checkpoints of the ledger, for this sha: every one there is done; the first one missing is the one a crash
                 // may have left half done (they run in order), and the ones after it never started
@@ -1988,8 +2003,8 @@ impl<'a> Engine<'a> {
                         return Ok(Planned::Refuse("pipeline.base-not-merged".into(), format!("batch {base} is the base of this batch and is not on {} yet; merge {base} first (a fast-forward to this tip would carry its unproven commits)", self.cfg.protected)));
                     }
                 }
-                if let Some(why) = self.another_batch_deploying(id, "T7")? {
-                    return Ok(Planned::Refuse("deploy.another-batch-deploying".into(), why));
+                if let Some((rule, why)) = self.another_batch_deploying(id, "T7")? {
+                    return Ok(Planned::Refuse(rule.into(), why));
                 }
                 let (ff, _, _) = git_raw(&wd, &["merge-base", "--is-ancestor", &old, &tip])?;
                 if !ff {
@@ -2007,11 +2022,11 @@ impl<'a> Engine<'a> {
                 Ok(mk(Some(tip.clone()), None, json!({"merge_old": old, "merge_new": tip, "tested": tested, "protected": self.cfg.protected, "mode": "sha", "checkout": checkout})))
             }
             "T8a" => {
-                if let Some(why) = self.deploy_still_running(id) {
-                    return Ok(Planned::Refuse("deploy.still-running".into(), why));
+                if let Some((rule, why)) = self.deploy_still_running(id) {
+                    return Ok(Planned::Refuse(rule.into(), why));
                 }
-                if let Some(why) = self.another_batch_deploying(id, "T8a")? {
-                    return Ok(Planned::Refuse("deploy.another-batch-deploying".into(), why));
+                if let Some((rule, why)) = self.another_batch_deploying(id, "T8a")? {
+                    return Ok(Planned::Refuse(rule.into(), why));
                 }
                 let (mut auto, mut prod) = (vec![], vec![]);
                 for (n, t) in &self.cfg.targets {
