@@ -54,7 +54,9 @@ pub enum Error {
     Batch(String),
     #[error("bad timestamp: {0:?}")]
     Timestamp(String),
-    /// A test hook's crash: the process "dies" here, so no `failed` row is written (a real crash cannot write one either).
+    /// A test seam's crash (`batch::crash_seam`, tests only): the process "dies" here, so no `failed` row is written (a real crash
+    /// cannot write one either).
+    #[cfg(any(test, feature = "test-fakes"))]
     #[error("simulated crash: {0}")]
     SimulatedCrash(String),
 }

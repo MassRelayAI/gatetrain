@@ -121,7 +121,7 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
     }
     let (real, adm, state_dir) = seams::engine_seams(&a.db, &cfg, a.lock.clone(), Some((a.hosts.clone(), engine_host)))?;
     let actor = std::env::var("GATETRAIN_ACTOR").unwrap_or_else(|_| "tick".into());
-    let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor, crash_after_effect: None };
+    let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor };
     let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
     let seams = RealHosts { hosts_path: a.hosts.to_string_lossy().into_owned(), needs: hosts.needs.clone() };
     let now_us = gatetrain_core::logfmt::Ts::now_utc().instant_us();

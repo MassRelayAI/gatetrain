@@ -251,8 +251,39 @@ pub struct Engine<'a> {
     /// Stamps and chain logs live here.
     pub state_dir: PathBuf,
     pub actor: String,
-    /// Test hook: abort with an error right after the effect of this transition, before `done` is written.
-    pub crash_after_effect: Option<String>,
+}
+
+/// Crash injection for tests only (feature `test-fakes`): the engine "dies" at a named point, so no row after it is written. The point
+/// is set per thread, so tests that run side by side never see each other's crash. Points: `<tr>` right after the effect of a
+/// transition, before its `done`; `before:<tr>` right after its intent, before the effect; `T8a:<target>` right after that target
+/// deployed. The production build has no such field, struct or error.
+#[cfg(any(test, feature = "test-fakes"))]
+pub mod crash_seam {
+    use std::cell::RefCell;
+    thread_local! {
+        static AT: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+    /// Crash at `point` from now on in this thread (`None`: never).
+    pub fn set(point: Option<String>) {
+        AT.with(|a| *a.borrow_mut() = point);
+    }
+    pub(crate) fn hit(point: &str) -> crate::Result<()> {
+        if AT.with(|a| a.borrow().as_deref() == Some(point)) {
+            return Err(crate::Error::SimulatedCrash(point.to_string()));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-fakes"))]
+fn crash_point(point: &str) -> Result<()> {
+    crash_seam::hit(point)
+}
+
+#[cfg(not(any(test, feature = "test-fakes")))]
+#[inline(always)]
+fn crash_point(_point: &str) -> Result<()> {
+    Ok(())
 }
 
 // ---------------------------------------------------------------- helpers
@@ -797,6 +828,7 @@ impl<'a> Engine<'a> {
             Planned::Refuse(rule, because) => self.refuse(id, &rule, because),
             Planned::Go(plan) => {
                 self.event(id, tr, "intent", attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &plan.detail)?;
+                crash_point(&format!("before:{tr}"))?;
                 self.execute(id, f, plan)
             }
         }
@@ -808,15 +840,14 @@ impl<'a> Engine<'a> {
         let done = match r {
             Ok(Ok(d)) => d,
             // a test hook's crash leaves the intent as a real crash would: the next advance probes it
+            #[cfg(any(test, feature = "test-fakes"))]
             Err(e @ Error::SimulatedCrash(_)) => return Err(e),
             // every other error of the effect (a command that cannot be spawned, a missing folder, a marker that cannot be written)
             // is a failed attempt with its row, so no caller runs the effect again without a person
             Ok(Err(msg)) | Err(Error::Batch(msg)) => return self.failed(id, &plan, msg),
             Err(e) => return self.failed(id, &plan, e.to_string()),
         };
-        if self.crash_after_effect.as_deref() == Some(plan.tr.as_str()) {
-            return Err(Error::SimulatedCrash("after the effect".into()));
-        }
+        crash_point(&plan.tr)?;
         self.finish(id, &plan, done.output, done.extra, "")
     }
 
@@ -1518,10 +1549,8 @@ impl<'a> Engine<'a> {
                     if rc != 0 {
                         return Ok(Err(format!("deploy {name} exited {rc}: {err}")));
                     }
-                    if self.crash_after_effect.as_deref() == Some(format!("T8a:{name}").as_str()) {
-                        // test hook: the process dies right after this target deployed, before the marker and before `done`
-                        return Err(Error::SimulatedCrash(format!("after deploying {name}")));
-                    }
+                    // test seam: the process dies right after this target deployed, before the marker and before `done`
+                    crash_point(&format!("T8a:{name}"))?;
                 }
                 let marker = self.deploy_marker(id, plan.attempt);
                 std::fs::create_dir_all(marker.parent().unwrap_or(Path::new(".")))?;

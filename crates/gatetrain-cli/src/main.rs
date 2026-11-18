@@ -627,7 +627,7 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
     let cfg = if config.exists() { BatchConfig::load(config)? } else { BatchConfig::default() };
     let (real, adm, state_dir) = seams::engine_seams(db, &cfg, lock, hosts)?;
     let actor = std::env::var("GATETRAIN_ACTOR").unwrap_or_else(|_| "engine".into());
-    let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor, crash_after_effect: None };
+    let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor };
     let report = |o: Outcome| -> ExitCode {
         match &o {
             Outcome::Advanced { from, to, note } => println!("{from} -> {to} {note}"),

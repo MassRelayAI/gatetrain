@@ -69,7 +69,6 @@ struct Fx {
     cfg: BatchConfig,
     lock: FakeLock,
     hosts: Config,
-    crash: Option<String>,
     /// seconds after 2026-11-15T10:00:00Z at which the engine writes its next rows
     clock: std::cell::Cell<i64>,
 }
@@ -106,12 +105,12 @@ impl Fx {
         let hosts = config::load(&hosts_file).unwrap();
         let mut ledger = Ledger::open_in_memory().unwrap();
         ledger.migrate().unwrap();
-        Fx { state: t.path().join("state"), repo, ledger, cfg: BatchConfig::parse(&toml).unwrap(), lock: FakeLock::default(), hosts, crash: None, clock: std::cell::Cell::new(0), t }
+        Fx { state: t.path().join("state"), repo, ledger, cfg: BatchConfig::parse(&toml).unwrap(), lock: FakeLock::default(), hosts, clock: std::cell::Cell::new(0), t }
     }
 
     fn with<R>(&mut self, f: impl FnOnce(&mut Engine) -> R) -> R {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: self.crash.clone() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into() };
         f(&mut e)
     }
 
@@ -169,7 +168,7 @@ impl Fx {
     fn tick_full(&mut self, max_steps: usize, now_us: i64, adm: Box<dyn Admission>) -> TickReport {
         let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
         let hosts = self.hosts.clone();
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: adm.as_ref(), now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: adm.as_ref(), now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into() };
         let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: self.cfg.storm_reds, now_us, max_steps, max_wait_minutes: self.cfg.max_wait_minutes, max_run_minutes: self.cfg.max_run_minutes };
         tick::tick(&mut e, &o).unwrap()
     }
@@ -358,9 +357,9 @@ fn m3_a_crash_between_the_deploy_and_its_done_row_does_not_deploy_again() {
     for want in ["proven", "merged"] {
         assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
     }
-    fx.crash = Some("T8a".into());
+    gatetrain_core::batch::crash_seam::set(Some("T8a".into()));
     assert!(fx.with(|e| e.advance("b1")).is_err(), "the simulated crash after the deploy");
-    fx.crash = None;
+    gatetrain_core::batch::crash_seam::set(None);
     assert_eq!(postmerge_runs(&fx), 1);
     let r = fx.tick();
     assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
@@ -577,9 +576,9 @@ fn minor1_a_crash_inside_a_target_deploys_again_on_resume() {
     for want in ["proven", "merged"] {
         assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
     }
-    fx.crash = Some("T8a:staging".into());
+    gatetrain_core::batch::crash_seam::set(Some("T8a:staging".into()));
     assert!(fx.with(|e| e.advance("b1")).is_err(), "the simulated crash right after the staging deploy");
-    fx.crash = None;
+    gatetrain_core::batch::crash_seam::set(None);
     assert_eq!(lines_in(&fx, "deploy.txt"), 1);
     let r = fx.tick();
     assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
