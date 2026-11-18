@@ -1084,3 +1084,59 @@ fn m4_a_tier_is_one_of_a_known_set_spelled_exactly() {
     assert_eq!(c.targets["web"].tier, "qa");
     assert!(BatchConfig::parse("[deploy]\nauto_tiers = [\"production\"]\n").is_err(), "production is never automatic");
 }
+
+fn hook(fx: &Fx, name: &str, body: &str) {
+    let hooks = fx.repo.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join(name), format!("#!/bin/sh\n{body}\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(hooks.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[test]
+fn m3_a_hung_git_hook_ends_as_failed_within_the_limit_and_the_tick_reports_it() {
+    let mut fx = Fx::new("[regen]\ncommand = [\"sh\", \"-c\", \"mkdir -p gen && echo x > gen/out.txt\"]\ngenerated_dirs = [\"gen\"]\n");
+    fx.cfg.plugin_timeout_min = 0.02;
+    fx.open("b1", "lane1");
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "stacked"));
+    // the regen commit runs the pre-commit hook, which never ends
+    hook(&fx, "pre-commit", "sleep 30");
+    let t0 = std::time::Instant::now();
+    let r = fx.tick();
+    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the hook was ended at the limit");
+    assert!(r.lines[0].starts_with("b1: stacked, FAILED T2: git commit"), "{:?}", r.lines);
+    assert!(r.lines[0].contains("timed out after 0.02 min"), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn m3_a_git_call_is_named_in_the_heartbeat_while_it_runs() {
+    let mut fx = Fx::new("[regen]\ncommand = [\"sh\", \"-c\", \"mkdir -p gen && echo x > gen/out.txt\"]\ngenerated_dirs = [\"gen\"]\n");
+    fx.open("b1", "lane1");
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "stacked"));
+    hook(&fx, "pre-commit", "sleep 1");
+    let cell = tick::Beat::default();
+    let (stop, c2) = (std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)), cell.clone());
+    let s2 = stop.clone();
+    let reader = std::thread::spawn(move || {
+        let mut seen: Vec<String> = vec![];
+        while !s2.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Some(v) = c2.lock().unwrap().clone() {
+                seen.push(v["effect"].as_str().unwrap_or_default().to_string());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        seen
+    });
+    let adm = AllowAll;
+    {
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &now_at(0), state_dir: fx.state.clone(), actor: "engine".into(), progress: Some(cell) };
+        assert!(matches!(e.advance("b1").unwrap(), Outcome::Advanced { to, .. } if to == "settled"));
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let seen = reader.join().unwrap();
+    assert!(seen.iter().any(|e| e.starts_with("b1 git commit")), "{seen:?}");
+}

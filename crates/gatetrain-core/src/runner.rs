@@ -161,7 +161,21 @@ const DRAIN: Duration = Duration::from_secs(2);
 /// process group of its own (Unix) or a job object (Windows), so a timeout ends every process it started, an orphaned grandchild
 /// included; a command that ends by itself leaves whatever it started on purpose alone. A daemon that detached itself into its own
 /// session (or a remote deploy) is beyond any local kill: the caller says so.
-pub fn run_isolated(mut c: Command, secs: f64) -> Result<Isolated, String> {
+pub fn run_isolated(c: Command, secs: f64) -> Result<Isolated, String> {
+    Ok(match run_isolated_raw(c, secs)? {
+        IsolatedRaw::Done { rc, stdout, stderr } => Isolated::Done { rc, stdout: text(&stdout), stderr: text(&stderr) },
+        IsolatedRaw::TimedOut => Isolated::TimedOut,
+    })
+}
+
+/// [`run_isolated`] with the streams as raw bytes (a git blob must not be re-encoded).
+#[derive(Debug, Clone, PartialEq)]
+pub enum IsolatedRaw {
+    Done { rc: i32, stdout: Vec<u8>, stderr: Vec<u8> },
+    TimedOut,
+}
+
+pub fn run_isolated_raw(mut c: Command, secs: f64) -> Result<IsolatedRaw, String> {
     let limit = Duration::try_from_secs_f64(secs).ok().filter(|d| !d.is_zero()).ok_or_else(|| format!("{secs} s is not a usable time limit"))?;
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
@@ -191,12 +205,12 @@ pub fn run_isolated(mut c: Command, secs: f64) -> Result<Isolated, String> {
             job.kill(&child);
             kill_tree(&mut child);
             let _ = child.wait();
-            return Ok(Isolated::TimedOut);
+            return Ok(IsolatedRaw::TimedOut);
         }
         std::thread::sleep(Duration::from_millis(5));
     };
     let (o, e) = (so.recv_timeout(DRAIN).unwrap_or_default(), se.recv_timeout(DRAIN).unwrap_or_default());
-    Ok(Isolated::Done { rc: status.code().unwrap_or(-1), stdout: text(&o), stderr: text(&e) })
+    Ok(IsolatedRaw::Done { rc: status.code().unwrap_or(-1), stdout: o, stderr: e })
 }
 
 /// The process group (Unix) or job object (Windows) a plugin runs in.

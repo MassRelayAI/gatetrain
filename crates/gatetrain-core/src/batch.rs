@@ -368,6 +368,57 @@ pub fn iso_of(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}+00:00", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
+/// What a git call runs under: its time limit, the heartbeat cell it is named in, and the batch it is for. Set per thread by the
+/// engine's entry points ([`Engine::git_scope`]); without one a git call still has the default plugin limit.
+struct GitCtx {
+    secs: f64,
+    progress: Option<crate::tick::Beat>,
+    batch: String,
+}
+
+thread_local! {
+    static GIT_CTX: std::cell::RefCell<Option<GitCtx>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the git context it replaced when it drops.
+struct GitScope(Option<GitCtx>);
+
+impl Drop for GitScope {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        GIT_CTX.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+/// Every git call of the engine: a time limit (`[timeouts] plugin_min`; git runs hooks, which can hang), a process group of its
+/// own so the limit ends the hook too, and named in the heartbeat while it runs (`<batch> git <subcommand>`, its deadline).
+fn git_run(dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>, Vec<u8>)> {
+    let (secs, progress, batch) = GIT_CTX.with(|c| c.borrow().as_ref().map(|g| (g.secs, g.progress.clone(), g.batch.clone()))).unwrap_or((30.0 * 60.0, None, String::new()));
+    let mut c = Command::new("git");
+    c.arg("-C").arg(dir).args(args);
+    let sub = args.iter().find(|a| !a.starts_with('-') && !a.contains('=')).copied().unwrap_or("");
+    let since = epoch_ms();
+    if let Some(b) = &progress {
+        if let Ok(mut g) = b.lock() {
+            *g = Some(json!({"effect": format!("{batch} git {sub}").trim_start().to_string(), "since_ms": since, "deadline_ms": since + (secs * 1000.0) as i64}));
+        }
+    }
+    let r = crate::runner::run_isolated_raw(c, secs);
+    if let Some(b) = &progress {
+        if let Ok(mut g) = b.lock() {
+            *g = None;
+        }
+    }
+    match r.map_err(|e| Error::Batch(format!("git {}: {e}", args.join(" "))))? {
+        crate::runner::IsolatedRaw::Done { rc, stdout, stderr } => Ok((rc == 0, stdout, stderr)),
+        crate::runner::IsolatedRaw::TimedOut => Err(Error::Batch(format!(
+            "git {} timed out after {} min ([timeouts] plugin_min; its hooks included); the local process tree was signalled",
+            args.join(" "),
+            secs / 60.0
+        ))),
+    }
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let (ok, out, err) = git_raw(dir, args)?;
     if ok {
@@ -378,17 +429,17 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn git_raw(dir: &Path, args: &[&str]) -> Result<(bool, String, String)> {
-    let o = Command::new("git").arg("-C").arg(dir).args(args).output()?;
-    Ok((o.status.success(), String::from_utf8_lossy(&o.stdout).trim().to_string(), String::from_utf8_lossy(&o.stderr).into_owned()))
+    let (ok, out, err) = git_run(dir, args)?;
+    Ok((ok, String::from_utf8_lossy(&out).trim().to_string(), String::from_utf8_lossy(&err).into_owned()))
 }
 
 /// Paths git reports as changed or untracked (new files listed individually).
 fn dirty_paths(dir: &Path) -> Result<Vec<String>> {
-    let o = Command::new("git").arg("-C").arg(dir).args(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]).output()?;
-    if !o.status.success() {
-        return Err(Error::Batch(format!("git status: {}", String::from_utf8_lossy(&o.stderr).trim())));
+    let (ok, out, err) = git_run(dir, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"])?;
+    if !ok {
+        return Err(Error::Batch(format!("git status: {}", String::from_utf8_lossy(&err).trim())));
     }
-    let text = String::from_utf8_lossy(&o.stdout).into_owned();
+    let text = String::from_utf8_lossy(&out).into_owned();
     let mut out = vec![];
     let mut it = text.split('\0').filter(|s| !s.is_empty());
     while let Some(e) = it.next() {
@@ -405,8 +456,8 @@ fn dirty_paths(dir: &Path) -> Result<Vec<String>> {
 
 /// Raw bytes of a git command (a blob must not be trimmed or re-encoded).
 fn git_bytes(dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
-    let o = Command::new("git").arg("-C").arg(dir).args(args).output()?;
-    Ok((o.status.success(), o.stdout))
+    let (ok, out, _) = git_run(dir, args)?;
+    Ok((ok, out))
 }
 
 /// Paths with an unresolved merge conflict.
@@ -608,6 +659,12 @@ impl<'a> Engine<'a> {
         self.cfg.plugin_timeout_min
     }
 
+    /// The git context of one engine call: every git call below it runs with `[timeouts] plugin_min` and is named in the heartbeat.
+    fn git_scope(&self, id: &str) -> GitScope {
+        let ctx = GitCtx { secs: self.cfg.plugin_timeout_min * 60.0, progress: self.progress.clone(), batch: id.to_string() };
+        GitScope(GIT_CTX.with(|c| c.borrow_mut().replace(ctx)))
+    }
+
     /// A cherry-pick stopped on conflicts: hubs are rebuilt by their command, other paths are taken from a side by their resolver,
     /// anything else (or a result that still holds conflict markers) stops the stack. `Err(why)` leaves the pick for the caller to abort.
     fn resolve(&self, id: &str, wd: &Path, first_err: &str) -> Result<std::result::Result<(), String>> {
@@ -738,6 +795,7 @@ impl<'a> Engine<'a> {
     // ------------------------------------------------------------ commands: new, status, hold, release, abandon
 
     pub fn new_batch(&mut self, id: &str, base: &str, workdir: &Path, lanes: &[String]) -> Result<()> {
+        let _git = self.git_scope(id);
         self.ledger.require_current()?;
         if !self.events(id)?.is_empty() {
             return Err(Error::Batch(format!("batch {id} already exists")));
@@ -872,6 +930,7 @@ impl<'a> Engine<'a> {
     /// `batch advance --retry --reason`: a person lets one more attempt of the transition whose last attempt failed through. It is an
     /// override row (`retry.person`) and a side event `retry` that leaves the state alone; the next `advance` takes the attempt.
     pub fn retry_failed(&mut self, id: &str, reason: &str) -> Result<Outcome> {
+        let _git = self.git_scope(id);
         let f = self.fold(id)?;
         if let Some(o) = self.parked(id, &f)? {
             return Ok(o);
@@ -951,6 +1010,7 @@ impl<'a> Engine<'a> {
     /// A cause is addressed when the batch tip moved past the tested commit, or a person recorded the run's red as a flake or
     /// infrastructure with a reason (`note_cause`).
     pub fn retry(&mut self, id: &str) -> Result<Outcome> {
+        let _git = self.git_scope(id);
         let f = self.fold(id)?;
         if let Some(o) = self.parked(id, &f)? {
             return Ok(o);
@@ -1000,6 +1060,7 @@ impl<'a> Engine<'a> {
 
     /// One step: resume a pending intent, else take the transition the state allows, or refuse naming the rule.
     pub fn advance(&mut self, id: &str) -> Result<Outcome> {
+        let _git = self.git_scope(id);
         let f = self.fold(id)?;
         if let Some(o) = self.parked(id, &f)? {
             return Ok(o);
@@ -1399,6 +1460,7 @@ impl<'a> Engine<'a> {
 
     /// Stack this batch again on the new tip of its base batch: a side event back to `open`; the next advance stacks (T1, a new attempt).
     pub fn restack(&mut self, id: &str) -> Result<Outcome> {
+        let _git = self.git_scope(id);
         let f = self.fold(id)?;
         if let Some(o) = self.parked(id, &f)? {
             return Ok(o);
@@ -2236,6 +2298,7 @@ impl<'a> Engine<'a> {
     /// A person closes a live batch with whatever is left (`batch close --with-residue`): the owned set is tidied as far as the refusals
     /// allow, every refusal is already a row, and the override row names what stays behind.
     pub fn close_with_residue(&mut self, id: &str, reason: &str) -> Result<Outcome> {
+        let _git = self.git_scope(id);
         let f = self.fold(id)?;
         if f.state != "live" {
             return Ok(Outcome::Idle(format!("batch {id} is {}, not live", f.state)));
@@ -2258,6 +2321,7 @@ impl<'a> Engine<'a> {
 
     /// `batch close`: take the T9 step now (a live batch only).
     pub fn close_batch(&mut self, id: &str) -> Result<Outcome> {
+        let _git = self.git_scope(id);
         let f = self.fold(id)?;
         if f.state != "live" {
             return Ok(Outcome::Idle(format!("batch {id} is {}, not live", f.state)));
