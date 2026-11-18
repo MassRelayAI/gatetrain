@@ -214,3 +214,24 @@ fn a_plugin_that_ignores_term_and_int_still_dies_with_its_parent() {
     std::thread::sleep(std::time::Duration::from_secs(5));
     assert!(!late.exists(), "the plugin outlived its parent");
 }
+
+/// MINOR 7 (round 2, Windows): a plugin that cannot be put in its job object would run without kill-on-close and without a job to end
+/// its tree at a timeout. That is a failure of the step: the process, still suspended, is ended and never runs its command.
+#[cfg(windows)]
+#[test]
+fn minor7_a_job_assignment_that_fails_fails_the_step_and_nothing_runs() {
+    let t = tempfile::tempdir().unwrap();
+    let marker = t.path().join("ran.txt");
+    for survives_parent in [false, true] {
+        let mut c = std::process::Command::new(child());
+        c.args(["marker", &marker.to_string_lossy(), "0"]);
+        runner::job_seam::fail_next_assign();
+        let r = runner::run_isolated_with(c, 30.0, runner::Opts { survives_parent, ..Default::default() });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        match r {
+            Err(why) => assert!(why.contains("job object"), "{why}"),
+            Ok(o) => panic!("survives_parent {survives_parent}: the plugin ran outside its job: {o:?}"),
+        }
+        assert!(!marker.exists(), "survives_parent {survives_parent}: the plugin ran its command");
+    }
+}

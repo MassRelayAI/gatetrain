@@ -362,7 +362,15 @@ pub fn run_isolated_with(c: Command, secs: f64, mut opts: Opts) -> Result<Isolat
         c.creation_flags(group::CREATE_SUSPENDED);
     }
     let mut child = c.spawn().map_err(|e| if e.raw_os_error() == Some(group::ESRCH) { "the parent died before the plugin started".to_string() } else { e.to_string() })?;
-    let job = group::Job::adopt(&child, !opts.survives_parent);
+    let job = match group::Job::adopt(&child, !opts.survives_parent) {
+        Ok(j) => j,
+        Err(why) => {
+            // created suspended (Windows): it never ran its command
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(why);
+        }
+    };
     if let Some(f) = opts.on_start.as_mut() {
         if let Err(why) = f(child.id()) {
             job.kill(&child);
@@ -450,6 +458,20 @@ pub fn group_alive(pgid: u32) -> bool {
     {
         let _ = pgid;
         false
+    }
+}
+
+/// Test seam (Windows): the next job assignment on this thread fails, as `AssignProcessToJobObject` can (MINOR 7 of round 2).
+#[cfg(all(windows, any(test, feature = "test-fakes")))]
+pub mod job_seam {
+    thread_local! {
+        static FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    pub fn fail_next_assign() {
+        FAIL.with(|c| c.set(true));
+    }
+    pub(crate) fn take() -> bool {
+        FAIL.with(|c| c.replace(false))
     }
 }
 
@@ -653,29 +675,37 @@ mod group {
 
     impl Job {
         /// Put the child in a job of its own (Windows), killing it with the job's last handle when `kill_on_close`; on Unix the child
-        /// leads its own process group already. A job that cannot be made leaves the parent-pid walk of `kill_tree` as the only kill.
+        /// leads its own process group already. A job that cannot be made, set or joined is an `Err` (MINOR 7 of round 2): the caller
+        /// ends the child, still suspended, rather than run a plugin without kill-on-close and without a job to end its tree.
         #[cfg(windows)]
-        pub fn adopt(child: &std::process::Child, kill_on_close: bool) -> Job {
+        pub fn adopt(child: &std::process::Child, kill_on_close: bool) -> Result<Job, String> {
             use std::os::windows::io::AsRawHandle;
             // SAFETY: plain Win32 calls; the job handle is ours and closed in Drop; the process handle is borrowed from `child`.
             unsafe {
                 let h = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
                 if h.is_null() {
-                    return Job { handle: h };
+                    return Err(format!("no job object could be made for the plugin ({}); it was ended before it ran", std::io::Error::last_os_error()));
                 }
-                if kill_on_close {
-                    set_kill_on_close(h, true);
-                }
-                if AssignProcessToJobObject(h, child.as_raw_handle()) == 0 {
+                if kill_on_close && !set_kill_on_close(h, true) {
+                    let e = std::io::Error::last_os_error();
                     CloseHandle(h);
-                    return Job { handle: std::ptr::null_mut() };
+                    return Err(format!("the plugin's job object could not be set to kill on close ({e}); it was ended before it ran"));
                 }
-                Job { handle: h }
+                #[cfg(any(test, feature = "test-fakes"))]
+                let forced = super::job_seam::take();
+                #[cfg(not(any(test, feature = "test-fakes")))]
+                let forced = false;
+                if forced || AssignProcessToJobObject(h, child.as_raw_handle()) == 0 {
+                    let e = if forced { "test seam".to_string() } else { std::io::Error::last_os_error().to_string() };
+                    CloseHandle(h);
+                    return Err(format!("the plugin could not be put in its job object (AssignProcessToJobObject: {e}); it was ended before it ran"));
+                }
+                Ok(Job { handle: h })
             }
         }
         #[cfg(not(windows))]
-        pub fn adopt(_child: &std::process::Child, _kill_on_close: bool) -> Job {
-            Job {}
+        pub fn adopt(_child: &std::process::Child, _kill_on_close: bool) -> Result<Job, String> {
+            Ok(Job {})
         }
 
         /// Let go of the job as a parent that died would: on Windows its handle closes (and kill-on-close fires when it is set).
