@@ -48,6 +48,24 @@ pub struct ChainArgs {
     /// the run's id in the ledger (default: chain-<UTC time>-<commit>)
     #[arg(long)]
     run_id: Option<String>,
+    /// which ready step starts first: `longest` (the longest median in the --db ledger first; the default when there is history) or `file` (the steps file's order; the default otherwise)
+    #[arg(long, value_parser = ["file", "longest"])]
+    order: Option<String>,
+    /// the core budget: a step with `cores = N` starts only when N of these are free (a step without `cores` counts as 1). Default: this host's core count
+    #[arg(long)]
+    cores: Option<usize>,
+}
+
+/// Median seconds per step of the ledger's history; a step with none gets the median of the known ones. None = no history.
+fn expected_from(db: &std::path::Path, plan: &gatetrain_core::chain::Plan) -> Option<std::collections::HashMap<String, f64>> {
+    use gatetrain_core::stats::median;
+    let hist = gatetrain_core::history::history_durations(db, "")?;
+    let known: Vec<f64> = hist.iter().filter(|(_, v)| !v.is_empty()).map(|(_, v)| median(v)).collect();
+    if known.is_empty() {
+        return None;
+    }
+    let fallback = median(&known);
+    Some(plan.steps.iter().map(|s| (s.name.clone(), hist.iter().find(|(n, v)| *n == s.name && !v.is_empty()).map_or(fallback, |(_, v)| median(v)))).collect())
 }
 
 pub fn run(a: ChainArgs) -> ExitCode {
@@ -78,9 +96,19 @@ pub fn run(a: ChainArgs) -> ExitCode {
         eprintln!("chain: --mode full cannot be combined with --only or --skip: a partial run is not a full one");
         return ExitCode::from(2);
     }
+    if a.cores == Some(0) {
+        eprintln!("chain: --cores must be at least 1");
+        return ExitCode::from(2);
+    }
+    let cores = a.cores.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let expected = match (a.order.as_deref(), &a.db) {
+        (Some("file"), _) => None,
+        (_, Some(db)) => expected_from(db, &plan),
+        _ => None,
+    };
     let (db, run_id) = (a.db, a.run_id);
     let out_dir = a.out.clone();
-    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples } };
+    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();
         let _ = writeln!(so, "{l}");

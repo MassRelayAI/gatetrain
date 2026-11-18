@@ -48,6 +48,8 @@ pub struct Step {
     /// the command reads `GATETRAIN_SHARD` / `GATETRAIN_SHARDS` itself, so it needs no `{shard}` placeholder
     #[serde(default)]
     pub shard_env: bool,
+    /// CPU cores this step needs (1 or more; no `cores` counts as 1). With a core budget the scheduler never starts it unless that many are free; on Linux it runs under `taskset`
+    pub cores: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +76,44 @@ pub struct Opts {
     pub host: Option<String>,
     /// sample the host every this many seconds into `<out>/samples.jsonl` (engine v2 E7); 0 = off
     pub samples: u64,
+    /// expected seconds per step name (the ledger's medians): Some = start the longest ready step first, None = file order
+    pub expected: Option<std::collections::HashMap<String, f64>>,
+    /// the core budget (at least 1). It gates steps only when some selected step declares `cores`
+    pub cores: usize,
+}
+
+/// The first `n` contiguous free CPUs (`busy[i]` = CPU i is reserved), or None when no run of `n` is free.
+pub fn alloc_cpus(busy: &[bool], n: usize) -> Option<Vec<usize>> {
+    if n == 0 || n > busy.len() {
+        return None;
+    }
+    (0..=busy.len() - n).find(|&s| busy[s..s + n].iter().all(|b| !b)).map(|s| (s..s + n).collect())
+}
+
+/// `0-2,5`: the list form `taskset -c` takes.
+pub fn cpu_list(cpus: &[usize]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < cpus.len() {
+        let mut j = i;
+        while j + 1 < cpus.len() && cpus[j + 1] == cpus[j] + 1 {
+            j += 1;
+        }
+        out.push(if i == j { cpus[i].to_string() } else { format!("{}-{}", cpus[i], cpus[j]) });
+        i = j + 1;
+    }
+    out.join(",")
+}
+
+/// The CPUs no pinned step holds, as a `taskset -c` list; None when nothing is reserved (no need to confine) or nothing is left.
+pub fn free_cpu_list(busy: &[bool]) -> Option<String> {
+    let free: Vec<usize> = (0..busy.len()).filter(|&i| !busy[i]).collect();
+    (free.len() < busy.len() && !free.is_empty()).then(|| cpu_list(&free))
+}
+
+/// Pinning is Linux only and needs `taskset`; elsewhere the budget alone applies.
+fn can_pin() -> bool {
+    cfg!(target_os = "linux") && Command::new("taskset").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 /// The sampler of a run (E7): one JSON line per interval, appended to `<out>/samples.jsonl`; no thread, no daemon. It is driven by the
@@ -197,6 +237,9 @@ pub fn load(text: &str) -> Result<Plan, String> {
             return Err(format!("step {:?}: timeout_s must be positive", s.name));
         }
         check_shards(s)?;
+        if s.cores == Some(0) {
+            return Err(format!("step {:?}: cores must be at least 1", s.name));
+        }
         seen.push(s);
     }
     for s in &plan.steps {
@@ -312,6 +355,8 @@ struct Sh {
     /// RED_NOW is printed once per logical step, at its first red part
     red_noted: bool,
     checking: bool,
+    /// the `taskset` list this step's parts run under
+    pin: Option<String>,
 }
 
 /// Run `f`; a panic is a part that never reported an exit: rc 125 and a note in its `.full` (engine v2 section 6).
@@ -326,7 +371,7 @@ pub(crate) fn guarded(full: &Path, f: impl FnOnce() -> (i64, f64)) -> (i64, f64)
     }
 }
 
-fn exec(step: &Step, cwd: &Path, out: &Path, part: Part) -> (i64, f64) {
+fn exec(step: &Step, cwd: &Path, out: &Path, part: Part, pin: Option<&str>) -> (i64, f64) {
     let t0 = Instant::now();
     let n = nshards(step);
     let i = if let Part::Shard(i) = part { i } else { 1 };
@@ -354,6 +399,18 @@ fn exec(step: &Step, cwd: &Path, out: &Path, part: Part) -> (i64, f64) {
     if part != Part::Check && step.shards.is_some() {
         c.env("GATETRAIN_SHARD", i.to_string()).env("GATETRAIN_SHARDS", n.to_string());
     }
+    if let Some(list) = pin {
+        // `taskset -c LIST cmd args`: same environment, the process confined to the list
+        let mut w = Command::new("taskset");
+        w.arg("-c").arg(list).arg(c.get_program()).args(c.get_args());
+        for (k, v) in c.get_envs() {
+            match v {
+                Some(v) => w.env(k, v),
+                None => w.env_remove(k),
+            };
+        }
+        c = w;
+    }
     c.current_dir(cwd);
     let limit = step.timeout_s.unwrap_or(365.0 * 86400.0);
     let full = out.join(part_file(step, part));
@@ -380,11 +437,11 @@ fn append_line(full: &Path, line: &str) {
     }
 }
 
-fn spawn_part(step: &Step, idx: usize, part: Part, cwd: &Path, out: &Path, tx: &mpsc::Sender<Done>) {
-    let (step, cwd, out, tx) = (step.clone(), cwd.to_path_buf(), out.to_path_buf(), tx.clone());
+fn spawn_part(step: &Step, idx: usize, part: Part, cwd: &Path, out: &Path, tx: &mpsc::Sender<Done>, pin: Option<&str>) {
+    let (step, cwd, out, tx, pin) = (step.clone(), cwd.to_path_buf(), out.to_path_buf(), tx.clone(), pin.map(str::to_string));
     std::thread::spawn(move || {
         let full = out.join(part_file(&step, part));
-        let (rc, secs) = guarded(&full, || exec(&step, &cwd, &out, part));
+        let (rc, secs) = guarded(&full, || exec(&step, &cwd, &out, part, pin.as_deref()));
         let _ = tx.send(Done { idx, part, rc, secs });
     });
 }
@@ -441,6 +498,13 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             return Err(format!("--only/--skip/--no-cache-for names {n:?}, which is no step"));
         }
     }
+    let budget = o.cores.max(1);
+    let any_cores = plan.steps.iter().any(|s| s.cores.is_some());
+    for s in &plan.steps {
+        if let Some(c) = s.cores.filter(|&c| c as usize > budget) {
+            return Err(format!("step {:?}: cores = {c} exceeds the core budget of {budget} (--cores)", s.name));
+        }
+    }
     std::fs::create_dir_all(&o.out).map_err(|e| format!("cannot create {}: {e}", o.out.display()))?;
     let cwd = PathBuf::from(plan.cwd.clone().unwrap_or_else(|| ".".into()));
     let selected: Vec<usize> = (0..plan.steps.len())
@@ -482,6 +546,10 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let started_at = Ts::now_utc().iso();
     say(&format!("CHAIN_MODE {}", o.mode));
     say(&format!("CHAIN_PARALLEL {par}"));
+    say(&format!("CHAIN_ORDER {}", if o.expected.as_ref().is_some_and(|e| !e.is_empty()) { "longest" } else { "file" }));
+    if any_cores {
+        say(&format!("CHAIN_CORES {budget}"));
+    }
     // where the per-step `.full` files are, so `diagnose` can find them from the log alone (an unknown line to every reader)
     say(&format!("CHAIN_OUT {}", out_abs.to_string_lossy().trim_start_matches(r"\\?\")));
 
@@ -499,9 +567,19 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let mut shard_recs: Vec<ShardRec> = Vec::new();
     let mut skips: Vec<(String, String)> = Vec::new();
     let t_run = Instant::now();
+    // the core budget: which CPUs pinned steps hold, which each step holds, and the `taskset` list each running step was started with
+    let mut busy = vec![false; budget];
+    let mut held: Vec<Vec<usize>> = vec![Vec::new(); n_steps];
+    let mut pin: Vec<Option<String>> = vec![None; n_steps];
+    let pinning = any_cores && can_pin();
     let mut fast_red = false;
     for tier in [Tier::Fast, Tier::Slow] {
-        let mine: Vec<usize> = selected.iter().copied().filter(|&i| plan.steps[i].tier == tier).collect();
+        let mut mine: Vec<usize> = selected.iter().copied().filter(|&i| plan.steps[i].tier == tier).collect();
+        if let Some(e) = o.expected.as_ref().filter(|e| !e.is_empty()) {
+            // longest expected first; the sort is stable, so ties and unknown steps keep file order
+            let exp = |i: usize| e.get(&plan.steps[i].name).copied().unwrap_or(0.0);
+            mine.sort_by(|&a, &b| exp(b).partial_cmp(&exp(a)).unwrap_or(std::cmp::Ordering::Equal));
+        }
         if mine.is_empty() {
             continue;
         }
@@ -603,6 +681,23 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                         }
                     }
                 }
+                if any_cores {
+                    let want = plan.steps[i].cores.map_or(1, |c| c as usize);
+                    let plain = (0..n_steps).filter(|&j| state[j] == St::Running && plan.steps[j].cores.is_none()).count();
+                    if busy.iter().filter(|b| **b).count() + plain + want > budget {
+                        continue;
+                    }
+                    if let Some(c) = plan.steps[i].cores {
+                        let Some(cpus) = alloc_cpus(&busy, c as usize) else { continue };
+                        for &k in &cpus {
+                            busy[k] = true;
+                        }
+                        pin[i] = pinning.then(|| cpu_list(&cpus));
+                        held[i] = cpus;
+                    } else if pinning {
+                        pin[i] = free_cpu_list(&busy);
+                    }
+                }
                 state[i] = St::Running;
                 let now = Ts::now_utc().iso();
                 say(&format!("STEP_START {} {now}", plan.steps[i].name));
@@ -611,7 +706,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     let n = nshards(&plan.steps[i]);
                     let list: String = (1..=n).map(|k| format!("{}\n", part_file(&plan.steps[i], Part::Shard(k)))).collect();
                     let _ = std::fs::write(o.out.join(format!("{}.full", plan.steps[i].name)), format!("{n} shards, each in its own file:\n{list}"));
-                    let mut s = Sh { next: 1, n, started: Instant::now(), shard_start: vec![None; n as usize], ended: vec![None; n as usize], red_noted: false, checking: false };
+                    let mut s = Sh { next: 1, n, started: Instant::now(), shard_start: vec![None; n as usize], ended: vec![None; n as usize], red_noted: false, checking: false, pin: pin[i].clone() };
                     while running < par && s.next <= s.n {
                         launch_shard(&plan.steps[i], i, &mut s, &cwd, &o.out, &tx, &mut say);
                         running += 1;
@@ -619,7 +714,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     sh[i] = Some(s);
                 } else {
                     running += 1;
-                    spawn_part(&plan.steps[i], i, Part::Whole, &cwd, &o.out, &tx);
+                    spawn_part(&plan.steps[i], i, Part::Whole, &cwd, &o.out, &tx, pin[i].as_deref());
                 }
             }
             if hit {
@@ -673,7 +768,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                             (Some(rc), _) => Some((rc, s.started.elapsed().as_secs_f64())),
                             (None, Some(_)) => {
                                 s.checking = true;
-                                spawn_part(step, d.idx, Part::Check, &cwd, &o.out, &tx);
+                                spawn_part(step, d.idx, Part::Check, &cwd, &o.out, &tx, pin[d.idx].as_deref());
                                 running += 1;
                                 None
                             }
@@ -689,6 +784,9 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 }
             };
             let Some((rc, secs)) = fin else { continue };
+            for k in held[d.idx].drain(..) {
+                busy[k] = false;
+            }
             say(&format!("STEP_TIME {name} {secs:.1}s"));
             say(&format!("STEP_EXIT {name} {rc}"));
             times.push((d.idx, rc, secs));
@@ -800,7 +898,7 @@ fn launch_shard(step: &Step, idx: usize, s: &mut Sh, cwd: &Path, out: &Path, tx:
     let now = Ts::now_utc().iso();
     say(&format!("STEP_SHARD {} {k}/{} START {now}", step.name, s.n));
     s.shard_start[k as usize - 1] = Some(now);
-    spawn_part(step, idx, Part::Shard(k), cwd, out, tx);
+    spawn_part(step, idx, Part::Shard(k), cwd, out, tx, s.pin.clone().as_deref());
 }
 
 /// The cache key of a step: sha-256 over its command, its directory relative to the repository top, salt and `git ls-files -s -- <inputs>` (mode, blob, path of every tracked
@@ -919,5 +1017,39 @@ mod tests {
     fn the_os_hostname_is_a_real_name() {
         let h = os_hostname().expect("this machine has a host name");
         assert!(!h.is_empty() && !h.contains(char::is_whitespace));
+    }
+}
+
+#[cfg(test)]
+mod cpu_tests {
+    use super::*;
+
+    #[test]
+    fn the_allocator_takes_the_first_contiguous_free_run() {
+        let mut busy = vec![false; 8];
+        assert_eq!(alloc_cpus(&busy, 3), Some(vec![0, 1, 2]));
+        busy[1] = true;
+        assert_eq!(alloc_cpus(&busy, 3), Some(vec![2, 3, 4]));
+        assert_eq!(alloc_cpus(&busy, 1), Some(vec![0]));
+        assert_eq!(alloc_cpus(&[true, false, true, false], 2), None, "free CPUs that are not contiguous do not make a run");
+        assert_eq!(alloc_cpus(&busy, 9), None);
+        assert_eq!(alloc_cpus(&busy, 0), None);
+    }
+
+    #[test]
+    fn the_taskset_list_is_ranges_and_singles() {
+        assert_eq!(cpu_list(&[0, 1, 2]), "0-2");
+        assert_eq!(cpu_list(&[4]), "4");
+        assert_eq!(cpu_list(&[0, 1, 3, 5, 6]), "0-1,3,5-6");
+    }
+
+    #[test]
+    fn unpinned_steps_are_confined_to_what_pinned_steps_do_not_hold() {
+        let mut busy = vec![false; 6];
+        assert_eq!(free_cpu_list(&busy), None, "nothing reserved, nothing to confine");
+        busy[1] = true;
+        busy[2] = true;
+        assert_eq!(free_cpu_list(&busy).as_deref(), Some("0,3-5"));
+        assert_eq!(free_cpu_list(&[true, true]), None);
     }
 }
