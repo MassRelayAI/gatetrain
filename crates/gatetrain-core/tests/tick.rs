@@ -1805,3 +1805,25 @@ fn minor2_a_person_retrying_the_older_merge_is_not_deadlocked_by_a_newer_merge_t
     assert_eq!(r.lines[1], "b2: merged -> deploying -> live -> closed", "{:?}", r.lines);
     assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b1", "deployed b2"], "the older merge deploys first, the newer sha last");
 }
+
+/// MINOR 3 (round 2): a batch refused `deploy.another-batch-deploying` is tried again in the same tick once the batch it waited for
+/// settled, also when that batch sorts AFTER it (the tick walks the batches in id order, so the waiting one was tried first).
+#[test]
+fn minor3_a_batch_waiting_for_one_that_sorts_after_it_moves_in_the_same_tick() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("z1", "lane1");
+    fx.open_on("a2", "z1", "lane2");
+    for want in ["stacked", "settled", "preflighted"] {
+        assert!(matches!(fx.adv("a2"), Outcome::Advanced { to, .. } if to == want));
+    }
+    fx.write_log("z1", GREEN);
+    assert!(matches!(fx.adv("z1"), Outcome::Advanced { to, .. } if to == "proven"));
+    assert!(matches!(fx.adv("a2"), Outcome::Advanced { to, .. } if to == "proving"));
+    fx.write_log("a2", GREEN);
+    assert!(matches!(fx.adv("a2"), Outcome::Advanced { to, .. } if to == "proven"));
+    assert!(matches!(fx.adv("z1"), Outcome::Advanced { to, .. } if to == "merged"));
+    assert!(matches!(fx.adv("a2"), Outcome::Refused { rule, .. } if rule == "deploy.another-batch-deploying"), "a2 waits for z1's deploy");
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "a2: proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(r.lines[1], "z1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+}
