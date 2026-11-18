@@ -101,13 +101,15 @@ pub struct MemoryAdmission {
     pub tidy: Option<Box<dyn Fn() -> Result<String>>>,
     /// T9 close's view of this host.
     pub close: Option<Box<dyn CloseEnv>>,
+    /// Why `close` is `None` when the seam tried to build it (an unknown reach, a tidy config that does not build).
+    pub close_error: Option<String>,
     /// The hosts file could not be loaded: the floor cannot be judged, so every run is refused (fail closed).
     pub floor_error: Option<String>,
 }
 
 impl MemoryAdmission {
     pub fn new(lock: PathBuf, db: PathBuf, hosts: Option<(PathBuf, String)>, chain_steps: Vec<String>) -> MemoryAdmission {
-        MemoryAdmission { lock, db, hosts, chain_steps, target_dirs: vec![], repo_root: None, doctor: false, preflight_steps: vec![], light_while_proving: false, disk_floor: false, needs_preflight_gb: None, needs_chain_gb: None, tidy: None, close: None, floor_error: None }
+        MemoryAdmission { lock, db, hosts, chain_steps, target_dirs: vec![], repo_root: None, doctor: false, preflight_steps: vec![], light_while_proving: false, disk_floor: false, needs_preflight_gb: None, needs_chain_gb: None, tidy: None, close: None, close_error: None, floor_error: None }
     }
 }
 
@@ -177,6 +179,10 @@ impl Admission for MemoryAdmission {
 
     fn close_env(&self) -> Option<&dyn CloseEnv> {
         self.close.as_deref()
+    }
+
+    fn close_env_error(&self) -> Option<String> {
+        self.close_error.clone()
     }
 
     fn admit(&self, role: &str, batch: &str) -> Result<Option<String>> {

@@ -38,10 +38,15 @@ pub fn engine_seams(db: &Path, cfg: &BatchConfig, lock: Option<PathBuf>, hosts: 
             Ok(hc) => {
                 adm.needs_preflight_gb = Some(hc.needs.preflight_gb.f());
                 adm.needs_chain_gb = Some(hc.needs.chain_gb.f());
-                if let Some(host) = hc.hosts.iter().find(|x| x.name == *n) {
-                    if let (Some(r), Ok(t)) = (gatetrain_core::runner::for_reach(&host.reach), gatetrain_core::tidy::config::build_cfg(&hc, host)) {
-                        adm.close = Some(Box::new(gatetrain_core::tidy::close::OwnedEnv { host: host.clone(), runner: r, cfg: t, reference_prefixes: cfg.close_protected_container_prefixes.clone() }));
-                    }
+                match hc.hosts.iter().find(|x| x.name == *n) {
+                    None => adm.close_error = Some(format!("no host {n} in {}", h.display())),
+                    Some(host) => match (gatetrain_core::runner::for_reach(&host.reach), gatetrain_core::tidy::config::build_cfg(&hc, host)) {
+                        (Some(r), Ok(t)) => {
+                            adm.close = Some(Box::new(gatetrain_core::tidy::close::OwnedEnv { host: host.clone(), runner: r, cfg: t, reference_prefixes: cfg.close_protected_container_prefixes.clone() }));
+                        }
+                        (None, _) => adm.close_error = Some(format!("reach {:?} of host {n} has no runner (use \"local\" or \"ssh <name>\")", host.reach)),
+                        (_, Err(e)) => adm.close_error = Some(format!("the tidy config of host {n} does not build: {e}")),
+                    },
                 }
             }
         }

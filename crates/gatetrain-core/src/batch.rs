@@ -61,7 +61,11 @@ pub trait Admission {
     fn tidy_auto(&self, _role: &str) -> Result<Option<String>> {
         Ok(None)
     }
-    /// What T9 close probes and acts through; `None` = this seam cannot tidy (close then waits).
+    /// Why there is no close environment, when the seam knows (an unknown reach, a tidy config that does not build).
+    fn close_env_error(&self) -> Option<String> {
+        None
+    }
+    /// What T9 close probes and acts through; `None` = this seam cannot tidy (close then refuses).
     fn close_env(&self) -> Option<&dyn CloseEnv> {
         None
     }
@@ -1490,6 +1494,10 @@ impl<'a> Engine<'a> {
                     if rc != 0 {
                         return Ok(Err(format!("deploy {name} exited {rc}: {err}")));
                     }
+                    if self.crash_after_effect.as_deref() == Some(format!("T8a:{name}").as_str()) {
+                        // test hook: the process dies right after this target deployed, before the marker and before `done`
+                        return Err(Error::Io(std::io::Error::other(format!("simulated crash after deploying {name}"))));
+                    }
                 }
                 let marker = self.deploy_marker(id, plan.attempt);
                 std::fs::create_dir_all(marker.parent().unwrap_or(Path::new(".")))?;
@@ -1712,7 +1720,11 @@ impl<'a> Engine<'a> {
             return self.plain(id, f, "T9", "closed", None, None, json!({}), "recorded", "closed".into());
         }
         let adm = self.adm;
-        let Some(env) = adm.close_env() else { return Ok(Outcome::Waiting(format!("batch {id}: close needs a tidy environment for this host (`gatetrain batch close`)"))) };
+        let Some(env) = adm.close_env() else {
+            // no environment will appear by waiting: a person fixes the host's reach or its tidy config
+            let why = adm.close_env_error().unwrap_or_else(|| "the seam has none (`gatetrain batch close` with --hosts and --host)".into());
+            return self.refuse(id, "close.no-environment", format!("batch {id}: close needs a tidy environment for this host: {why}"));
+        };
         let set = self.owned_set(id, f, env)?;
         let rep = close::run_close(&set, env);
         let last = self.close_rows(id, &rep)?;
