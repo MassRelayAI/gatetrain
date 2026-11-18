@@ -829,16 +829,30 @@ impl<'a> Engine<'a> {
     /// Another batch deploys, or will before this one may (MAJOR 1 of the enable-readiness review): a T8a step of another batch that a
     /// dead process left running on any target, or another batch in `merged` whose deploy is not settled (not started, pending, or
     /// interrupted and due to run again; one whose deploy failed and needs a person does not hold the others, `deploy.superseded`
-    /// guards it instead). For T8a only a batch merged before this one counts, so the older merge deploys first.
+    /// guards it instead). For T8a only a batch merged before this one counts, so the older merge deploys first. A T8a is also held by
+    /// another batch in `deploying` on a target this one deploys (its health checks have not passed), so a health check never runs
+    /// against a newer sha than the one it checks.
     fn another_batch_deploying(&self, id: &str, tr: &str) -> Result<Option<(&'static str, String)>> {
         if let Some(held) = Self::held_by(self.running_records().iter().filter(|(_, v)| v["batch"].as_str() != Some(id)).map(|(p, v)| self.record_state(p, v)), "deploy.another-batch-deploying") {
             return Ok(Some(held));
         }
         let merged_at = |evs: &[Ev]| evs.iter().rev().find(|e| e.transition == "T7" && e.phase == "done").map(|e| e.seq);
         let mine = merged_at(&self.events(id)?);
+        let ours: Vec<&String> = self.cfg.targets.iter().filter(|(_, t)| t.tier != "production").map(|(n, _)| n).collect();
         for b in self.batch_ids()?.into_iter().filter(|b| b != id) {
             let evs = self.events(&b)?;
             let Some(f) = fold(&evs) else { continue };
+            if tr == "T8a" && f.state == "deploying" {
+                let theirs: Vec<String> = f.facts.get("targets").and_then(Value::as_array).into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect();
+                let shared: Vec<&str> = theirs.iter().filter(|t| ours.contains(t)).map(String::as_str).collect();
+                if !shared.is_empty() {
+                    return Ok(Some((
+                        "deploy.another-batch-deploying",
+                        format!("batch {b} is deploying {} and its health checks have not passed; this batch deploys after it is live (or a person abandons it), so a health check never runs against a newer sha", shared.join(", ")),
+                    )));
+                }
+                continue;
+            }
             if f.state != "merged" || self.t8a_needs_person(&b)? {
                 continue;
             }

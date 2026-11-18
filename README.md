@@ -450,7 +450,7 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 > | a plugin that does not survive its parent dies with gatetrain, its children too | its leader is a watchdog `/bin/sh` that `PR_SET_PDEATHSIG` signals when the spawning thread ends; it kills its process group. Not covered: a process that left the group (`setsid`, a process group of its own), one running as another user (a setuid program such as `sudo`: the kernel clears the parent-death signal across a setuid exec, and the watchdog may not signal it), and a watchdog that is itself killed with SIGKILL before gatetrain dies | a job object that kills its processes when gatetrain's handle closes, set while the plugin runs. Not covered: a process started outside the job (through a service, the task scheduler or WMI) |
 > | a deploy is recorded before it runs | an intent marker before the spawn; the pid and its start token right after the spawn (the command has started; a crash in between leaves a marker without a pid, which needs a person: `deploy.record-unverifiable`, exit 1) | an intent marker before the spawn; the pid and its start token while the process is still suspended, before it runs |
 > | a recorded deploy is told from a dead one | the leader's pid under its start token (`/proc/<pid>/stat` starttime); a pid reused by a later process is not it; members of its process group count unless the target says `survives_parent` | the leader's pid under its creation time, alive by its wait state (an exit code of 259 is not "alive"); only the leader is judged |
-> | one deploy per target at a time, across batches | the per-target record and `deploy.another-batch-deploying`; a batch merges only after the batch merged before it settled its deploy | the same |
+> | one deploy per target at a time, across batches | the per-target record and `deploy.another-batch-deploying`; a batch merges only after the batch merged before it settled its deploy, and deploys only once no other batch is `deploying` (health checks running) on the same target | the same |
 > | an older sha is never deployed over a newer one | `deploy.superseded`, from the ledger's per-target checkpoints, for a fresh and a resumed attempt | the same |
 >
 > Neither platform sees a deploy that runs on another machine (an ssh or API deploy that outlives its local command), and a record
@@ -518,7 +518,8 @@ says `survives_parent = true` (it starts a long-lived service). A deploy step re
 (`<state>/running/<target>.json`: batch, sha, pid and start time) while it runs: if gatetrain dies and the deploy lives on, the next
 advance of that batch waits (`... is still running as pid N`) and every other batch is refused `deploy.another-batch-deploying`
 (clears by itself) instead of merging or deploying beside it. A batch is not merged either while another batch is `merged` and its
-deploy is not settled, and of two merged batches the older merge deploys first. A deploy whose sha is behind what a newer batch
+deploy is not settled, and of two merged batches the older merge deploys first. A batch whose health checks have not passed yet
+(`deploying`) holds the next batch's deploy on the same target, so a health check never runs against a newer sha. A deploy whose sha is behind what a newer batch
 already deployed to a target is refused `deploy.superseded` (a person decides), fresh or resumed, and never runs. A record is judged
 by its leader: the recorded pid under its recorded start token (a later process that reuses the pid is not it), and, for a step that
 does not survive its parent, any member of its process group (Unix). A `survives_parent` deploy is judged by its leader only: the

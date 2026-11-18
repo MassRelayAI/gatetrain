@@ -1827,3 +1827,25 @@ fn minor3_a_batch_waiting_for_one_that_sorts_after_it_moves_in_the_same_tick() {
     assert_eq!(r.lines[0], "a2: proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
     assert_eq!(r.lines[1], "z1: merged -> deploying -> live -> closed", "{:?}", r.lines);
 }
+
+/// MINOR 9 (round 2): a batch in `deploying` (its health checks have not passed yet) holds the next batch's deploy on the same target,
+/// so a health check never runs against a newer sha than the one it is checking.
+#[test]
+fn minor9_a_batch_whose_health_checks_run_holds_the_next_deploy_on_its_target() {
+    let mut fx = Fx::new("");
+    let (log, current, healthy) = (fwd(&fx.t.path().join("deploy-log.txt")), fwd(&fx.t.path().join("current")), fwd(&fx.t.path().join("healthy")));
+    b1_merged_b2_proven(&mut fx, |t| {
+        t.command = vec!["sh".into(), "-c".into(), format!("echo $GATETRAIN_SHA > '{current}'; echo deployed $GATETRAIN_BATCH >> '{log}'")];
+        t.health = vec!["sh".into(), "-c".into(), format!("[ \"$(cat '{current}')\" = \"$GATETRAIN_SHA\" ] || echo checked-against-another-sha $GATETRAIN_BATCH >> '{log}'; test -e '{healthy}'")];
+        t.timeout_min = Some(1.0);
+    });
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: merged -> deploying, waits: target staging does not report "), "{:?}", r.lines);
+    assert!(r.lines[1].starts_with("b2: proven -> merged, BLOCKED deploy.another-batch-deploying: batch b1 is deploying"), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 0, "a wait that clears by itself");
+    std::fs::write(fx.t.path().join("healthy"), "").unwrap();
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(r.lines[1], "b2: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b1", "deployed b2"], "every health check ran against its own sha");
+}
