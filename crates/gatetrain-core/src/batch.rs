@@ -1809,20 +1809,18 @@ impl<'a> Engine<'a> {
                 }
                 // whenever the merge would carry generated files the chain did not test (this attempt's commit or an earlier one's), the
                 // generators run again and must change nothing
-                if git(&wd, &["rev-parse", "HEAD"])? != tested {
-                    if !self.cfg.regen_command.is_empty() {
-                        let env = self.env(id, f, &tested, "", "");
-                        let (rc, err) = match self.plugin(id, "T7", "regen", " ([timeouts] plugin_min)", &self.cfg.regen_command, &wd, &env, self.plugin_min())? {
-                            Ok(x) => x,
-                            Err(why) => return Ok(Err(why)),
-                        };
-                        if rc != 0 {
-                            return Ok(Err(format!("regen command exited {rc} while re-settling the chain's generated files: {err}")));
-                        }
-                        let again = dirty_paths(&wd)?;
-                        if !again.is_empty() {
-                            return Ok(Err(format!("the generated files are not a fixpoint after the chain (the generators changed: {})", again.join(", "))));
-                        }
+                if git(&wd, &["rev-parse", "HEAD"])? != tested && !self.cfg.regen_command.is_empty() {
+                    let env = self.env(id, f, &tested, "", "");
+                    let (rc, err) = match self.plugin(id, "T7", "regen", " ([timeouts] plugin_min)", &self.cfg.regen_command, &wd, &env, self.plugin_min())? {
+                        Ok(x) => x,
+                        Err(why) => return Ok(Err(why)),
+                    };
+                    if rc != 0 {
+                        return Ok(Err(format!("regen command exited {rc} while re-settling the chain's generated files: {err}")));
+                    }
+                    let again = dirty_paths(&wd)?;
+                    if !again.is_empty() {
+                        return Ok(Err(format!("the generated files are not a fixpoint after the chain (the generators changed: {})", again.join(", "))));
                     }
                 }
                 let head = git(&wd, &["rev-parse", "HEAD"])?;

@@ -223,7 +223,7 @@ mod group {
             // SAFETY: plain Win32 calls; the job handle is ours and closed in Drop; the process handle is borrowed from `child`.
             unsafe {
                 let h = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-                if !h.is_null() && AssignProcessToJobObject(h, child.as_raw_handle() as *mut std::ffi::c_void) == 0 {
+                if !h.is_null() && AssignProcessToJobObject(h, child.as_raw_handle()) == 0 {
                     CloseHandle(h);
                     return Job { handle: std::ptr::null_mut() };
                 }
