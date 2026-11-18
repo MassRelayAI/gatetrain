@@ -708,3 +708,52 @@ fn rev3_minor2_the_holder_refreshes_its_heartbeat() {
     let b1 = tick::read_info(&lp).unwrap().beat_ms.unwrap();
     assert!(b1 > b0, "{b0} -> {b1}");
 }
+
+// ---------------------------------------------------------------- the failure-model rebuild (S1..S8)
+
+use gatetrain_core::batch::crash_seam;
+
+/// review round 4: a crash right after the staging deploy leaves a pending T8a intent; a person holds the batch; a tick must not resume it
+#[test]
+fn s1_rev4_a_held_batch_with_a_pending_t8a_intent_is_not_deployed_by_a_tick() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    for want in ["proven", "merged"] {
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+    }
+    crash_seam::set(Some("T8a:staging".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err());
+    crash_seam::set(None);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1);
+    fx.with(|e| e.hold("b1", "a person stops it after the crash")).unwrap();
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: held (a person stops it after the crash)", "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1, "a held batch is never deployed");
+    assert_eq!(fx.state("b1"), "held");
+    assert_eq!(r.exit_code(), 0);
+}
+
+/// review round 4: a crash right after the merge; the batch is held; the resume's `done` must not overwrite `held`
+#[test]
+fn s1_rev4_a_held_batch_with_a_pending_t7_intent_is_not_moved_by_a_tick() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "proven"));
+    crash_seam::set(Some("T7".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err());
+    crash_seam::set(None);
+    fx.with(|e| e.hold("b1", "a person stops it")).unwrap();
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: held (a person stops it)", "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 0, "a held batch is never deployed");
+    assert_eq!(fx.state("b1"), "held");
+    // the hold names the intent it left pending, and a release resumes it
+    let held: String = fx.ledger.conn.query_row("SELECT detail FROM batch_events WHERE batch='b1' AND transition='hold'", [], |r| r.get(0)).unwrap();
+    assert!(held.contains("\"pending_intent\":{\"attempt\":1,\"transition\":\"T7\"}"), "{held}");
+    fx.with(|e| e.release("b1")).unwrap();
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1);
+}

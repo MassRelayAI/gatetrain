@@ -701,7 +701,12 @@ impl<'a> Engine<'a> {
         let f = self.fold(id)?;
         let d = self.decide("override", id, None, rule, "recorded", reason.into(), Some(json!({"from": f.state})))?;
         let n = f.max_attempt.get(tr).copied().unwrap_or(0) + 1;
-        self.event(id, tr, "done", n, Some(to), None, None, None, Some(d), &json!({"from": f.state, "rule": rule, "reason": reason}))?;
+        let mut detail = json!({"from": f.state, "rule": rule, "reason": reason});
+        if let Some(p) = &f.pending {
+            // a side event never settles an intent: it names the one it leaves pending, which `release` and `advance` resume
+            detail["pending_intent"] = json!({"transition": p.transition, "attempt": p.attempt});
+        }
+        self.event(id, tr, "done", n, Some(to), None, None, None, Some(d), &detail)?;
         Ok(Outcome::Advanced { from: f.state, to: to.into(), note: reason.into() })
     }
 
@@ -750,11 +755,27 @@ impl<'a> Engine<'a> {
         f.max_attempt.get("T4").copied().unwrap_or(0) + f.max_attempt.get("T6a").copied().unwrap_or(0) + 1
     }
 
+    /// A held, abandoned or closed batch is never moved or resumed: not by `advance`, a tick, `retry` or `restack`, and not by the
+    /// resume of an intent a crash left pending (the resume's `done` would overwrite the hold). `None` = the batch may move.
+    fn parked(&mut self, id: &str, f: &Folded) -> Result<Option<Outcome>> {
+        Ok(match f.state.as_str() {
+            "held" => {
+                let pend = f.pending.as_ref().map(|p| format!(" (the {} intent of attempt {} stays pending until then)", p.transition, p.attempt)).unwrap_or_default();
+                Some(self.refuse(id, "batch.held", format!("the batch is held; `batch release` returns it to its state{pend}"))?)
+            }
+            "abandoned" | "closed" => Some(Outcome::Idle(format!("batch {id} is {}", f.state))),
+            _ => None,
+        })
+    }
+
     /// Retry a red proof (T6a, red -> proving): a full rerun, refused while a cause of the red run is open (`retry.causes-open`).
     /// A cause is addressed when the batch tip moved past the tested commit, or a person recorded the run's red as a flake or
     /// infrastructure with a reason (`note_cause`).
     pub fn retry(&mut self, id: &str) -> Result<Outcome> {
         let f = self.fold(id)?;
+        if let Some(o) = self.parked(id, &f)? {
+            return Ok(o);
+        }
         if let Some(p) = f.pending.clone() {
             return self.resume(id, &f, p);
         }
@@ -801,6 +822,9 @@ impl<'a> Engine<'a> {
     /// One step: resume a pending intent, else take the transition the state allows, or refuse naming the rule.
     pub fn advance(&mut self, id: &str) -> Result<Outcome> {
         let f = self.fold(id)?;
+        if let Some(o) = self.parked(id, &f)? {
+            return Ok(o);
+        }
         if let Some(p) = f.pending.clone() {
             return self.resume(id, &f, p);
         }
@@ -817,7 +841,6 @@ impl<'a> Engine<'a> {
             "merged" => self.go(id, &f, "T8a"),
             "deploying" => self.health(id, &f),
             "live" => self.close(id, &f),
-            "held" => self.refuse(id, "batch.held", "the batch is held; `batch release` returns it to its state".into()),
             s => Ok(Outcome::Idle(format!("batch {id} is {s}"))),
         }
     }
@@ -882,7 +905,13 @@ impl<'a> Engine<'a> {
                 let extra = if plan.tr == "T7" { json!({"resumed": "happened", "merge_new": out}) } else { json!({"resumed": "happened"}) };
                 self.finish(id, &plan, out, extra, " (resumed: the probe found the effect done)")
             }
-            Probe::NotHappened => self.execute(id, f, plan),
+            Probe::NotHappened => {
+                // the world moved while the intent waited (a hold, a reboot, a person): its guards are judged again before the effect
+                match self.plan(&plan.tr, id, f, plan.attempt)? {
+                    Planned::Refuse(rule, because) => self.refuse(id, &rule, because),
+                    Planned::Go(_) => self.execute(id, f, plan),
+                }
+            }
             Probe::Partly => {
                 // Finish forward under a new attempt; the partial result is kept, never deleted.
                 self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": "partly done; finishing forward under a new attempt"}))?;
@@ -1096,6 +1125,9 @@ impl<'a> Engine<'a> {
     /// Stack this batch again on the new tip of its base batch: a side event back to `open`; the next advance stacks (T1, a new attempt).
     pub fn restack(&mut self, id: &str) -> Result<Outcome> {
         let f = self.fold(id)?;
+        if let Some(o) = self.parked(id, &f)? {
+            return Ok(o);
+        }
         if let Some(p) = f.pending.clone() {
             return self.resume(id, &f, p);
         }

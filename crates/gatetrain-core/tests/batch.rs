@@ -2500,3 +2500,54 @@ fn ma7_a_prefix_root_needs_a_folder_and_a_non_empty_name_prefix() {
 fn minor1_a_folder_that_sits_elsewhere_at_the_action_than_at_the_plan_is_kept() {
     closes_with("tidy.unreadable", |e| { e.located_moves.insert(TGT.into(), "/build/elsewhere".into()); }, TGT);
 }
+
+// ============================================================ the failure-model rebuild (S1..S8)
+
+use gatetrain_core::batch::crash_seam;
+
+#[test]
+fn s1_a_held_batch_with_a_pending_t7_intent_merges_nothing_and_its_resume_re_runs_the_guards() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    fx.step("b1", "proven");
+    let main0 = g(&fx.repo, &["rev-parse", "main"]);
+    // the intent is written, the merge never ran
+    crash_seam::set(Some("before:T7".into()));
+    assert!(fx.adv("b1").is_err());
+    crash_seam::set(None);
+    let adm = AllowAll;
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+    e.hold("b1", "looking").unwrap();
+    for _ in 0..2 {
+        assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "batch.held"));
+    }
+    assert_eq!(g(&fx.repo, &["rev-parse", "main"]), main0, "nothing merged while held");
+    assert_eq!(fx.state("b1"), "held");
+    // released, but the batch branch moved meanwhile: the resume runs the T7 guards again and refuses instead of merging
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+    e.release("b1").unwrap();
+    std::fs::write(fx.repo.join("late.txt"), "late\n").unwrap();
+    g(&fx.repo, &["add", "--", "late.txt"]);
+    g(&fx.repo, &["commit", "-q", "-m", "late"]);
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "merge.tested-equals-merged"));
+    assert_eq!(g(&fx.repo, &["rev-parse", "main"]), main0, "the resume did not merge an untested tip");
+}
+
+#[test]
+fn s1_an_abandoned_batch_with_a_pending_intent_is_never_resumed() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1");
+    fx.write_log(GREEN);
+    fx.step("b1", "proven");
+    let main0 = g(&fx.repo, &["rev-parse", "main"]);
+    crash_seam::set(Some("before:T7".into()));
+    assert!(fx.adv("b1").is_err());
+    crash_seam::set(None);
+    let adm = AllowAll;
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+    e.abandon("b1", "given up").unwrap();
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Idle(_)));
+    assert_eq!(fx.state("b1"), "abandoned");
+    assert_eq!(g(&fx.repo, &["rev-parse", "main"]), main0);
+}
