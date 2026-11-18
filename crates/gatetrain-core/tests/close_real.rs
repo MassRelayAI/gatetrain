@@ -742,3 +742,24 @@ fn minor1_an_ignored_folder_named_like_a_glob_is_judged_by_its_own_name_not_as_a
     assert!(rep.residue.iter().any(|r| r.contains("glob character")), "{rep:?}");
     assert!(wt.join("s[r]c/x.o").exists() && wt.join("src/a.rs").exists());
 }
+
+#[test]
+fn minor6_the_main_checkout_snapshot_sees_a_dirty_submodule_when_git_ignores_submodules() {
+    let f = fx();
+    let sub = f.root.join("subsrc");
+    std::fs::create_dir_all(&sub).unwrap();
+    git(&sub, &["init", "-q", "-b", "main"]);
+    write(sub.join("s.txt"), "one\n");
+    git(&sub, &["add", "."]);
+    git(&sub, &["commit", "-q", "-m", "sub"]);
+    git(&f.main, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &fwd(&sub), "sub"]);
+    git(&f.main, &["commit", "-q", "-m", "a submodule"]);
+    git(&f.main, &["config", "diff.ignoreSubmodules", "all"]); // the temp repository only
+    write(f.main.join("sub/s.txt"), "two, not committed in the submodule\n");
+    let h = Host { name: "real".into(), tidy: to_table(&f.tidy(&fwd(&f.main))), ..Default::default() };
+    let cfg = Config { hosts: vec![h.clone()], ..Default::default() };
+    let t = build_cfg(&cfg, &h).unwrap();
+    let ops = Ops::new(&h, &LocalRunner, &t);
+    let (_, status) = ops.snapshot_main().unwrap().unwrap();
+    assert!(status.contains("sub"), "the snapshot that guards main must see a dirty submodule: {status:?}");
+}
