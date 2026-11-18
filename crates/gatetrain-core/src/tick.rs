@@ -38,14 +38,36 @@ pub struct TickLock {
     _file: File,
     /// the sidecar this holder wrote; removed when it lets go, so a later holder is never described by it
     info: Option<PathBuf>,
+    /// the heartbeat thread that refreshes the sidecar while a long effect runs; stopped before the sidecar is removed
+    beat: Option<(std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>)>,
 }
 
 impl Drop for TickLock {
     fn drop(&mut self) {
+        if let Some((stop, h)) = self.beat.take() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = h.join();
+        }
         if let Some(p) = &self.info {
             let _ = std::fs::remove_file(p);
         }
     }
+}
+
+/// How often a holder refreshes `beat_ms` in its sidecar.
+pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// The sidecar, written whole: a temp file renamed over it, so a reader never sees half of it.
+fn write_sidecar(lock: &Path, info: &Value) -> std::io::Result<()> {
+    let mut tmp = info_path(lock).into_os_string();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, info.to_string())?;
+    std::fs::rename(&tmp, info_path(lock))
 }
 
 /// Exit code of a `batch` command refused because the ledger lock is held (75 stays the busy host lock of `gatetrain hold`).
@@ -66,7 +88,7 @@ pub fn try_lock(path: &Path) -> Result<Option<TickLock>> {
     }
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(TickLock { _file: file, info: None })),
+        Ok(()) => Ok(Some(TickLock { _file: file, info: None, beat: None })),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(e)) => Err(e.into()),
     }
@@ -86,11 +108,16 @@ pub struct LockInfo {
     pub started: String,
     /// `tick`, or the `batch` command that holds it
     pub by: String,
+    /// epoch milliseconds of the holder's newest heartbeat
+    pub beat_ms: Option<i64>,
 }
 
 impl LockInfo {
-    /// Minutes since `started`, when it parses.
+    /// Minutes since the holder's newest heartbeat, else since `started`: a long deploy that still beats is not stuck.
     pub fn age_min(&self) -> Option<f64> {
+        if let Some(b) = self.beat_ms {
+            return Some((epoch_ms() - b) as f64 / 60_000.0);
+        }
         let t = logfmt::parse_iso(&self.started).ok()?;
         Some(Ts::now_utc().secs_since(&t) / 60.0)
     }
@@ -99,7 +126,7 @@ impl LockInfo {
 /// The sidecar, when it parses. It may describe an earlier holder that died without removing it: see [`holder`].
 pub fn read_info(lock: &Path) -> Option<LockInfo> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(info_path(lock)).ok()?).ok()?;
-    Some(LockInfo { pid: v["pid"].as_i64()?, started: v["started"].as_str()?.to_string(), by: v["by"].as_str().unwrap_or("?").to_string() })
+    Some(LockInfo { pid: v["pid"].as_i64()?, started: v["started"].as_str()?.to_string(), by: v["by"].as_str().unwrap_or("?").to_string(), beat_ms: v["beat_ms"].as_i64() })
 }
 
 /// The sidecar of a held lock, only when its pid is alive (a dead pid means a stale sidecar of an earlier holder).
@@ -126,6 +153,7 @@ pub fn pid_alive(pid: u32) -> Option<bool> {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
         fn GetExitCodeProcess(h: Handle, code: *mut u32) -> i32;
         fn CloseHandle(h: Handle) -> i32;
+        fn GetLastError() -> u32;
     }
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const STILL_ACTIVE: u32 = 259;
@@ -133,7 +161,9 @@ pub fn pid_alive(pid: u32) -> Option<bool> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if h.is_null() {
-            return Some(false);
+            // ERROR_ACCESS_DENIED: the process exists and belongs to someone we may not query; anything else is no such process
+            const ERROR_ACCESS_DENIED: u32 = 5;
+            return Some(GetLastError() == ERROR_ACCESS_DENIED);
         }
         let mut code = 0u32;
         let ok = GetExitCodeProcess(h, &mut code) != 0;
@@ -155,18 +185,31 @@ pub enum Taken {
 
 /// Take the ledger lock and write the sidecar (pid, start time, `by`).
 pub fn take(path: &Path, by: &str) -> Result<Taken> {
+    take_beating(path, by, HEARTBEAT)
+}
+
+/// [`take`] with the heartbeat every `every`: a thread of this process rewrites `beat_ms` until the lock is dropped.
+pub fn take_beating(path: &Path, by: &str, every: std::time::Duration) -> Result<Taken> {
     match try_lock(path)? {
         Some(mut l) => {
             // touch the lock file: its age stands in for the holder's start when no sidecar can be trusted
             let _ = l._file.set_modified(std::time::SystemTime::now());
-            // the sidecar is written whole: a temp file renamed over it, so a reader never sees half of it
-            let info = json!({"pid": std::process::id(), "started": crate::hold::now_iso(), "by": by});
-            let mut tmp = info_path(path).into_os_string();
-            tmp.push(format!(".{}.tmp", std::process::id()));
-            let tmp = PathBuf::from(tmp);
-            std::fs::write(&tmp, info.to_string())?;
-            std::fs::rename(&tmp, info_path(path))?;
+            let (pid, started, by) = (std::process::id(), crate::hold::now_iso(), by.to_string());
+            write_sidecar(path, &json!({"pid": pid, "started": started, "by": by, "beat_ms": epoch_ms()}))?;
             l.info = Some(info_path(path));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (s2, lock) = (stop.clone(), path.to_path_buf());
+            let h = std::thread::spawn(move || {
+                let mut last = std::time::Instant::now();
+                while !s2.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(20).min(every));
+                    if last.elapsed() >= every {
+                        let _ = write_sidecar(&lock, &json!({"pid": pid, "started": started, "by": by, "beat_ms": epoch_ms()}));
+                        last = std::time::Instant::now();
+                    }
+                }
+            });
+            l.beat = Some((stop, h));
             Ok(Taken::Got(l))
         }
         None => Ok(Taken::Held(holder(path))),
@@ -451,12 +494,12 @@ fn judge_pipeline_waits(e: &Engine, results: &mut [BatchResult]) {
 /// Advance one batch until it waits, is refused, fails, or rests; each transition is a row `advance` writes.
 fn drive(e: &mut Engine, r: &mut BatchResult, max_steps: usize) -> Result<()> {
     // a transition whose latest attempt failed is not started again by a tick: every tick would rerun a deploy, a merge or a launch
-    // that fails. A person's `batch advance` or `batch retry` tries again (and clears this when it gets past it).
+    // that fails. A person's `batch advance` tries again (and clears this when it gets past it).
     if let Some(last) = e.events(&r.batch)?.last().filter(|ev| ev.phase == "failed") {
         let err = last.detail.get("error").and_then(Value::as_str).unwrap_or("no error recorded");
         r.end = End::Blocked {
             rule: "tick.failed-needs-person".into(),
-            because: format!("the last attempt of {} failed ({}); a person runs `gatetrain batch advance {}` (or `batch retry`) to try again", last.transition, cap(err, 120), r.batch),
+            because: format!("the last attempt of {} failed ({}); a person runs `gatetrain batch advance {}` to try again", last.transition, cap(err, 120), r.batch),
             person: true,
         };
         return Ok(());

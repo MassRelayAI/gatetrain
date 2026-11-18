@@ -19,7 +19,13 @@ fn g(dir: &Path, args: &[&str]) -> String {
 fn now() -> String {
     "2026-11-15T10:00:00+00:00".to_string()
 }
+#[allow(dead_code)]
 static NOW: fn() -> String = now;
+
+/// The engine's clock `secs` after the fixture start.
+fn now_at(secs: i64) -> impl Fn() -> String {
+    move || chrono::DateTime::from_timestamp(1_794_736_800 + secs, 0).unwrap().format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
+}
 /// The fixture clock: every ledger row is written at 2026-11-15T10:00:00Z, and a tick runs at the same instant unless a test says.
 const NOW_US: i64 = 1_794_736_800_000_000;
 const MIN_US: i64 = 60_000_000;
@@ -64,6 +70,8 @@ struct Fx {
     lock: FakeLock,
     hosts: Config,
     crash: Option<String>,
+    /// seconds after 2026-11-15T10:00:00Z at which the engine writes its next rows
+    clock: std::cell::Cell<i64>,
 }
 
 impl Fx {
@@ -98,12 +106,12 @@ impl Fx {
         let hosts = config::load(&hosts_file).unwrap();
         let mut ledger = Ledger::open_in_memory().unwrap();
         ledger.migrate().unwrap();
-        Fx { state: t.path().join("state"), repo, ledger, cfg: BatchConfig::parse(&toml).unwrap(), lock: FakeLock::default(), hosts, crash: None, t }
+        Fx { state: t.path().join("state"), repo, ledger, cfg: BatchConfig::parse(&toml).unwrap(), lock: FakeLock::default(), hosts, crash: None, clock: std::cell::Cell::new(0), t }
     }
 
     fn with<R>(&mut self, f: impl FnOnce(&mut Engine) -> R) -> R {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: self.crash.clone() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: self.crash.clone() };
         f(&mut e)
     }
 
@@ -161,7 +169,7 @@ impl Fx {
     fn tick_full(&mut self, max_steps: usize, now_us: i64, adm: Box<dyn Admission>) -> TickReport {
         let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
         let hosts = self.hosts.clone();
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: adm.as_ref(), now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: adm.as_ref(), now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
         let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: self.cfg.storm_reds, now_us, max_steps, max_wait_minutes: self.cfg.max_wait_minutes, max_run_minutes: self.cfg.max_run_minutes };
         tick::tick(&mut e, &o).unwrap()
     }
@@ -612,4 +620,92 @@ fn minor7_a_held_batch_is_reported_with_its_reason_and_exit_0() {
     let r = fx.tick();
     assert_eq!(r.lines[0], "b9: held (waiting for the vendor)", "{:?}", r.lines);
     assert_eq!(r.exit_code(), 0);
+}
+
+// ---------------------------------------------------------------- round-3 review fixes
+
+fn three_ticks(fx: &mut Fx) -> Vec<u8> {
+    (0..3).map(|_| fx.tick().exit_code()).collect()
+}
+
+#[test]
+fn rev3_b1_a_target_that_cannot_be_spawned_fails_once_and_is_not_rerun() {
+    let zz = "[deploy.zz]\ncommand = [\"gatetrain-no-such-binary-rev3\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
+    let mut fx = Fx::new(zz);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    assert_eq!(three_ticks(&mut fx), vec![1, 1, 1]);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1, "staging deployed once");
+    assert_eq!(postmerge_runs(&fx), 1, "postmerge ran once");
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: merged, BLOCKED tick.failed-needs-person: the last attempt of T8a failed ("), "{:?}", r.lines);
+}
+
+#[test]
+fn rev3_b1_a_marker_that_cannot_be_written_fails_once_and_is_not_rerun() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    // a folder where the marker file must go: the write fails after every target deployed
+    std::fs::create_dir_all(fx.state.join("deploys").join("b1-T8a-1.json")).unwrap();
+    assert_eq!(three_ticks(&mut fx), vec![1, 1, 1]);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1);
+    assert_eq!(postmerge_runs(&fx), 1);
+}
+
+#[test]
+fn rev3_minor1_the_wait_age_runs_from_the_row_that_entered_the_state() {
+    let mut fx = Fx::new("[tick]\nmax_run_minutes = 120\n");
+    fx.open("b1", "lane1");
+    for want in ["stacked", "settled", "preflighted"] {
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+    }
+    fx.clock.set(3 * 3600);
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "proving"));
+    let r = fx.tick_at(NOW_US + (3 * 60 + 1) * MIN_US);
+    assert_eq!(r.lines[0], "b1: proving, waits: run b1-p1 is still proving", "opened 3 h ago, proving for 1 min: {:?}", r.lines);
+    assert_eq!(r.exit_code(), 0);
+}
+
+#[test]
+fn rev3_minor1_a_release_starts_the_wait_again() {
+    let sick = "[deploy.sick]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"exit 1\"]\ntier = \"staging\"\n";
+    let mut fx = Fx::new(sick);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    fx.tick();
+    fx.clock.set(100 * 60);
+    fx.with(|e| e.hold("b1", "looking").unwrap());
+    fx.clock.set(110 * 60);
+    fx.with(|e| e.release("b1").unwrap());
+    let r = fx.tick_at(NOW_US + 130 * MIN_US);
+    assert!(r.lines[0].starts_with("b1: deploying, waits: target sick does not report "), "released 20 min ago: {:?}", r.lines);
+    assert_eq!(r.exit_code(), 0);
+}
+
+#[test]
+fn rev3_minor2_a_deploy_over_its_timeout_ends_as_failed() {
+    let slow = "[deploy.slow]\ncommand = [\"sh\", \"-c\", \"sleep 30\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\ntimeout_min = 0.02\n";
+    let mut fx = Fx::new(slow);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let t0 = std::time::Instant::now();
+    let r = fx.tick();
+    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the deploy was ended at its timeout, not waited for");
+    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, FAILED T8a: deploy slow timed out after 0.02 min"), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn rev3_minor2_the_holder_refreshes_its_heartbeat() {
+    let t = tempfile::tempdir().unwrap();
+    let lp = t.path().join("g.db.tick.lock");
+    let _held = match tick::take_beating(&lp, "tick", std::time::Duration::from_millis(50)).unwrap() {
+        tick::Taken::Got(l) => l,
+        tick::Taken::Held(_) => panic!("free"),
+    };
+    let b0 = tick::read_info(&lp).unwrap().beat_ms.unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let b1 = tick::read_info(&lp).unwrap().beat_ms.unwrap();
+    assert!(b1 > b0, "{b0} -> {b1}");
 }

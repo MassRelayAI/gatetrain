@@ -480,7 +480,7 @@ log that does not verify stops every automatic transition (`floor.log-append-onl
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
 
 A tick never starts a transition whose latest attempt failed: the batch is `BLOCKED tick.failed-needs-person` (exit 1) until a person's
-`batch advance` or `batch retry` gets past it, so a failing deploy, merge or launch runs once, not once per tick. A wait has an age, read
+`batch advance` gets past it, so a failing deploy, merge or launch runs once, not once per tick. A wait has an age, read
 from the ledger row that put the batch in its state: past `[tick] max_run_minutes` (default 360) for a proving or pre-flight run, or
 `[tick] max_wait_minutes` (default 120) for anything else (a health check that never passes, a host that keeps refusing), the batch is
 `BLOCKED tick.wait-too-long` with its age (exit 1). A host with no close environment is `BLOCKED close.no-environment` with the

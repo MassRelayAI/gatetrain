@@ -83,7 +83,7 @@ enum Cmd {
         hosts: Option<PathBuf>,
         #[arg(long, global = true, requires = "hosts")]
         host: Option<String>,
-        /// Wait up to this many seconds for a running tick to let go of the ledger lock (default 0: refuse at once, exit 75)
+        /// Wait up to this many seconds for a running tick to let go of the ledger lock (default 0: refuse at once, exit 73)
         #[arg(long, global = true, default_value_t = 0)]
         wait: u64,
         #[command(subcommand)]

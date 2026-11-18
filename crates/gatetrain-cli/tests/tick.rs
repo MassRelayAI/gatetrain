@@ -291,3 +291,25 @@ fn free_soon(lp: &Path) -> bool {
     }
     false
 }
+
+// ---------------------------------------------------------------- round-3 review fixes
+
+#[test]
+fn rev3_minor2_stuck_is_judged_by_the_heartbeat_not_the_start() {
+    let fx = Fx::new(true);
+    let lp = lock_of(&fx);
+    let held = gatetrain_core::tick::try_lock(&lp).unwrap();
+    assert!(held.is_some());
+    let me = std::process::id();
+    let beat = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    std::fs::write(gatetrain_core::tick::info_path(&lp), format!("{{\"pid\": {me}, \"started\": \"2026-01-01T00:00:00Z\", \"by\": \"tick\", \"beat_ms\": {beat}}}")).unwrap();
+    let o = fx.tick(&[]);
+    assert_eq!(o.status.code(), Some(0), "started long ago but beating now: a long deploy, not a stuck holder: {}", out(&o));
+}
+
+#[test]
+fn rev3_minor4_the_wait_help_names_exit_73() {
+    let o = gt(&["batch", "--help"]);
+    let t = out(&o);
+    assert!(t.contains("exit 73") && !t.contains("exit 75"), "{t}");
+}
