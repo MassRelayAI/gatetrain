@@ -83,6 +83,9 @@ enum Cmd {
         hosts: Option<PathBuf>,
         #[arg(long, global = true, requires = "hosts")]
         host: Option<String>,
+        /// Wait up to this many seconds for a running tick to let go of the ledger lock (default 0: refuse at once, exit 75)
+        #[arg(long, global = true, default_value_t = 0)]
+        wait: u64,
         #[command(subcommand)]
         cmd: BatchCmd,
     },
@@ -516,7 +519,24 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Memory { cmd: MemoryCmd::Admit { db, hosts, host, steps } } => holdcmd::memory_admit(&db, &hosts, &host, &steps),
         Cmd::Running { lock, hosts, host } => holdcmd::status(&lock, &hosts, &host),
         Cmd::Batch { config, cmd: BatchCmd::Precheck { base, repo, par, self_test, lanes }, .. } => Ok(precheck_cmd(&config, base, &repo, par, self_test, &lanes)),
-        Cmd::Batch { db, config, lock, hosts, host, cmd } => run_batch(&db, &config, lock, hosts.zip(host), cmd),
+        Cmd::Batch { db, config, lock, hosts, host, wait, cmd } => {
+            // every command that writes a batch takes the tick's ledger lock, so a person and a tick never write at once
+            let _held = if matches!(cmd, BatchCmd::Status { .. }) {
+                None
+            } else {
+                match gatetrain_core::tick::take_waiting(&gatetrain_core::tick::lock_path(&db), "batch", wait)? {
+                    gatetrain_core::tick::Taken::Got(l) => Some(l),
+                    gatetrain_core::tick::Taken::Held(i) => {
+                        let who = i.map(|i| format!("pid {}, started {}", i.pid, i.started)).unwrap_or_else(|| "pid unknown, started unknown".into());
+                        println!("REFUSED
+  rule    ledger.tick-running
+  because a tick is running ({who}); try again after it, or pass --wait <secs>");
+                        return Ok(ExitCode::from(75));
+                    }
+                }
+            };
+            run_batch(&db, &config, lock, hosts.zip(host), cmd)
+        }
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
         Cmd::Chain(a) => Ok(chaincmd::run(a)),

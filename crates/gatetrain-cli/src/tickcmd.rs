@@ -28,6 +28,9 @@ pub struct TickArgs {
     /// The host whose lock and admission the state machine uses, as `batch --hosts --host` (default: `[proof] host` of gatetrain.toml)
     #[arg(long)]
     host: Option<String>,
+    /// The host lock file (default: `lock_file` of --host in --hosts, else <db dir>/.gatetrain/host.lock), as for `batch`
+    #[arg(long)]
+    lock: Option<PathBuf>,
     /// Print the report as JSON
     #[arg(long)]
     json: bool,
@@ -62,11 +65,6 @@ fn config_error(msg: String) -> Result<ExitCode> {
 }
 
 pub fn run(a: TickArgs) -> Result<ExitCode> {
-    // the ledger lock first: a second tick does nothing at all
-    let Some(_held) = tick::try_lock(&tick::lock_path(&a.db))? else {
-        println!("tick: another tick holds the lock");
-        return Ok(ExitCode::SUCCESS);
-    };
     let cfg = if a.config.exists() {
         match BatchConfig::load(&a.config) {
             Ok(c) => c,
@@ -79,12 +77,29 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
         Ok(h) => h,
         Err(e) => return config_error(e.to_string()),
     };
-    let engine_host = a.host.clone().or_else(|| cfg.proof_host.clone());
-    if let Some(n) = &engine_host {
-        if hosts.host(n).is_none() {
-            return config_error(format!("no host {n} in {}", a.hosts.display()));
-        }
+    let Some(engine_host) = a.host.clone().or_else(|| cfg.proof_host.clone()) else {
+        return config_error("the tick needs the host whose lock and admission it uses: --host NAME, or [proof] host in gatetrain.toml".into());
+    };
+    if hosts.host(&engine_host).is_none() {
+        return config_error(format!("no host {engine_host} in {}", a.hosts.display()));
     }
+    // the ledger lock before anything is written: a second tick (or a `batch` command holding it) means this tick does nothing
+    let lock = tick::lock_path(&a.db);
+    let _held = match tick::take(&lock, "tick")? {
+        tick::Taken::Got(l) => l,
+        tick::Taken::Held(info) => {
+            let Some(i) = info else {
+                println!("tick: another tick holds the lock");
+                return Ok(ExitCode::SUCCESS);
+            };
+            if i.age_min().is_some_and(|m| m > cfg.stuck_minutes) {
+                println!("tick: the ledger lock is held by pid {} ({}) since {}, longer than [tick] stuck_minutes = {}; look at that process", i.pid, i.by, i.started, cfg.stuck_minutes);
+                return Ok(ExitCode::from(1));
+            }
+            println!("tick: another tick holds the lock (pid {}, started {})", i.pid, i.started);
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
     if !a.db.exists() {
         return config_error(format!("no ledger at {} (run `gatetrain ledger migrate`)", a.db.display()));
     }
@@ -92,13 +107,13 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
     if let Err(e) = ledger.require_current() {
         return config_error(format!("{e}"));
     }
-    let (real, adm, state_dir) = seams::engine_seams(&a.db, &cfg, None, engine_host.map(|n| (a.hosts.clone(), n)))?;
+    let (real, adm, state_dir) = seams::engine_seams(&a.db, &cfg, a.lock.clone(), Some((a.hosts.clone(), engine_host)))?;
     let actor = std::env::var("GATETRAIN_ACTOR").unwrap_or_else(|_| "tick".into());
     let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor, crash_after_effect: None };
     let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
     let seams = RealHosts { hosts_path: a.hosts.to_string_lossy().into_owned(), needs: hosts.needs.clone() };
     let now_us = gatetrain_core::logfmt::Ts::now_utc().instant_us();
-    let opts = TickOpts { hosts: &hosts, seams: &seams, rules: &rules, storm_reds: cfg.storm_reds, now_us };
+    let opts = TickOpts { hosts: &hosts, seams: &seams, rules: &rules, storm_reds: cfg.storm_reds, now_us, max_steps: tick::MAX_STEPS };
     let report = tick::tick(&mut e, &opts)?;
     if a.json {
         println!("{}", report.to_json());

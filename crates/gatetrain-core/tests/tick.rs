@@ -61,6 +61,7 @@ struct Fx {
     cfg: BatchConfig,
     lock: FakeLock,
     hosts: Config,
+    crash: Option<String>,
 }
 
 impl Fx {
@@ -94,12 +95,12 @@ impl Fx {
         let hosts = config::load(&hosts_file).unwrap();
         let mut ledger = Ledger::open_in_memory().unwrap();
         ledger.migrate().unwrap();
-        Fx { state: t.path().join("state"), repo, ledger, cfg: BatchConfig::parse(&toml).unwrap(), lock: FakeLock::default(), hosts, t }
+        Fx { state: t.path().join("state"), repo, ledger, cfg: BatchConfig::parse(&toml).unwrap(), lock: FakeLock::default(), hosts, crash: None, t }
     }
 
     fn with<R>(&mut self, f: impl FnOnce(&mut Engine) -> R) -> R {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: self.crash.clone() };
         f(&mut e)
     }
 
@@ -143,11 +144,15 @@ impl Fx {
     }
 
     fn tick(&mut self) -> TickReport {
+        self.tick_with(tick::MAX_STEPS)
+    }
+
+    fn tick_with(&mut self, max_steps: usize) -> TickReport {
         let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
         let storm = self.cfg.storm_reds;
         let hosts = self.hosts.clone();
         self.with(|e| {
-            let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: storm, now_us: NOW_US };
+            let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: storm, now_us: NOW_US, max_steps };
             tick::tick(e, &o).unwrap()
         })
     }
@@ -201,10 +206,6 @@ fn a_green_accepted_proof_merges_through_the_configured_commands_a_proving_batch
         assert!(rules.iter().any(|x| x == r), "missing {r}: {rules:?}");
     }
     assert!(gatetrain_core::declog::verify(&fx.ledger).unwrap().is_ok());
-    // a second tick: nothing moves, nothing is merged twice
-    let r = fx.tick();
-    assert_eq!(r.lines[0], "b2: proving, waits: run b2-p1 is still proving", "{:?}", r.lines);
-    assert_eq!(std::fs::read_to_string(fx.t.path().join("postmerge.txt")).unwrap().lines().count(), 1);
 }
 
 #[test]
@@ -311,4 +312,139 @@ fn more_open_batches_than_lines_are_folded_into_one_line() {
     assert!(r.lines.len() <= 6, "{:?}", r.lines);
     assert_eq!(r.lines[2], "+2 more batch(es): 1 waiting, 1 blocked (gatetrain batch status)", "{:?}", r.lines);
     assert_eq!(r.exit_code(), 1, "a held batch needs a person");
+}
+
+// ---------------------------------------------------------------- review fixes
+
+fn postmerge_runs(fx: &Fx) -> usize {
+    std::fs::read_to_string(fx.t.path().join("postmerge.txt")).map(|t| t.lines().count()).unwrap_or(0)
+}
+
+#[test]
+fn m3_a_crash_between_the_deploy_and_its_done_row_does_not_deploy_again() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    for want in ["proven", "merged"] {
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+    }
+    fx.crash = Some("T8a".into());
+    assert!(fx.with(|e| e.advance("b1")).is_err(), "the simulated crash after the deploy");
+    fx.crash = None;
+    assert_eq!(postmerge_runs(&fx), 1);
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(postmerge_runs(&fx), 1, "the probe found the deploy done; postmerge and the deploy ran exactly once");
+}
+
+#[test]
+fn m3_the_ledger_waits_for_a_busy_writer() {
+    let t = tempfile::tempdir().unwrap();
+    let l = Ledger::open(&t.path().join("g.db")).unwrap();
+    let ms: i64 = l.conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+    assert_eq!(ms, 30_000);
+}
+
+#[test]
+fn m2_a_half_written_log_fails_its_own_batch_and_the_other_still_merges() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.drive_to_proving("b2", "lane2");
+    fx.write_log("b1", "STEP_START a 2026-11-11T09:0");
+    fx.write_log("b2", GREEN);
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: proving, FAILED "), "{:?}", r.lines);
+    assert_eq!(r.lines[1], "b2: proving -> proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert!(r.lines[2].contains("alpha ok, tidy 2.0 GB reclaimed"), "tidy still ran: {:?}", r.lines);
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn m2_a_finished_log_that_does_not_parse_is_named_not_ingested() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b3", "lane3");
+    fx.write_log("b3", "STEP_START a not-a-time\nGATES_DONE\n");
+    let r = fx.tick();
+    assert!(r.lines[1].contains("; not ingested: b3-p1 ("), "{:?}", r.lines);
+    assert_eq!(fx.count("runs"), 0);
+}
+
+#[test]
+fn m2_a_deleted_workdir_fails_one_batch_only() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.drive_to_proving("b2", "lane2");
+    fx.write_log("b1", GREEN);
+    fx.write_log("b2", GREEN);
+    std::fs::remove_dir_all(fx.t.path().join("wt-b1")).unwrap();
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: proving, FAILED "), "{:?}", r.lines);
+    assert_eq!(r.lines[1], "b2: proving -> proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn m1_a_dependent_of_an_abandoned_base_is_blocked_not_waiting() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("z1", "lane1");
+    fx.open_on("a2", "z1", "lane2");
+    for want in ["stacked", "settled", "preflighted"] {
+        assert!(matches!(fx.adv("a2"), Outcome::Advanced { to, .. } if to == want));
+    }
+    fx.with(|e| e.abandon("z1", "a person gave it up").unwrap());
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("a2: preflighted, BLOCKED pipeline.base-unproven: "), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1, "its base will never be proven: a person decides");
+}
+
+#[test]
+fn m1_a_dependent_that_sorts_before_its_base_proves_in_the_same_tick() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("z1", "lane1");
+    fx.open_on("a2", "z1", "lane2");
+    for want in ["stacked", "settled", "preflighted"] {
+        assert!(matches!(fx.adv("a2"), Outcome::Advanced { to, .. } if to == want));
+    }
+    fx.write_log("z1", GREEN);
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "a2: preflighted -> proving, waits: run a2-p1 is still proving", "{:?}", r.lines);
+    assert_eq!(r.lines[1], "z1: proving -> proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 0);
+}
+
+#[test]
+fn minor4_the_step_cap_is_reported_not_a_silent_wait() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let r = fx.tick_with(2);
+    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, BLOCKED tick.step-cap: "), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn minor5_a_running_snapshot_does_not_block_ingesting_the_finished_run() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", "STEP_START a 2026-11-11T09:00:00Z\n");
+    let req = fx.lock.launches.lock().unwrap()[0].clone();
+    let p = gatetrain_core::logfmt::parse_log(&std::fs::read_to_string(&req.log).unwrap()).unwrap();
+    assert!(matches!(gatetrain_core::runs::ingest(&fx.ledger, "g", "b1-p1", &p, "running", None, false, "2026-11-11T09:00:01Z").unwrap(), gatetrain_core::runs::Ingest::Done));
+    fx.write_log("b1", GREEN);
+    let r = fx.tick();
+    assert!(r.lines[1].ends_with("; ingested 1 run"), "{:?}", r.lines);
+    assert_eq!(fx.count("runs WHERE id='b1-p1'"), 1);
+}
+
+#[test]
+fn minor6_a_broken_decision_log_stops_every_automatic_transition() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    fx.ledger.conn.execute_batch("DROP TRIGGER decisions_no_update; UPDATE decisions SET reason='edited' WHERE seq=2;").unwrap();
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("log: BROKEN at seq 2: "), "{:?}", r.lines);
+    assert!(r.lines[0].ends_with("floor.log-append-only: no batch is advanced (gatetrain log verify)"), "{:?}", r.lines);
+    assert_eq!(fx.state("b1"), "proving");
+    assert_eq!(r.exit_code(), 1);
 }

@@ -66,7 +66,7 @@ impl Fx {
     }
     fn tick(&self, extra: &[&str]) -> Output {
         let (c, h) = (self.cfg(), self.hosts());
-        let mut a = vec!["tick", "--db", &self.db, "--config", &c, "--hosts", &h];
+        let mut a = vec!["tick", "--db", &self.db, "--config", &c, "--hosts", &h, "--host", "alpha"];
         a.extend(extra);
         gt(&a)
     }
@@ -148,4 +148,69 @@ fn json_carries_the_lines_and_the_exit_code() {
     assert_eq!(v["lines"].as_array().unwrap().len(), 3);
     assert_eq!(v["batches"][0]["batch"], "b1");
     assert_eq!(v["batches"][0]["end"], "blocked");
+}
+
+// ---------------------------------------------------------------- review fixes
+
+fn lock_of(fx: &Fx) -> PathBuf {
+    gatetrain_core::tick::lock_path(Path::new(&fx.db))
+}
+
+#[test]
+fn b1_a_writing_batch_command_refuses_while_a_tick_holds_the_ledger_lock() {
+    let fx = Fx::new(true);
+    let before = fx.rows();
+    let held = match gatetrain_core::tick::take(&lock_of(&fx), "tick").unwrap() {
+        gatetrain_core::tick::Taken::Got(l) => l,
+        gatetrain_core::tick::Taken::Held(_) => panic!("the lock was free"),
+    };
+    let me = std::process::id().to_string();
+    for args in [
+        vec!["batch", "advance", "b1"],
+        vec!["batch", "hold", "b1", "--reason", "x"],
+        vec!["batch", "abandon", "b1", "--reason", "x"],
+        vec!["batch", "advance", "b1", "--wait", "1"],
+    ] {
+        let mut a = args.clone();
+        let c = fx.cfg();
+        a.extend(["--db", &fx.db, "--config", &c]);
+        let o = gt(&a);
+        assert_eq!(o.status.code(), Some(75), "{args:?}: {}", out(&o));
+        assert!(out(&o).contains("a tick is running (pid ") && out(&o).contains(&me), "{}", out(&o));
+    }
+    assert_eq!(fx.rows(), before, "nothing was written");
+    assert!(gt(&["batch", "status", "--db", &fx.db]).status.success(), "a read needs no lock");
+    drop(held);
+    let c = fx.cfg();
+    assert_eq!(gt(&["batch", "advance", "b1", "--db", &fx.db, "--config", &c]).status.code(), Some(0), "free again");
+}
+
+#[test]
+fn minor1_a_tick_finding_the_lock_held_too_long_says_so_and_exits_1() {
+    let fx = Fx::new(true);
+    let lp = lock_of(&fx);
+    let held = gatetrain_core::tick::try_lock(&lp).unwrap();
+    assert!(held.is_some());
+    std::fs::write(gatetrain_core::tick::info_path(&lp), "{\"pid\": 4242, \"started\": \"2026-01-01T00:00:00Z\", \"by\": \"tick\"}").unwrap();
+    let o = fx.tick(&[]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    let t = String::from_utf8_lossy(&o.stdout).to_string();
+    assert!(t.starts_with("tick: the ledger lock is held by pid 4242 (tick) since 2026-01-01T00:00:00Z"), "{t}");
+    assert!(t.contains("[tick] stuck_minutes = 60"), "{t}");
+    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[tick]\nstuck_minutes = 999999999\n").unwrap();
+    let o = fx.tick(&[]);
+    assert_eq!(o.status.code(), Some(0), "{}", out(&o));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "tick: another tick holds the lock (pid 4242, started 2026-01-01T00:00:00Z)");
+}
+
+#[test]
+fn minor2_hosts_without_a_host_or_a_proof_host_is_exit_2_and_lock_is_accepted() {
+    let fx = Fx::new(true);
+    let (c, h) = (fx.cfg(), fx.hosts());
+    let o = gt(&["tick", "--db", &fx.db, "--config", &c, "--hosts", &h]);
+    assert_eq!(o.status.code(), Some(2), "{}", out(&o));
+    assert!(out(&o).contains("--host"), "{}", out(&o));
+    let lock = fwd(&fx.root.join("other.lock"));
+    let o = fx.tick(&["--lock", &lock]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
 }

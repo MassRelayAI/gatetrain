@@ -467,8 +467,15 @@ batch merges only because `advance` found its proof accepted by every guard; the
 */5 * * * * cd /srv/control && gatetrain tick --db gatetrain.db --config gatetrain.toml --hosts hosts.toml --host builder-1 >> tick.log 2>&1
 ```
 
-`--host` names the host whose lock and admission the state machine uses (as `batch --hosts --host`; default `[proof] host`).
-`--json` prints the same report as one JSON object.
+`--host` names the host whose lock and admission the state machine uses (as `batch --hosts --host`; default `[proof] host`; with
+neither the tick exits 2), and `--lock` overrides its host lock file as for `batch`. `--json` prints the same report as one JSON object.
+
+The ledger lock is shared with people: every `batch` command that writes (`new`, `advance`, `hold`, `release`, `restack`, `retry`,
+`note-cause`, `close`, `abandon`) takes it too, and while a tick holds it refuses with `a tick is running (pid, started)` and exit 75,
+or waits with `--wait <secs>`. The holder writes `<db>.tick.lock.info` (pid, start time); a tick that finds the lock held longer than
+`[tick] stuck_minutes` (default 60) says so and exits 1. Before it advances anything the tick verifies the decision log; a log that does
+not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named `not ingested` and
+one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
 
 ## The basic workflow
 
@@ -691,6 +698,7 @@ Next, in the order of [engine v2](docs/design/engine-v2.md) (a design; nothing b
 - [ ] E6, E7, E8: `probe` (measure a disk), the sampler, `advise` (read-only advice from the ledger)
 - [ ] E9: multi-host: a detached holder, `reach = "wsl"`, the fast tier off the proof host
 - [ ] T9 and the disk floor
+- [ ] Decision-log anchors: the tick verifies the whole log every pass (`floor.log-append-only`); the tail check from the last anchor and `verify --anchors` wait for the anchors themselves
 
 Not scheduled: `gatetrain stack` with base detection and artefact repair, `gatetrain plan` (owned files, hidden coupling, critical path), ledger views for cost per batch and an agent scorecard, cloud adapters for the `budget` and `speed` profiles.
 

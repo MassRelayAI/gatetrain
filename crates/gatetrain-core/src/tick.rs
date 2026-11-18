@@ -36,6 +36,16 @@ const RETRY_AFTER_A_MOVE: &[&str] = &["pipeline.base-unproven", "pipeline.base-n
 /// The file holds nothing: on Windows a locked file cannot be read by other handles.
 pub struct TickLock {
     _file: File,
+    /// the sidecar this holder wrote; removed when it lets go, so a later holder is never described by it
+    info: Option<PathBuf>,
+}
+
+impl Drop for TickLock {
+    fn drop(&mut self) {
+        if let Some(p) = &self.info {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 pub fn lock_path(db: &Path) -> PathBuf {
@@ -51,9 +61,69 @@ pub fn try_lock(path: &Path) -> Result<Option<TickLock>> {
     }
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(TickLock { _file: file })),
+        Ok(()) => Ok(Some(TickLock { _file: file, info: None })),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// `<lock>.info`: who holds the ledger lock and since when, beside the lock file (a locked file cannot be read on Windows).
+pub fn info_path(lock: &Path) -> PathBuf {
+    let mut p = lock.as_os_str().to_owned();
+    p.push(".info");
+    PathBuf::from(p)
+}
+
+/// What the sidecar says about the holder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LockInfo {
+    pub pid: i64,
+    pub started: String,
+    /// `tick`, or the `batch` command that holds it
+    pub by: String,
+}
+
+impl LockInfo {
+    /// Minutes since `started`, when it parses.
+    pub fn age_min(&self) -> Option<f64> {
+        let t = logfmt::parse_iso(&self.started).ok()?;
+        Some(Ts::now_utc().secs_since(&t) / 60.0)
+    }
+}
+
+pub fn read_info(lock: &Path) -> Option<LockInfo> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(info_path(lock)).ok()?).ok()?;
+    Some(LockInfo { pid: v["pid"].as_i64()?, started: v["started"].as_str()?.to_string(), by: v["by"].as_str().unwrap_or("?").to_string() })
+}
+
+pub enum Taken {
+    Got(TickLock),
+    /// another process holds it; what its sidecar says, if anything
+    Held(Option<LockInfo>),
+}
+
+/// Take the ledger lock and write the sidecar (pid, start time, `by`).
+pub fn take(path: &Path, by: &str) -> Result<Taken> {
+    match try_lock(path)? {
+        Some(mut l) => {
+            let info = json!({"pid": std::process::id(), "started": crate::hold::now_iso(), "by": by});
+            std::fs::write(info_path(path), info.to_string())?;
+            l.info = Some(info_path(path));
+            Ok(Taken::Got(l))
+        }
+        None => Ok(Taken::Held(read_info(path))),
+    }
+}
+
+/// [`take`], retrying for up to `wait_secs` while it is held.
+pub fn take_waiting(path: &Path, by: &str, wait_secs: u64) -> Result<Taken> {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    loop {
+        match take(path, by)? {
+            Taken::Held(i) if std::time::Instant::now() >= until => return Ok(Taken::Held(i)),
+            Taken::Held(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            got => return Ok(got),
+        }
     }
 }
 
@@ -87,6 +157,7 @@ pub struct TickOpts<'a> {
     /// `[chain] storm_reds`
     pub storm_reds: usize,
     pub now_us: i64,
+    pub max_steps: usize,
 }
 
 // ---------------------------------------------------------------- the report
@@ -156,14 +227,18 @@ pub struct TickReport {
     pub batches: Vec<BatchResult>,
     pub hosts: Vec<HostResult>,
     pub ingested: Vec<String>,
+    /// finished logs that could not be read into the ledger: (run, why)
+    pub not_ingested: Vec<(String, String)>,
     pub advice: Option<String>,
     pub storms: Vec<Storm>,
+    /// `floor.log-append-only`: the decision log does not verify, so no batch was advanced
+    pub log_broken: Option<String>,
 }
 
 impl TickReport {
-    /// 0 normally, 1 when a batch is blocked by a rule that needs a person (or a transition failed).
+    /// 0 normally, 1 when a batch needs a person (a blocking rule, a failed transition, the step cap) or the decision log is broken.
     pub fn exit_code(&self) -> u8 {
-        u8::from(self.batches.iter().any(BatchResult::needs_person))
+        u8::from(self.log_broken.is_some() || self.batches.iter().any(BatchResult::needs_person))
     }
 
     pub fn to_json(&self) -> String {
@@ -184,7 +259,8 @@ impl TickReport {
             .map(|h| json!({"host": h.host, "doctor": h.doctor.as_ref().map(|d| d.iter().map(|r| json!({"check": r.check, "status": r.status, "message": r.message})).collect::<Vec<_>>()), "tidy": h.tidy}))
             .collect();
         let storms: Vec<Value> = self.storms.iter().map(|s| json!({"run": s.run, "reds": s.reds, "evidence": s.evidence})).collect();
-        json!({"lines": self.lines, "batches": batches, "hosts": hosts, "ingested": self.ingested, "advice": self.advice, "storms": storms, "exit": self.exit_code()}).to_string()
+        let not: Vec<Value> = self.not_ingested.iter().map(|(r, w)| json!({"run": r, "why": w})).collect();
+        json!({"lines": self.lines, "batches": batches, "hosts": hosts, "ingested": self.ingested, "not_ingested": not, "advice": self.advice, "storms": storms, "log_broken": self.log_broken, "exit": self.exit_code()}).to_string()
     }
 }
 
@@ -193,40 +269,61 @@ impl TickReport {
 pub fn tick(e: &mut Engine, o: &TickOpts) -> Result<TickReport> {
     let mut rep = TickReport::default();
     let hosts: Vec<&Host> = o.hosts.hosts.iter().filter(|h| h.enabled).collect();
+    // 0. the decision log verifies, or no automatic transition happens (floor.log-append-only)
+    if let Err(b) = crate::declog::verify(&*e.ledger)? {
+        rep.log_broken = Some(format!("BROKEN at seq {}: {}", b.seq, b.reason));
+    }
     // 1. doctor per host
     for h in &hosts {
         rep.hosts.push(HostResult { host: h.name.clone(), reach: h.reach.clone(), doctor: o.seams.doctor(h), tidy: String::new() });
     }
-    // 2. ingest the finished logs (and their samples) of every batch's runs
+    // 2. ingest the finished logs (and their samples) of every batch's runs; one bad log is named, never fatal
     let ids = e.batch_ids()?;
     for id in &ids {
-        for (run, log) in runs_of(&e.events(id)?) {
-            if ingest_finished(e, &run, &log)? {
-                rep.ingested.push(run);
+        let Ok(evs) = e.events(id) else { continue };
+        for (run, log) in runs_of(&evs) {
+            match ingest_finished(e, &run, &log) {
+                Ok(true) => rep.ingested.push(run),
+                Ok(false) => {}
+                Err(why) => rep.not_ingested.push((run, why)),
             }
         }
     }
-    // 3. advance every open batch through the state machine's own `advance`
-    let open: Vec<String> = ids.into_iter().filter(|id| e.fold(id).map(|f| !matches!(f.state.as_str(), "closed" | "abandoned")).unwrap_or(false)).collect();
+    // 3. advance every open batch through the state machine's own `advance`; one broken batch fails alone
     let mut results: Vec<BatchResult> = Vec::new();
-    for id in &open {
-        let start = e.fold(id)?.state;
-        results.push(BatchResult { batch: id.clone(), states: vec![start], end: End::Rests(String::new()) });
-    }
-    for pass in 0..MAX_PASSES {
-        let mut any_moved = false;
-        for r in results.iter_mut() {
-            let retry = matches!(&r.end, End::Blocked { rule, .. } if RETRY_AFTER_A_MOVE.contains(&rule.as_str()));
-            if pass > 0 && !retry {
-                continue;
+    let mut unreadable: Vec<String> = Vec::new();
+    for id in &ids {
+        match e.fold(id) {
+            Ok(f) if matches!(f.state.as_str(), "closed" | "abandoned") => {}
+            Ok(f) => results.push(BatchResult { batch: id.clone(), states: vec![f.state], end: End::Rests(String::new()) }),
+            Err(err) => {
+                unreadable.push(id.clone());
+                results.push(BatchResult { batch: id.clone(), states: vec!["?".into()], end: End::Failed(format!("the batch could not be read: {err}")) });
             }
-            let before = r.states.len();
-            drive(e, r)?;
-            any_moved |= r.states.len() > before;
         }
-        if !any_moved {
-            break;
+    }
+    if rep.log_broken.is_none() {
+        for pass in 0..MAX_PASSES {
+            let mut any_moved = false;
+            for r in results.iter_mut() {
+                if unreadable.contains(&r.batch) {
+                    continue;
+                }
+                let retry = matches!(&r.end, End::Blocked { rule, .. } if RETRY_AFTER_A_MOVE.contains(&rule.as_str()));
+                if pass > 0 && !retry {
+                    continue;
+                }
+                let before = r.states.len();
+                if let Err(err) = drive(e, r, o.max_steps) {
+                    r.end = End::Failed(err.to_string());
+                }
+                any_moved |= r.states.len() > before;
+            }
+            if !any_moved {
+                break;
+            }
         }
+        judge_pipeline_waits(e, &mut results);
     }
     // 4. tidy --auto per host
     for (h, r) in hosts.iter().zip(rep.hosts.iter_mut()) {
@@ -234,7 +331,7 @@ pub fn tick(e: &mut Engine, o: &TickOpts) -> Result<TickReport> {
     }
     // 5. at most one advice line (read-only: nothing is recorded, nothing applied)
     for h in &hosts {
-        let inputs = advise::gather(&*e.ledger, &h.name, Some(h), 3, o.now_us, Vec::new(), Vec::new(), String::new())?;
+        let Ok(inputs) = advise::gather(&*e.ledger, &h.name, Some(h), 3, o.now_us, Vec::new(), Vec::new(), String::new()) else { continue };
         if let Some(a) = advise::advise(&inputs).into_iter().next() {
             rep.advice = Some(format!("{} [{}] {} - {} ({})", h.name, a.rule, a.subject, a.move_line, minutes_text(&a.minutes)));
             break;
@@ -243,7 +340,7 @@ pub fn tick(e: &mut Engine, o: &TickOpts) -> Result<TickReport> {
     // 6. the cause storm over every running log
     for r in &results {
         if let End::Waits(_) = r.end {
-            let f = e.fold(&r.batch)?;
+            let Ok(f) = e.fold(&r.batch) else { continue };
             for (rk, lk) in [("run_id", "log"), ("pf_run_id", "pf_log")] {
                 let (Some(run), Some(log)) = (f.facts.get(rk).and_then(Value::as_str), f.facts.get(lk).and_then(Value::as_str)) else { continue };
                 if let Some(s) = storm(run, Path::new(log), o.rules, o.storm_reds) {
@@ -259,9 +356,28 @@ pub fn tick(e: &mut Engine, o: &TickOpts) -> Result<TickReport> {
     Ok(rep)
 }
 
+/// A batch refused because of its base waits only while the base is open and on its way: not red, preflight-red, held, abandoned,
+/// closed, failed in this tick, or itself blocked on a person. Otherwise its base will not move by itself and a person decides.
+fn judge_pipeline_waits(e: &Engine, results: &mut [BatchResult]) {
+    let stuck: Vec<(String, bool)> = results.iter().map(|r| (r.batch.clone(), r.needs_person())).collect();
+    for r in results.iter_mut() {
+        let End::Blocked { rule, person, .. } = &mut r.end else { continue };
+        if !RETRY_AFTER_A_MOVE.contains(&rule.as_str()) {
+            continue;
+        }
+        let base = e.fold(&r.batch).ok().and_then(|f| f.facts.get("base_batch").and_then(Value::as_str).map(String::from));
+        let on_its_way = base.as_deref().is_some_and(|b| {
+            let state = e.fold(b).map(|f| f.state).unwrap_or_default();
+            let blocked_here = stuck.iter().any(|(id, p)| id == b && *p);
+            !state.is_empty() && !matches!(state.as_str(), "red" | "preflight-red" | "held" | "abandoned" | "closed") && !blocked_here
+        });
+        *person = !on_its_way;
+    }
+}
+
 /// Advance one batch until it waits, is refused, fails, or rests; each transition is a row `advance` writes.
-fn drive(e: &mut Engine, r: &mut BatchResult) -> Result<()> {
-    for _ in 0..MAX_STEPS {
+fn drive(e: &mut Engine, r: &mut BatchResult, max_steps: usize) -> Result<()> {
+    for _ in 0..max_steps {
         match e.advance(&r.batch)? {
             Outcome::Advanced { to, .. } => {
                 r.states.push(to.clone());
@@ -290,7 +406,8 @@ fn drive(e: &mut Engine, r: &mut BatchResult) -> Result<()> {
             }
         }
     }
-    r.end = End::Waits(format!("stopped after {MAX_STEPS} transitions in one tick; the next tick goes on"));
+    // still moving after the cap: a loop or a bug until a person looked, never a silent wait
+    r.end = End::Blocked { rule: "tick.step-cap".into(), because: format!("still moving after {max_steps} transitions in one tick; a person looks at `gatetrain batch status {}`", r.batch), person: true };
     Ok(())
 }
 
@@ -327,21 +444,32 @@ fn runs_of(events: &[Ev]) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// A log with `GATES_DONE` whose run is not in the ledger yet goes in once (`runs::ingest`), with `<log>.samples.jsonl` when present.
-fn ingest_finished(e: &Engine, run: &str, log: &Path) -> Result<bool> {
+/// A log with `GATES_DONE` whose run is not finished in the ledger yet goes in once (`runs::ingest`), with `<log>.samples.jsonl`
+/// when present. A run known only as a `running` or `stopped` snapshot (`ingest --watch`) is replaced by its finished rows.
+/// `Err(why)`: the log could not be read into the ledger.
+fn ingest_finished(e: &Engine, run: &str, log: &Path) -> std::result::Result<bool, String> {
     let Ok(bytes) = std::fs::read(log) else { return Ok(false) };
-    let p = logfmt::parse_log(&String::from_utf8_lossy(&bytes))?;
-    if !p.gates_done || runs::outcome_of(&*e.ledger, run)?.is_some() {
+    // cheap: a log still being written is not parsed at all
+    if !bytes.windows(10).any(|w| w == b"GATES_DONE") {
         return Ok(false);
     }
+    let p = logfmt::parse_log(&String::from_utf8_lossy(&bytes)).map_err(|err| format!("parse error: {err}"))?;
+    if !p.gates_done {
+        return Ok(false);
+    }
+    let replace = match runs::outcome_of(&*e.ledger, run).map_err(|err| err.to_string())? {
+        None => false,
+        Some(o) if o == "running" || o == "stopped" => true,
+        Some(_) => return Ok(false),
+    };
     let outcome = history::classify(&p, &Ts::now_utc(), 0.0);
-    match runs::ingest(&*e.ledger, "the ledger", run, &p, outcome, None, false, &runs::now_iso())? {
-        runs::Ingest::Refused(_) => Ok(false),
+    match runs::ingest(&*e.ledger, "the ledger", run, &p, outcome, None, replace, &runs::now_iso()).map_err(|err| err.to_string())? {
+        runs::Ingest::Refused(why) => Err(why),
         runs::Ingest::Done => {
             let mut sf = log.as_os_str().to_owned();
             sf.push(".samples.jsonl");
             if let Ok(text) = std::fs::read_to_string(PathBuf::from(sf)) {
-                e.ledger.record_samples_for(&text, Some(run))?;
+                e.ledger.record_samples_for(&text, Some(run)).map_err(|err| err.to_string())?;
             }
             Ok(true)
         }
@@ -405,7 +533,9 @@ fn doctor_text(h: &HostResult) -> String {
 /// Batch lines (at most [`MAX_BATCH_LINES`]), one host line, one advice line, one storm line when there is a storm: 3 to 6 lines.
 fn lines(rep: &TickReport) -> Vec<String> {
     let mut out = Vec::new();
-    if rep.batches.is_empty() {
+    if let Some(b) = &rep.log_broken {
+        out.push(format!("log: {b}; floor.log-append-only: no batch is advanced (gatetrain log verify)"));
+    } else if rep.batches.is_empty() {
         out.push("batches: none open (a person opens one with `gatetrain batch new`)".to_string());
     } else if rep.batches.len() <= MAX_BATCH_LINES {
         out.extend(rep.batches.iter().map(BatchResult::line));
@@ -437,6 +567,11 @@ fn lines(rep: &TickReport) -> Vec<String> {
         .collect();
     if !rep.ingested.is_empty() {
         hl.push(format!("ingested {} run{}", rep.ingested.len(), if rep.ingested.len() == 1 { "" } else { "s" }));
+    }
+    if !rep.not_ingested.is_empty() {
+        let shown: Vec<String> = rep.not_ingested.iter().take(2).map(|(r, w)| format!("{r} ({})", cap(w, 80))).collect();
+        let more = if rep.not_ingested.len() > 2 { format!(", +{} more", rep.not_ingested.len() - 2) } else { String::new() };
+        hl.push(format!("not ingested: {}{more}", shown.join(", ")));
     }
     out.push(if hl.is_empty() { "hosts: none enabled".to_string() } else { format!("hosts: {}", hl.join("; ")) });
     out.push(format!("advice: {}", rep.advice.as_deref().unwrap_or("none")));
