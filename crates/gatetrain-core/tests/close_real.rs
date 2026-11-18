@@ -726,21 +726,25 @@ fn minor1_a_tracked_folder_named_with_a_glob_character_is_seen_as_holding_work()
 
 #[test]
 fn minor1_an_ignored_folder_named_like_a_glob_is_judged_by_its_own_name_not_as_a_pattern() {
-    // literal: `s[r]c` names that folder only. As a glob it would match the dirty `src` and the judge would refuse the folder for work
-    // it does not hold. The judge clears it; the executor then refuses any name with a glob character (`check_path`), so it stays.
+    // literal: `x[y]z` names that folder only. As a glob it matches the tracked, edited file `xyz` (a wildcard pathspec matches an
+    // exact path), and the judge would refuse the folder for work it does not hold. The judge clears it; the executor then refuses any
+    // name with a glob character (`check_path`), so it stays.
     let f = fx();
     let wt = live_worktree(&f);
-    write(wt.join(".gitignore"), "target/\ns[[]r]c/\n");
-    git(&wt, &["add", ".gitignore"]);
+    write(wt.join(".gitignore"), "target/\nx[[]y]z/\n");
+    write(wt.join("xyz"), "tracked\n");
+    git(&wt, &["add", ".gitignore", "xyz"]);
     git(&wt, &["commit", "-q", "-m", "ignore the glob-named folder"]);
-    write(wt.join("s[r]c/x.o"), "obj\n");
+    write(wt.join("xyz"), "tracked, edited\n");
+    write(wt.join("x[y]z/x.o"), "obj\n");
     age(&wt);
-    assert!(git(&wt, &["status", "--porcelain", "--untracked-files=all", "--", ":(literal)s[r]c"]).trim().is_empty(), "the folder is ignored");
-    let key = fwd(&f.build) + "/wt-live/s[r]c";
+    assert!(git(&wt, &["status", "--porcelain", "--untracked-files=all", "--", ":(literal)x[y]z"]).trim().is_empty(), "the folder is ignored");
+    assert!(!git(&wt, &["status", "--porcelain", "--", "x[y]z"]).trim().is_empty(), "as a glob the name matches the edited xyz");
+    let key = fwd(&f.build) + "/wt-live/x[y]z";
     let rep = f.close(&fwd(&f.main), "target", &key, &[fwd(&f.build)]);
     assert!(rep.refusals.is_empty(), "the judge read the name as a pattern: {rep:?}");
     assert!(rep.residue.iter().any(|r| r.contains("glob character")), "{rep:?}");
-    assert!(wt.join("s[r]c/x.o").exists() && wt.join("src/a.rs").exists());
+    assert!(wt.join("x[y]z/x.o").exists() && wt.join("xyz").exists());
 }
 
 #[test]
