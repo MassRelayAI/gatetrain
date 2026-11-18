@@ -326,6 +326,11 @@ pub fn run(repo: &Path, cfg: &PrecheckConfig, base: &str, lanes: &[String], par:
 
 /// The self-test: a fixture repository with one known conflicting pair; the check must report it.
 pub fn self_test() -> std::result::Result<String, String> {
+    self_test_with(&merge_conflicts)
+}
+
+/// The self-test with the conflict check injected, so a test can prove it fails when the check finds nothing.
+pub fn self_test_with(check: &dyn Fn(&Path, &str, &str) -> std::result::Result<Vec<String>, String>) -> std::result::Result<String, String> {
     let dir = std::env::temp_dir().join(format!("gatetrain-precheck-selftest-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -351,8 +356,24 @@ pub fn self_test() -> std::result::Result<String, String> {
         w(c)?;
         g(&["commit", "-q", "-am", b])?;
     }
-    match merge_conflicts(&dir, "a", "b")? {
+    match check(&dir, "a", "b")? {
         f if f == ["f"] => Ok("self-test: known conflicting pair a x b reported (f)".into()),
         f => Err(format!("self-test FAILED: the known conflict a x b was not reported (got {f:?})")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn self_test_passes_with_the_real_check() {
+        assert!(self_test().is_ok());
+    }
+
+    #[test]
+    fn self_test_fails_when_the_check_finds_nothing_on_a_known_conflict() {
+        let e = self_test_with(&|_, _, _| Ok(vec![])).unwrap_err();
+        assert!(e.contains("self-test FAILED"), "{e}");
     }
 }
