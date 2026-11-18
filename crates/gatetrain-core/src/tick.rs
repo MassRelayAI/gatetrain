@@ -48,7 +48,12 @@ impl Drop for TickLock {
     }
 }
 
+/// Exit code of a `batch` command refused because the ledger lock is held (75 stays the busy host lock of `gatetrain hold`).
+pub const LEDGER_LOCK_BUSY: u8 = 73;
+
+/// `<db>.tick.lock`, from the canonical path of the ledger, so two spellings of one file share one lock.
 pub fn lock_path(db: &Path) -> PathBuf {
+    let db = std::fs::canonicalize(db).or_else(|_| std::path::absolute(db)).unwrap_or_else(|_| db.to_path_buf());
     let mut p = db.as_os_str().to_owned();
     p.push(".tick.lock");
     PathBuf::from(p)
@@ -91,9 +96,55 @@ impl LockInfo {
     }
 }
 
+/// The sidecar, when it parses. It may describe an earlier holder that died without removing it: see [`holder`].
 pub fn read_info(lock: &Path) -> Option<LockInfo> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(info_path(lock)).ok()?).ok()?;
     Some(LockInfo { pid: v["pid"].as_i64()?, started: v["started"].as_str()?.to_string(), by: v["by"].as_str().unwrap_or("?").to_string() })
+}
+
+/// The sidecar of a held lock, only when its pid is alive (a dead pid means a stale sidecar of an earlier holder).
+pub fn holder(lock: &Path) -> Option<LockInfo> {
+    read_info(lock).filter(|i| u32::try_from(i.pid).is_ok_and(|p| pid_alive(p) != Some(false)))
+}
+
+/// Minutes since the lock file was last touched (a holder touches it when it takes the lock); for a held lock with no sidecar.
+pub fn lock_age_min(lock: &Path) -> Option<f64> {
+    let m = std::fs::metadata(lock).ok()?.modified().ok()?;
+    Some(m.elapsed().ok()?.as_secs_f64() / 60.0)
+}
+
+/// Is a process with this pid running? `None` when the platform cannot say.
+#[cfg(target_os = "linux")]
+pub fn pid_alive(pid: u32) -> Option<bool> {
+    Some(Path::new(&format!("/proc/{pid}")).exists())
+}
+
+#[cfg(windows)]
+pub fn pid_alive(pid: u32) -> Option<bool> {
+    type Handle = *mut std::ffi::c_void;
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn GetExitCodeProcess(h: Handle, code: *mut u32) -> i32;
+        fn CloseHandle(h: Handle) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    // SAFETY: plain Win32 calls on a handle we own; a null handle means no such process (or no access), and is never closed.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return Some(false);
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        Some(ok && code == STILL_ACTIVE)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn pid_alive(_pid: u32) -> Option<bool> {
+    None
 }
 
 pub enum Taken {
@@ -106,12 +157,19 @@ pub enum Taken {
 pub fn take(path: &Path, by: &str) -> Result<Taken> {
     match try_lock(path)? {
         Some(mut l) => {
+            // touch the lock file: its age stands in for the holder's start when no sidecar can be trusted
+            let _ = l._file.set_modified(std::time::SystemTime::now());
+            // the sidecar is written whole: a temp file renamed over it, so a reader never sees half of it
             let info = json!({"pid": std::process::id(), "started": crate::hold::now_iso(), "by": by});
-            std::fs::write(info_path(path), info.to_string())?;
+            let mut tmp = info_path(path).into_os_string();
+            tmp.push(format!(".{}.tmp", std::process::id()));
+            let tmp = PathBuf::from(tmp);
+            std::fs::write(&tmp, info.to_string())?;
+            std::fs::rename(&tmp, info_path(path))?;
             l.info = Some(info_path(path));
             Ok(Taken::Got(l))
         }
-        None => Ok(Taken::Held(read_info(path))),
+        None => Ok(Taken::Held(holder(path))),
     }
 }
 
@@ -158,6 +216,10 @@ pub struct TickOpts<'a> {
     pub storm_reds: usize,
     pub now_us: i64,
     pub max_steps: usize,
+    /// `[tick] max_wait_minutes`: a wait (a health check, a host refusal) older than this needs a person
+    pub max_wait_minutes: f64,
+    /// `[tick] max_run_minutes`: a proving or pre-flight run older than this needs a person
+    pub max_run_minutes: f64,
 }
 
 // ---------------------------------------------------------------- the report
@@ -169,6 +231,8 @@ pub enum End {
     Waits(String),
     Blocked { rule: String, because: String, person: bool },
     Failed(String),
+    /// A person held it, with their reason: a decision already made, not a block.
+    Held(String),
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +257,7 @@ impl BatchResult {
             End::Waits(why) => format!("{}: {path}, waits: {why}", self.batch),
             End::Blocked { rule, because, .. } => format!("{}: {path}, BLOCKED {rule}: {because}", self.batch),
             End::Failed(why) => format!("{}: {path}, FAILED {why}", self.batch),
+            End::Held(why) => format!("{}: held ({why})", self.batch),
         }
     }
     fn end_word(&self) -> &'static str {
@@ -201,6 +266,7 @@ impl BatchResult {
             End::Waits(_) => "waits",
             End::Blocked { .. } => "blocked",
             End::Failed(_) => "failed",
+            End::Held(_) => "held",
         }
     }
 }
@@ -227,6 +293,8 @@ pub struct TickReport {
     pub batches: Vec<BatchResult>,
     pub hosts: Vec<HostResult>,
     pub ingested: Vec<String>,
+    /// runs that went in whose samples could not be recorded: (run, why)
+    pub samples_failed: Vec<(String, String)>,
     /// finished logs that could not be read into the ledger: (run, why)
     pub not_ingested: Vec<(String, String)>,
     pub advice: Option<String>,
@@ -248,7 +316,7 @@ impl TickReport {
             .map(|b| {
                 let (rule, why) = match &b.end {
                     End::Blocked { rule, because, .. } => (Some(rule.clone()), because.clone()),
-                    End::Rests(w) | End::Waits(w) | End::Failed(w) => (None, w.clone()),
+                    End::Rests(w) | End::Waits(w) | End::Failed(w) | End::Held(w) => (None, w.clone()),
                 };
                 json!({"batch": b.batch, "states": b.states, "end": b.end_word(), "rule": rule, "why": why, "needs_person": b.needs_person()})
             })
@@ -283,8 +351,12 @@ pub fn tick(e: &mut Engine, o: &TickOpts) -> Result<TickReport> {
         let Ok(evs) = e.events(id) else { continue };
         for (run, log) in runs_of(&evs) {
             match ingest_finished(e, &run, &log) {
-                Ok(true) => rep.ingested.push(run),
-                Ok(false) => {}
+                Ok(Ingested::Yes) => rep.ingested.push(run),
+                Ok(Ingested::YesSamplesFailed(why)) => {
+                    rep.ingested.push(run.clone());
+                    rep.samples_failed.push((run, why));
+                }
+                Ok(Ingested::No) => {}
                 Err(why) => rep.not_ingested.push((run, why)),
             }
         }
@@ -324,6 +396,7 @@ pub fn tick(e: &mut Engine, o: &TickOpts) -> Result<TickReport> {
             }
         }
         judge_pipeline_waits(e, &mut results);
+        judge_wait_age(e, &mut results, o);
     }
     // 4. tidy --auto per host
     for (h, r) in hosts.iter().zip(rep.hosts.iter_mut()) {
@@ -377,6 +450,17 @@ fn judge_pipeline_waits(e: &Engine, results: &mut [BatchResult]) {
 
 /// Advance one batch until it waits, is refused, fails, or rests; each transition is a row `advance` writes.
 fn drive(e: &mut Engine, r: &mut BatchResult, max_steps: usize) -> Result<()> {
+    // a transition whose latest attempt failed is not started again by a tick: every tick would rerun a deploy, a merge or a launch
+    // that fails. A person's `batch advance` or `batch retry` tries again (and clears this when it gets past it).
+    if let Some(last) = e.events(&r.batch)?.last().filter(|ev| ev.phase == "failed") {
+        let err = last.detail.get("error").and_then(Value::as_str).unwrap_or("no error recorded");
+        r.end = End::Blocked {
+            rule: "tick.failed-needs-person".into(),
+            because: format!("the last attempt of {} failed ({}); a person runs `gatetrain batch advance {}` (or `batch retry`) to try again", last.transition, cap(err, 120), r.batch),
+            person: true,
+        };
+        return Ok(());
+    }
     for _ in 0..max_steps {
         match e.advance(&r.batch)? {
             Outcome::Advanced { to, .. } => {
@@ -394,6 +478,10 @@ fn drive(e: &mut Engine, r: &mut BatchResult, max_steps: usize) -> Result<()> {
                 r.end = End::Rests(why);
                 return Ok(());
             }
+            Outcome::Refused { rule, .. } if rule == "batch.held" => {
+                r.end = End::Held(hold_reason(e, &r.batch));
+                return Ok(());
+            }
             Outcome::Refused { rule, because, .. } => {
                 let person = !WAITS_ON_ITS_OWN.contains(&rule.as_str());
                 let because = cause_of(e, &r.batch, &rule).unwrap_or(because);
@@ -409,6 +497,37 @@ fn drive(e: &mut Engine, r: &mut BatchResult, max_steps: usize) -> Result<()> {
     // still moving after the cap: a loop or a bug until a person looked, never a silent wait
     r.end = End::Blocked { rule: "tick.step-cap".into(), because: format!("still moving after {max_steps} transitions in one tick; a person looks at `gatetrain batch status {}`", r.batch), person: true };
     Ok(())
+}
+
+/// The reason of the newest `hold` of the batch.
+fn hold_reason(e: &Engine, id: &str) -> String {
+    let evs = e.events(id).unwrap_or_default();
+    evs.iter().rev().find(|ev| ev.transition == "hold" && ev.phase == "done").and_then(|ev| ev.detail.get("reason").and_then(Value::as_str)).unwrap_or("no reason recorded").to_string()
+}
+
+/// A wait (a running proof, a health check, a host or base refusal that clears by itself) older than its limit needs a person. The age
+/// is read from the ledger: the row that put the batch in its current state.
+fn judge_wait_age(e: &Engine, results: &mut [BatchResult], o: &TickOpts) {
+    for r in results.iter_mut() {
+        let why = match &r.end {
+            End::Waits(w) => w.clone(),
+            End::Blocked { rule, because, person: false } => format!("{rule}: {because}"),
+            _ => continue,
+        };
+        let Ok(evs) = e.events(&r.batch) else { continue };
+        let since: Option<i64> = evs.iter().rev().find(|ev| ev.phase == "done").and_then(|ev| event_at(e, ev.seq)).and_then(|at| logfmt::parse_iso(&at).ok()).map(|t| t.instant_us());
+        let Some(since) = since else { continue };
+        let age = (o.now_us - since) as f64 / 60e6;
+        let state = r.states.last().cloned().unwrap_or_default();
+        let (key, limit) = if matches!(state.as_str(), "proving" | "preflighting") { ("max_run_minutes", o.max_run_minutes) } else { ("max_wait_minutes", o.max_wait_minutes) };
+        if age > limit {
+            r.end = End::Blocked { rule: "tick.wait-too-long".into(), because: format!("{why}, for {age:.0} min (over [tick] {key} = {limit})"), person: true };
+        }
+    }
+}
+
+fn event_at(e: &Engine, seq: i64) -> Option<String> {
+    e.ledger.conn.query_row("SELECT at FROM batch_events WHERE seq=?", [seq], |r| r.get::<_, String>(0)).ok()
 }
 
 /// For a red batch, the red steps the proof stored; the rule's own text otherwise.
@@ -447,20 +566,27 @@ fn runs_of(events: &[Ev]) -> Vec<(String, PathBuf)> {
 /// A log with `GATES_DONE` whose run is not finished in the ledger yet goes in once (`runs::ingest`), with `<log>.samples.jsonl`
 /// when present. A run known only as a `running` or `stopped` snapshot (`ingest --watch`) is replaced by its finished rows.
 /// `Err(why)`: the log could not be read into the ledger.
-fn ingest_finished(e: &Engine, run: &str, log: &Path) -> std::result::Result<bool, String> {
-    let Ok(bytes) = std::fs::read(log) else { return Ok(false) };
+enum Ingested {
+    Yes,
+    /// the run went in; its samples did not
+    YesSamplesFailed(String),
+    No,
+}
+
+fn ingest_finished(e: &Engine, run: &str, log: &Path) -> std::result::Result<Ingested, String> {
+    let Ok(bytes) = std::fs::read(log) else { return Ok(Ingested::No) };
     // cheap: a log still being written is not parsed at all
     if !bytes.windows(10).any(|w| w == b"GATES_DONE") {
-        return Ok(false);
+        return Ok(Ingested::No);
     }
     let p = logfmt::parse_log(&String::from_utf8_lossy(&bytes)).map_err(|err| format!("parse error: {err}"))?;
     if !p.gates_done {
-        return Ok(false);
+        return Ok(Ingested::No);
     }
     let replace = match runs::outcome_of(&*e.ledger, run).map_err(|err| err.to_string())? {
         None => false,
         Some(o) if o == "running" || o == "stopped" => true,
-        Some(_) => return Ok(false),
+        Some(_) => return Ok(Ingested::No),
     };
     let outcome = history::classify(&p, &Ts::now_utc(), 0.0);
     match runs::ingest(&*e.ledger, "the ledger", run, &p, outcome, None, replace, &runs::now_iso()).map_err(|err| err.to_string())? {
@@ -469,9 +595,11 @@ fn ingest_finished(e: &Engine, run: &str, log: &Path) -> std::result::Result<boo
             let mut sf = log.as_os_str().to_owned();
             sf.push(".samples.jsonl");
             if let Ok(text) = std::fs::read_to_string(PathBuf::from(sf)) {
-                e.ledger.record_samples_for(&text, Some(run)).map_err(|err| err.to_string())?;
+                if let Err(err) = e.ledger.record_samples_for(&text, Some(run)) {
+                    return Ok(Ingested::YesSamplesFailed(err.to_string()));
+                }
             }
-            Ok(true)
+            Ok(Ingested::Yes)
         }
     }
 }
@@ -549,6 +677,7 @@ fn lines(rep: &TickReport) -> Vec<String> {
             (n(&|b| b.moved() && matches!(b.end, End::Rests(_))), "moved"),
             (n(&|b| matches!(b.end, End::Waits(_)) || matches!(&b.end, End::Blocked { person: false, .. })), "waiting"),
             (n(&|b| b.needs_person()), "blocked"),
+            (n(&|b| matches!(b.end, End::Held(_))), "held"),
             (n(&|b| !b.moved() && matches!(b.end, End::Rests(_))), "resting"),
         ] {
             if count > 0 {
@@ -566,7 +695,8 @@ fn lines(rep: &TickReport) -> Vec<String> {
         })
         .collect();
     if !rep.ingested.is_empty() {
-        hl.push(format!("ingested {} run{}", rep.ingested.len(), if rep.ingested.len() == 1 { "" } else { "s" }));
+        let warn = rep.samples_failed.first().map(|(r, w)| format!(" (samples of {r} not recorded: {})", cap(w, 80))).unwrap_or_default();
+        hl.push(format!("ingested {} run{}{warn}", rep.ingested.len(), if rep.ingested.len() == 1 { "" } else { "s" }));
     }
     if !rep.not_ingested.is_empty() {
         let shown: Vec<String> = rep.not_ingested.iter().take(2).map(|(r, w)| format!("{r} ({})", cap(w, 80))).collect();

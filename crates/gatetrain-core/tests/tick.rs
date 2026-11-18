@@ -1,6 +1,6 @@
 //! `tick` (engine v2 E10): one bounded pass over every open batch through `advance`, doctor and `tidy --auto` per host, one advice
 //! line, the cause-storm line. Temp git repositories, the fake lock and admission, fake host seams: no real host, Docker or repository.
-use gatetrain_core::batch::{AllowAll, Engine, FakeLock, Outcome};
+use gatetrain_core::batch::{Admission, AllowAll, Engine, FakeLock, Outcome};
 use gatetrain_core::batchcfg::BatchConfig;
 use gatetrain_core::config::{self, Config, Host};
 use gatetrain_core::diagnose;
@@ -20,7 +20,9 @@ fn now() -> String {
     "2026-11-15T10:00:00+00:00".to_string()
 }
 static NOW: fn() -> String = now;
-const NOW_US: i64 = 1_763_200_800_000_000;
+/// The fixture clock: every ledger row is written at 2026-11-15T10:00:00Z, and a tick runs at the same instant unless a test says.
+const NOW_US: i64 = 1_794_736_800_000_000;
+const MIN_US: i64 = 60_000_000;
 
 fn fwd(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
@@ -87,8 +89,9 @@ impl Fx {
         let toml = format!(
             "[preflight]\ncommand = [\"sh\", \"-c\", \"true\"]\n[chain]\ncommand = [\"fake-chain\"]\n\
              [postmerge]\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_BATCH >> '{}'\"]\n\
-             [deploy.staging]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n{extra_toml}",
-            fwd(&marker)
+             [deploy.staging]\ncommand = [\"sh\", \"-c\", \"echo $GATETRAIN_BATCH >> '{}'\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n{extra_toml}",
+            fwd(&marker),
+            fwd(&t.path().join("deploy.txt"))
         );
         let hosts_file = t.path().join("hosts.toml");
         std::fs::write(&hosts_file, HOSTS).unwrap();
@@ -148,13 +151,19 @@ impl Fx {
     }
 
     fn tick_with(&mut self, max_steps: usize) -> TickReport {
+        self.tick_full(max_steps, NOW_US, Box::new(AllowAll))
+    }
+
+    fn tick_at(&mut self, now_us: i64) -> TickReport {
+        self.tick_full(tick::MAX_STEPS, now_us, Box::new(AllowAll))
+    }
+
+    fn tick_full(&mut self, max_steps: usize, now_us: i64, adm: Box<dyn Admission>) -> TickReport {
         let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
-        let storm = self.cfg.storm_reds;
         let hosts = self.hosts.clone();
-        self.with(|e| {
-            let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: storm, now_us: NOW_US, max_steps };
-            tick::tick(e, &o).unwrap()
-        })
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: adm.as_ref(), now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), crash_after_effect: None };
+        let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: self.cfg.storm_reds, now_us, max_steps, max_wait_minutes: self.cfg.max_wait_minutes, max_run_minutes: self.cfg.max_run_minutes };
+        tick::tick(&mut e, &o).unwrap()
     }
 
     fn count(&self, table: &str) -> i64 {
@@ -310,8 +319,8 @@ fn more_open_batches_than_lines_are_folded_into_one_line() {
     fx.with(|e| e.hold("b9", "a person looks at it").unwrap());
     let r = fx.tick();
     assert!(r.lines.len() <= 6, "{:?}", r.lines);
-    assert_eq!(r.lines[2], "+2 more batch(es): 1 waiting, 1 blocked (gatetrain batch status)", "{:?}", r.lines);
-    assert_eq!(r.exit_code(), 1, "a held batch needs a person");
+    assert_eq!(r.lines[2], "+2 more batch(es): 1 waiting, 1 held (gatetrain batch status)", "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 0, "a held batch is a person's decision already made");
 }
 
 // ---------------------------------------------------------------- review fixes
@@ -447,4 +456,147 @@ fn minor6_a_broken_decision_log_stops_every_automatic_transition() {
     assert!(r.lines[0].ends_with("floor.log-append-only: no batch is advanced (gatetrain log verify)"), "{:?}", r.lines);
     assert_eq!(fx.state("b1"), "proving");
     assert_eq!(r.exit_code(), 1);
+}
+
+// ---------------------------------------------------------------- round-2 review fixes
+
+fn lines_in(fx: &Fx, file: &str) -> usize {
+    std::fs::read_to_string(fx.t.path().join(file)).map(|t| t.lines().count()).unwrap_or(0)
+}
+
+#[test]
+fn major1_a_failed_transition_is_not_retried_by_the_next_ticks() {
+    let broken = "[deploy.broken]\ncommand = [\"sh\", \"-c\", \"echo x >> ../broken.txt; exit 1\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
+    let mut fx = Fx::new(broken);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let mut exits = vec![];
+    let mut last = String::new();
+    for _ in 0..3 {
+        let r = fx.tick();
+        exits.push(r.exit_code());
+        last = r.lines[0].clone();
+    }
+    assert_eq!(exits, vec![1, 1, 1]);
+    assert_eq!(lines_in(&fx, "broken.txt"), 1, "one deploy call in three ticks");
+    assert_eq!(postmerge_runs(&fx), 1, "one postmerge run in three ticks");
+    assert!(last.starts_with("b1: merged, BLOCKED tick.failed-needs-person: "), "{last}");
+    // a person's advance tries again, as before
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)));
+    assert_eq!(lines_in(&fx, "broken.txt"), 2);
+}
+
+#[test]
+fn major2_a_proving_run_that_never_finishes_needs_a_person_after_max_run_minutes() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b2", "lane2");
+    let r = fx.tick_at(NOW_US + 300 * MIN_US);
+    assert_eq!(r.lines[0], "b2: proving, waits: run b2-p1 is still proving", "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 0);
+    let r = fx.tick_at(NOW_US + 361 * MIN_US);
+    assert_eq!(r.lines[0], "b2: proving, BLOCKED tick.wait-too-long: run b2-p1 is still proving, for 361 min (over [tick] max_run_minutes = 360)", "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn major2_a_deploy_that_never_turns_healthy_needs_a_person_after_max_wait_minutes() {
+    let sick = "[deploy.sick]\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"exit 1\"]\ntier = \"staging\"\n";
+    let mut fx = Fx::new(sick);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged -> deploying, waits: target sick does not report "), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 0);
+    let r = fx.tick_at(NOW_US + 121 * MIN_US);
+    assert!(r.lines[0].starts_with("b1: deploying, BLOCKED tick.wait-too-long: target sick does not report "), "{:?}", r.lines);
+    assert!(r.lines[0].ends_with(", for 121 min (over [tick] max_wait_minutes = 120)"), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn major2_a_configured_wait_limit_is_read() {
+    let c = BatchConfig::parse("[tick]\nmax_wait_minutes = 30\nmax_run_minutes = 90\n").unwrap();
+    assert_eq!((c.max_wait_minutes, c.max_run_minutes), (30.0, 90.0));
+    let d = BatchConfig::parse("").unwrap();
+    assert_eq!((d.max_wait_minutes, d.max_run_minutes), (120.0, 360.0));
+}
+
+/// Admission whose host has no close environment, with the reason the seam could not build one.
+struct NoCloseEnv;
+impl Admission for NoCloseEnv {
+    fn admit(&self, _: &str, _: &str) -> gatetrain_core::Result<Option<String>> {
+        Ok(None)
+    }
+    fn close_env_error(&self) -> Option<String> {
+        Some("tidy config of builder: trash_dir is missing".into())
+    }
+}
+
+#[test]
+fn major2_no_close_environment_is_a_refusal_with_the_error_not_a_wait() {
+    let roots = format!("[close]\ntidy = true\nroots = [\"{}\"]\n", fwd(&std::env::temp_dir().join("gt-close-root")));
+    let mut fx = Fx::new(&roots);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let r = fx.tick_full(tick::MAX_STEPS, NOW_US, Box::new(NoCloseEnv));
+    assert_eq!(
+        r.lines[0],
+        "b1: proving -> proven -> merged -> deploying -> live, BLOCKED close.no-environment: batch b1: close needs a tidy environment for this host: tidy config of builder: trash_dir is missing",
+        "{:?}",
+        r.lines
+    );
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn minor1_a_crash_inside_a_target_deploys_again_on_resume() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    for want in ["proven", "merged"] {
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+    }
+    fx.crash = Some("T8a:staging".into());
+    assert!(fx.with(|e| e.advance("b1")).is_err(), "the simulated crash right after the staging deploy");
+    fx.crash = None;
+    assert_eq!(lines_in(&fx, "deploy.txt"), 1);
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 2, "the marker was not written, so the resumed T8a deploys again");
+}
+
+#[test]
+fn minor5_the_lock_path_is_the_same_however_the_ledger_is_named() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("sub")).unwrap();
+    let db = t.path().join("g.db");
+    Ledger::open(&db).unwrap();
+    let other = t.path().join("sub").join("..").join("g.db");
+    assert_eq!(tick::lock_path(&db), tick::lock_path(&other));
+}
+
+#[test]
+fn minor6_samples_that_fail_after_the_run_went_in_are_a_warning_not_not_ingested() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let req = fx.lock.launches.lock().unwrap()[0].clone();
+    let mut sf = req.log.clone().into_os_string();
+    sf.push(".samples.jsonl");
+    std::fs::write(PathBuf::from(sf), "{\"host\": \"builder\", \"at\": \"2026-11-11T09:00:00Z\", \"load_1m\": 1.0}\n").unwrap();
+    fx.ledger.conn.execute_batch("DROP TABLE host_samples;").unwrap();
+    let r = fx.tick();
+    assert!(r.lines[1].contains("; ingested 1 run (samples of b1-p1 not recorded: "), "{:?}", r.lines);
+    assert!(!r.lines[1].contains("not ingested"), "{:?}", r.lines);
+    assert_eq!(fx.count("runs WHERE id='b1-p1'"), 1);
+}
+
+#[test]
+fn minor7_a_held_batch_is_reported_with_its_reason_and_exit_0() {
+    let mut fx = Fx::new("");
+    fx.open("b9", "lane1");
+    fx.with(|e| e.hold("b9", "waiting for the vendor").unwrap());
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b9: held (waiting for the vendor)", "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 0);
 }

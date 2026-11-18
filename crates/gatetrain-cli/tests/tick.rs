@@ -165,9 +165,17 @@ fn b1_a_writing_batch_command_refuses_while_a_tick_holds_the_ledger_lock() {
         gatetrain_core::tick::Taken::Held(_) => panic!("the lock was free"),
     };
     let me = std::process::id().to_string();
+    let wd = fwd(&fx.root.join("repo"));
+    // every subcommand that writes a batch, so leaving any one out of the lock goes red
     for args in [
+        vec!["batch", "new", "b2", "--base", "main", "--workdir", &wd, "lane1"],
         vec!["batch", "advance", "b1"],
         vec!["batch", "hold", "b1", "--reason", "x"],
+        vec!["batch", "release", "b1"],
+        vec!["batch", "restack", "b1"],
+        vec!["batch", "retry", "b1"],
+        vec!["batch", "note-cause", "b1", "flake", "x"],
+        vec!["batch", "close", "b1"],
         vec!["batch", "abandon", "b1", "--reason", "x"],
         vec!["batch", "advance", "b1", "--wait", "1"],
     ] {
@@ -175,7 +183,7 @@ fn b1_a_writing_batch_command_refuses_while_a_tick_holds_the_ledger_lock() {
         let c = fx.cfg();
         a.extend(["--db", &fx.db, "--config", &c]);
         let o = gt(&a);
-        assert_eq!(o.status.code(), Some(75), "{args:?}: {}", out(&o));
+        assert_eq!(o.status.code(), Some(73), "{args:?}: {}", out(&o));
         assert!(out(&o).contains("a tick is running (pid ") && out(&o).contains(&me), "{}", out(&o));
     }
     assert_eq!(fx.rows(), before, "nothing was written");
@@ -186,21 +194,76 @@ fn b1_a_writing_batch_command_refuses_while_a_tick_holds_the_ledger_lock() {
 }
 
 #[test]
+fn minor4_the_refusal_names_a_batch_holder_too() {
+    let fx = Fx::new(true);
+    let _held = match gatetrain_core::tick::take(&lock_of(&fx), "batch").unwrap() {
+        gatetrain_core::tick::Taken::Got(l) => l,
+        gatetrain_core::tick::Taken::Held(_) => panic!("the lock was free"),
+    };
+    let c = fx.cfg();
+    let o = gt(&["batch", "advance", "b1", "--db", &fx.db, "--config", &c]);
+    assert_eq!(o.status.code(), Some(73), "{}", out(&o));
+    assert!(out(&o).contains("a `batch` command is running (pid "), "{}", out(&o));
+}
+
+fn sidecar(fx: &Fx, pid: u32, started: &str) {
+    std::fs::write(gatetrain_core::tick::info_path(&lock_of(fx)), format!("{{\"pid\": {pid}, \"started\": \"{started}\", \"by\": \"tick\"}}")).unwrap();
+}
+
+#[test]
 fn minor1_a_tick_finding_the_lock_held_too_long_says_so_and_exits_1() {
     let fx = Fx::new(true);
-    let lp = lock_of(&fx);
-    let held = gatetrain_core::tick::try_lock(&lp).unwrap();
+    let held = gatetrain_core::tick::try_lock(&lock_of(&fx)).unwrap();
     assert!(held.is_some());
-    std::fs::write(gatetrain_core::tick::info_path(&lp), "{\"pid\": 4242, \"started\": \"2026-01-01T00:00:00Z\", \"by\": \"tick\"}").unwrap();
+    let me = std::process::id();
+    sidecar(&fx, me, "2026-01-01T00:00:00Z");
     let o = fx.tick(&[]);
     assert_eq!(o.status.code(), Some(1), "{}", out(&o));
     let t = String::from_utf8_lossy(&o.stdout).to_string();
-    assert!(t.starts_with("tick: the ledger lock is held by pid 4242 (tick) since 2026-01-01T00:00:00Z"), "{t}");
+    assert!(t.starts_with(&format!("tick: the ledger lock is held by pid {me} (tick) since 2026-01-01T00:00:00Z")), "{t}");
     assert!(t.contains("[tick] stuck_minutes = 60"), "{t}");
     std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[tick]\nstuck_minutes = 999999999\n").unwrap();
     let o = fx.tick(&[]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
-    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "tick: another tick holds the lock (pid 4242, started 2026-01-01T00:00:00Z)");
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), format!("tick: another tick holds the lock (pid {me}, started 2026-01-01T00:00:00Z)"));
+}
+
+#[test]
+fn minor3_a_sidecar_of_a_dead_pid_is_ignored_and_no_sidecar_falls_back_to_the_lock_file_age() {
+    let fx = Fx::new(true);
+    let lp = lock_of(&fx);
+    let held = gatetrain_core::tick::try_lock(&lp).unwrap();
+    assert!(held.is_some());
+    // a pid that has exited: its old sidecar describes nobody
+    let mut child = Command::new("git").arg("--version").stdout(std::process::Stdio::null()).spawn().unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    sidecar(&fx, dead, "2026-01-01T00:00:00Z");
+    let o = fx.tick(&[]);
+    assert_eq!(o.status.code(), Some(0), "a fresh lock file with a stale sidecar is a running tick: {}", out(&o));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "tick: another tick holds the lock");
+    // no sidecar to trust and a lock file untouched for two hours: stuck
+    std::fs::remove_file(gatetrain_core::tick::info_path(&lp)).unwrap();
+    let f = std::fs::OpenOptions::new().write(true).open(&lp).unwrap();
+    f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600)).unwrap();
+    drop(f);
+    let o = fx.tick(&[]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(String::from_utf8_lossy(&o.stdout).starts_with("tick: the ledger lock is held by an unknown holder since "), "{}", out(&o));
+}
+
+#[test]
+fn minor3_the_sidecar_is_written_whole() {
+    let fx = Fx::new(true);
+    let lp = lock_of(&fx);
+    let _held = match gatetrain_core::tick::take(&lp, "tick").unwrap() {
+        gatetrain_core::tick::Taken::Got(l) => l,
+        gatetrain_core::tick::Taken::Held(_) => panic!("the lock was free"),
+    };
+    let i = gatetrain_core::tick::read_info(&lp).expect("a readable sidecar");
+    assert_eq!(i.pid, i64::from(std::process::id()));
+    let dir: Vec<String> = std::fs::read_dir(lp.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(!dir.iter().any(|n| n.ends_with(".tmp")), "no temp file is left: {dir:?}");
 }
 
 #[test]

@@ -527,11 +527,13 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
                 match gatetrain_core::tick::take_waiting(&gatetrain_core::tick::lock_path(&db), "batch", wait)? {
                     gatetrain_core::tick::Taken::Got(l) => Some(l),
                     gatetrain_core::tick::Taken::Held(i) => {
-                        let who = i.map(|i| format!("pid {}, started {}", i.pid, i.started)).unwrap_or_else(|| "pid unknown, started unknown".into());
-                        println!("REFUSED
-  rule    ledger.tick-running
-  because a tick is running ({who}); try again after it, or pass --wait <secs>");
-                        return Ok(ExitCode::from(75));
+                        // exit 73: the ledger lock (75 is a busy host lock, from `gatetrain hold`)
+                        let (what, who) = match i {
+                            Some(i) => (if i.by == "tick" { "a tick".to_string() } else { format!("a `{}` command", i.by) }, format!("pid {}, started {}", i.pid, i.started)),
+                            None => ("another holder".to_string(), "pid unknown, started unknown".to_string()),
+                        };
+                        println!("REFUSED\n  rule    ledger.tick-running\n  because {what} is running ({who}) and holds the ledger lock; try again after it, or pass --wait <secs>");
+                        return Ok(ExitCode::from(gatetrain_core::tick::LEDGER_LOCK_BUSY));
                     }
                 }
             };

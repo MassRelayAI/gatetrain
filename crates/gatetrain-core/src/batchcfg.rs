@@ -104,6 +104,11 @@ pub struct BatchConfig {
     pub storm_reds: usize,
     /// `[tick] stuck_minutes` (default 60): a tick that finds the ledger lock held longer than this reports it and exits 1.
     pub stuck_minutes: f64,
+    /// `[tick] max_wait_minutes` (default 120): a batch that has waited longer (a health check that never passes, a host that keeps
+    /// refusing) is reported as needing a person.
+    pub max_wait_minutes: f64,
+    /// `[tick] max_run_minutes` (default 360): the same for a proving or pre-flight run that never finishes.
+    pub max_run_minutes: f64,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -152,6 +157,8 @@ impl Default for BatchConfig {
             legacy_stamp_command: vec![],
             storm_reds: 20,
             stuck_minutes: 60.0,
+            max_wait_minutes: 120.0,
+            max_run_minutes: 360.0,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -196,6 +203,14 @@ impl BatchConfig {
             match n.as_float().or_else(|| n.as_integer().map(|i| i as f64)) {
                 Some(m) if m > 0.0 => c.stuck_minutes = m,
                 _ => return Err(Error::Batch(format!("gatetrain.toml: [tick] stuck_minutes is a number of minutes above 0, not {n}"))),
+            }
+        }
+        for (key, slot) in [("max_wait_minutes", &mut c.max_wait_minutes), ("max_run_minutes", &mut c.max_run_minutes)] {
+            if let Some(n) = v.get("tick").and_then(|t| t.get(key)) {
+                match n.as_float().or_else(|| n.as_integer().map(|i| i as f64)) {
+                    Some(m) if m > 0.0 => *slot = m,
+                    _ => return Err(Error::Batch(format!("gatetrain.toml: [tick] {key} is a number of minutes above 0, not {n}"))),
+                }
             }
         }
         if let Some(n) = v.get("chain").and_then(|c| c.get("storm_reds")) {

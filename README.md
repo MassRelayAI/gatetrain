@@ -471,11 +471,20 @@ batch merges only because `advance` found its proof accepted by every guard; the
 neither the tick exits 2), and `--lock` overrides its host lock file as for `batch`. `--json` prints the same report as one JSON object.
 
 The ledger lock is shared with people: every `batch` command that writes (`new`, `advance`, `hold`, `release`, `restack`, `retry`,
-`note-cause`, `close`, `abandon`) takes it too, and while a tick holds it refuses with `a tick is running (pid, started)` and exit 75,
-or waits with `--wait <secs>`. The holder writes `<db>.tick.lock.info` (pid, start time); a tick that finds the lock held longer than
-`[tick] stuck_minutes` (default 60) says so and exits 1. Before it advances anything the tick verifies the decision log; a log that does
-not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named `not ingested` and
-one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
+`note-cause`, `close`, `abandon`) takes it too, and while it is held refuses with `a tick is running (pid, started)` (or names the
+`batch` command that holds it) and **exit 73** (75 stays the busy host lock of `hold`), or waits with `--wait <secs>`. The lock file is
+`<canonical db path>.tick.lock`; the holder writes `<lock>.info` (pid, start time, who) whole, through a rename, and removes it when it
+lets go. A sidecar whose pid is dead is ignored. A tick that finds the lock held longer than `[tick] stuck_minutes` (default 60), by the
+sidecar or, with none, by the lock file's age, says so and exits 1. Before it advances anything the tick verifies the decision log; a
+log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
+`not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
+
+A tick never starts a transition whose latest attempt failed: the batch is `BLOCKED tick.failed-needs-person` (exit 1) until a person's
+`batch advance` or `batch retry` gets past it, so a failing deploy, merge or launch runs once, not once per tick. A wait has an age, read
+from the ledger row that put the batch in its state: past `[tick] max_run_minutes` (default 360) for a proving or pre-flight run, or
+`[tick] max_wait_minutes` (default 120) for anything else (a health check that never passes, a host that keeps refusing), the batch is
+`BLOCKED tick.wait-too-long` with its age (exit 1). A host with no close environment is `BLOCKED close.no-environment` with the
+reason. A held batch reads `held (<reason>)` and is exit 0: a person already decided.
 
 ## The basic workflow
 

@@ -89,6 +89,11 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
         tick::Taken::Got(l) => l,
         tick::Taken::Held(info) => {
             let Some(i) = info else {
+                // no live holder recorded: the lock file's age (touched when it was taken) is the only clock
+                if let Some(m) = tick::lock_age_min(&lock).filter(|m| *m > cfg.stuck_minutes) {
+                    println!("tick: the ledger lock is held by an unknown holder since {m:.0} min ago, longer than [tick] stuck_minutes = {}; look at what holds {}", cfg.stuck_minutes, lock.display());
+                    return Ok(ExitCode::from(1));
+                }
                 println!("tick: another tick holds the lock");
                 return Ok(ExitCode::SUCCESS);
             };
@@ -113,7 +118,7 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
     let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
     let seams = RealHosts { hosts_path: a.hosts.to_string_lossy().into_owned(), needs: hosts.needs.clone() };
     let now_us = gatetrain_core::logfmt::Ts::now_utc().instant_us();
-    let opts = TickOpts { hosts: &hosts, seams: &seams, rules: &rules, storm_reds: cfg.storm_reds, now_us, max_steps: tick::MAX_STEPS };
+    let opts = TickOpts { hosts: &hosts, seams: &seams, rules: &rules, storm_reds: cfg.storm_reds, now_us, max_steps: tick::MAX_STEPS, max_wait_minutes: cfg.max_wait_minutes, max_run_minutes: cfg.max_run_minutes };
     let report = tick::tick(&mut e, &opts)?;
     if a.json {
         println!("{}", report.to_json());
