@@ -217,7 +217,13 @@ pub fn run_isolated_with(mut c: Command, secs: f64, mut opts: Opts) -> Result<Is
     }
     let mut child = c.spawn().map_err(|e| e.to_string())?;
     let job = group::Job::adopt(&child, !opts.survives_parent);
-    group::resume(&child);
+    if let Err(why) = group::resume(&child) {
+        // a child that cannot be resumed never runs its command: end it (and its job) rather than leave a suspended process behind
+        job.kill(&child);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(why);
+    }
     if let Some(f) = opts.on_spawn.as_mut() {
         if let Err(e) = f(child.id()) {
             // the parent "dies" here: the command is left as it is (the job closes as it would with a dead process)
@@ -312,7 +318,9 @@ mod group {
     #[cfg(windows)]
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     #[cfg(windows)]
-    const STILL_ACTIVE: u32 = 259;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    #[cfg(windows)]
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
 
     #[cfg(windows)]
     #[repr(C)]
@@ -357,7 +365,7 @@ mod group {
         fn SetInformationJobObject(job: Handle, class: i32, info: *mut std::ffi::c_void, len: u32) -> i32;
         fn CloseHandle(h: Handle) -> i32;
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
-        fn GetExitCodeProcess(h: Handle, code: *mut u32) -> i32;
+        fn WaitForSingleObject(h: Handle, millis: u32) -> u32;
         fn GetProcessTimes(h: Handle, creation: *mut FileTime, exit: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
     }
 
@@ -367,17 +375,26 @@ mod group {
         fn NtResumeProcess(process: Handle) -> i32;
     }
 
-    /// Resume a child created suspended (Windows); elsewhere nothing.
+    /// Resume a child created suspended (Windows); elsewhere nothing. A failing NTSTATUS is an `Err`: the caller ends the child.
     #[cfg(windows)]
-    pub fn resume(child: &std::process::Child) {
+    pub fn resume(child: &std::process::Child) -> Result<(), String> {
         use std::os::windows::io::AsRawHandle;
-        // SAFETY: the process handle is borrowed from `child`, which created the process suspended
-        unsafe {
-            NtResumeProcess(child.as_raw_handle());
+        resume_handle(child.as_raw_handle())
+    }
+    #[cfg(windows)]
+    pub(super) fn resume_handle(h: Handle) -> Result<(), String> {
+        // SAFETY: a plain syscall on a process handle the caller owns (or a bad handle, which it reports as a status)
+        let status = unsafe { NtResumeProcess(h) };
+        // an NTSTATUS below 0 is an error (its severity bits are 11 or 10)
+        if status < 0 {
+            return Err(format!("the suspended plugin could not be resumed (NtResumeProcess status 0x{:08X}); it was ended", status as u32));
         }
+        Ok(())
     }
     #[cfg(not(windows))]
-    pub fn resume(_child: &std::process::Child) {}
+    pub fn resume(_child: &std::process::Child) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Kill this child when its parent dies (Linux; called between fork and exec).
     #[cfg(target_os = "linux")]
@@ -417,18 +434,19 @@ mod group {
         }
     }
 
+    /// Is `pid` running (Windows)? Read off the process object's wait state, not its exit code: a process that ended with exit code
+    /// 259 (`STILL_ACTIVE`) would read as alive by `GetExitCodeProcess`.
     #[cfg(windows)]
     pub fn running(pid: u32) -> bool {
         // SAFETY: plain Win32 calls on a handle we own and close
         unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
             if h.is_null() {
                 return false;
             }
-            let mut code = 0u32;
-            let ok = GetExitCodeProcess(h, &mut code) != 0;
+            let state = WaitForSingleObject(h, 0);
             CloseHandle(h);
-            ok && code == STILL_ACTIVE
+            state == WAIT_TIMEOUT
         }
     }
 
@@ -719,4 +737,14 @@ impl FakeRunner {
 /// A shell command line as a prepared [`Command`] (cmd.exe on Windows, `/bin/sh -c` elsewhere), for callers that set their own directory.
 pub fn shell_command(cmd: &str) -> Command {
     shell(cmd)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// Enable-readiness MINOR 6: a resume that fails is reported, never taken for a running plugin.
+    #[test]
+    fn minor6_a_resume_that_fails_is_an_error() {
+        let e = super::group::resume_handle(std::ptr::null_mut()).unwrap_err();
+        assert!(e.contains("NtResumeProcess status 0x"), "{e}");
+    }
 }
