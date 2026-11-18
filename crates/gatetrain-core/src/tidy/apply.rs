@@ -203,7 +203,8 @@ fn archive_image(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Result<(String, Strin
         }
     }
     let r = ops.run_argv(&["docker".into(), "save".into(), "-o".into(), dest.clone(), it.key.clone()], Some(cfg.remove_timeout_s))?;
-    let size = if r.ok() && ops.exists(&dest)? == Some(true) { ops.size(&dest)? } else { None };
+    // one file: a stat, never `size` (which is None on an age-only disk, where the archive could then never succeed)
+    let size = if r.ok() && ops.exists(&dest)? == Some(true) { ops.file_size(&dest)? } else { None };
     if !r.ok() || !size.is_some_and(|s| s > 0) {
         if ops.exists(&dest)? == Some(true) {
             let _ = ops.remove_dir(&dest); // a partial file we just made, inside the archive folder

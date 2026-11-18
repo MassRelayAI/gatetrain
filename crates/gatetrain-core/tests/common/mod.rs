@@ -350,6 +350,13 @@ impl Sim {
             let m = re(r"-LiteralPath (.+?) -Recurse").captures(&c).unwrap();
             return ok(format!("{}\n", st.total(&m[1])));
         }
+        let m = re(r"^test -f (.+?) && stat -c %s ").captures(&c).or_else(|| re(r"Get-Item -LiteralPath (.+?) -Force \| Where-Object .*\)\.Length").captures(&c));
+        if let Some(m) = m {
+            return match st.get(&m[1]) {
+                Some(e) if e.typ == "file" => ok(format!("{}\n", e.size)),
+                _ => RunOut::done(1, ""),
+            };
+        }
         let m = re(r"^stat -c %Y (.+)$").captures(&c).or_else(|| re(r"Get-Item -LiteralPath (.+?)\)\.LastWrite").captures(&c));
         if let Some(m) = m {
             return match st.get(&m[1]) {

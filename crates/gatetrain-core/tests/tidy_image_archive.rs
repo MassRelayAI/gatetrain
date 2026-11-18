@@ -12,13 +12,18 @@ const TAR: &str = "/trash/docker-images/gate-img_1@aaa111.tar";
 
 /// A host whose disks are `/build` and `/trash`; `/trash` may hold the archive (`use = ["archive"]`) with the given floor.
 fn host(extra: Value, archive_use: bool, floor: f64) -> (Host, TidyCfg) {
+    host_m(extra, archive_use, floor, "du")
+}
+
+/// As `host`, with `/trash` measured as `trash_measure` (`du` or `age-only`).
+fn host_m(extra: Value, archive_use: bool, floor: f64, trash_measure: &str) -> (Host, TidyCfg) {
     let h = Host {
         name: "h1".into(),
         reach: "local".into(),
         os: "linux".into(),
         disks: vec![
             Disk { path: "/build".into(), min_free_gb: Num::F(1.0), measure: "du".into(), ..Default::default() },
-            Disk { path: "/trash".into(), min_free_gb: Num::F(floor), measure: "du".into(), r#use: if archive_use { vec!["archive".into()] } else { vec![] }, ..Default::default() },
+            Disk { path: "/trash".into(), min_free_gb: Num::F(floor), measure: trash_measure.into(), r#use: if archive_use { vec!["archive".into()] } else { vec![] }, ..Default::default() },
         ],
         tidy: to_table(&merged(extra)),
         ..Default::default()
@@ -33,7 +38,11 @@ fn arch(d: &tempfile::TempDir) -> Value {
 }
 
 fn run_images(sim: &Shared, extra: Value, archive_use: bool, floor: f64) -> (Vec<Value>, usize, usize) {
-    let (h, t) = host(extra, archive_use, floor);
+    run_images_m(sim, extra, archive_use, floor, "du")
+}
+
+fn run_images_m(sim: &Shared, extra: Value, archive_use: bool, floor: f64, trash_measure: &str) -> (Vec<Value>, usize, usize) {
+    let (h, t) = host_m(extra, archive_use, floor, trash_measure);
     let inv = gather(&h, sim, &t, Some(NOW as f64)).unwrap();
     let log = std::path::PathBuf::from(t.log.clone());
     let (done, failed, _) = apply_plan_report(&h, sim, &t, &inv, &["images".to_string()], Some(NOW as f64), None, false).unwrap();
@@ -63,6 +72,36 @@ fn an_unused_image_is_archived_then_removed_and_the_row_names_the_archive() {
     let row = serde_json::to_string(&rows).unwrap();
     assert!(row.contains(&format!("archived: {TAR} ")) && row.contains("freed: "), "{row}");
     assert!(has_image(&sim, "gate-img:2"), "the used image is untouched");
+}
+
+#[test]
+fn an_archive_disk_measured_age_only_still_archives_then_removes() {
+    // the archive disk is a slow HDD measured `age-only` (never du-sized); the one tar is still checked with a single-file stat
+    let sim = linux_sim();
+    sim.s().free = 500.0;
+    let d = tempfile::tempdir().unwrap();
+    let (rows, done, failed) = run_images_m(&sim, arch(&d), true, 1.0, "age-only");
+    assert_eq!((done, failed), (1, 0), "{rows:?}");
+    assert!(sim.s().get(TAR).is_some_and(|e| e.size == 2 * (1 << 30)), "the tar holds the image");
+    assert!(!has_image(&sim, "gate-img:1"), "removed after the save");
+    assert!(!sim.s().calls.iter().any(|c| c.starts_with("du -sk") && c.contains("docker-images")), "the age-only disk is never du-sized");
+    assert!(serde_json::to_string(&rows).unwrap().contains(&format!("archived: {TAR} ")), "{rows:?}");
+}
+
+#[test]
+fn an_age_only_archive_disk_still_refuses_an_empty_or_failed_save() {
+    for (zero, fails) in [(true, false), (false, true)] {
+        let sim = linux_sim();
+        sim.s().free = 500.0;
+        sim.s().save_zero = zero;
+        sim.s().save_fails = fails;
+        let d = tempfile::tempdir().unwrap();
+        let (rows, done, failed) = run_images_m(&sim, arch(&d), true, 1.0, "age-only");
+        assert_eq!((done, failed), (0, 1), "zero {zero} fails {fails}: {rows:?}");
+        assert!(has_image(&sim, "gate-img:1"), "kept");
+        assert!(!sim.s().calls.iter().any(|c| c.starts_with("docker rmi")), "no rmi");
+        assert!(sim.s().get(TAR).is_none(), "a partial or empty tar is removed");
+    }
 }
 
 #[test]

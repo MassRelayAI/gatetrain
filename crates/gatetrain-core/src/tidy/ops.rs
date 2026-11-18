@@ -481,6 +481,19 @@ impl<'a> Ops<'a> {
         Ok(if c.ok() && !w.is_empty() && is_digits(w[0]) { w[0].parse::<i64>().ok().map(|k| k * 1024) } else { None })
     }
 
+    /// Bytes of ONE regular file, read with a stat whatever the disk's `measure` (a single stat is cheap even on an age-only disk). None when
+    /// p is missing, is not a regular file, or the probe failed. Used to check the one tar `docker save` left; folders are sized by `size`.
+    pub fn file_size(&self, p: &str) -> R<Option<i64>> {
+        let c = if self.win {
+            self.run0(&format!("powershell -NoProfile -Command \"(Get-Item -LiteralPath {} -Force | Where-Object {{ -not $_.PSIsContainer }}).Length\"", self.psq(p)?))?
+        } else {
+            let q = self.q(p)?;
+            self.run0(&format!("test -f {q} && stat -c %s {q}"))?
+        };
+        let s = strip(&c.out);
+        Ok(if c.ok() && is_digits(s) { s.parse().ok() } else { None })
+    }
+
     pub fn mtime(&self, p: &str) -> R<Option<i64>> {
         let c = if self.win {
             self.run0(&format!("powershell -NoProfile -Command \"[DateTimeOffset]::new((Get-Item -LiteralPath {}).LastWriteTimeUtc).ToUnixTimeSeconds()\"", self.psq(p)?))?
