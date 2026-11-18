@@ -526,6 +526,10 @@ start token (it could not be read) cannot be told from a live deploy, so it wait
 step, the batch and the process group; a person checks that it is gone or ends it (`kill -KILL -- -<pgid>` on Unix,
 `taskkill /T /F /PID <pid>` on Windows), then runs `gatetrain batch advance <batch> --retry --reason <why>`, which removes that batch's
 records with an override row naming them (`retry.person`, `cleared_records`); the next advance probes the deploy as after any crash.
+The retry checks first: while a recorded process (or, for a step that does not survive its parent, a member of its process group)
+still runs, it is refused `deploy.record-live`, names the pid and the command that ends it, and clears nothing. A record without a pid
+or a start token is cleared only with `--retry --clear-unverifiable-record`, which says that a second deploy may start beside one
+nobody can see if it still runs.
 Before it advances anything the tick verifies the decision log; a
 log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.

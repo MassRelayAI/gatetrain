@@ -301,6 +301,16 @@ enum Probe {
     Running(String),
 }
 
+/// What a record of a running T8a step (`<state>/running/<target>.json`) says about its process.
+enum Rec {
+    /// The process and its group are gone (or a later process holds the pid).
+    Gone,
+    /// It still runs: its leader under its start token, or a member of its process group.
+    Live(String),
+    /// Nothing can tell whether it runs: no pid or no start token was recorded, or the record cannot be read.
+    Unverifiable(String),
+}
+
 pub struct Engine<'a> {
     pub ledger: &'a mut Ledger,
     pub cfg: &'a BatchConfig,
@@ -748,34 +758,44 @@ impl<'a> Engine<'a> {
         out
     }
 
-    /// `Some(what)` while the process of this record (or, on Unix, its process group) may still run. The leader is the recorded pid
-    /// under its recorded start token: a record without a token (it could not be read at spawn) is not trusted, it waits; a pid that a
-    /// later process holds (another token) is gone, its group too (the kernel does not reuse a pid while its process group lives). Its
-    /// process group counts only for a step that does not survive its parent: a `survives_parent` deploy leaves its service running on
-    /// purpose, so only its leader is judged.
-    fn record_running(&self, path: &Path, v: &Value) -> Option<String> {
+    /// What a record says about its process. The leader is the recorded pid under its recorded start token: a record without a pid
+    /// (gatetrain stopped between the intent marker and the spawn), without a token (it could not be read at spawn) or that cannot be
+    /// read is not trusted (`Unverifiable`); a pid that a later process holds (another token) is gone, its group too (the kernel does
+    /// not reuse a pid while its process group lives). Its process group counts only for a step that does not survive its parent: a
+    /// `survives_parent` deploy leaves its service running on purpose, so only its leader is judged.
+    fn record_state(&self, path: &Path, v: &Value) -> Rec {
         let step = v["step"].as_str().unwrap_or("a deploy step");
         let Some(batch) = v["batch"].as_str() else {
-            return Some(format!("the record {} cannot be read; a person checks that no deploy runs and removes it", path.display()));
+            return Rec::Unverifiable(format!("the record {} cannot be read; a person checks that no deploy runs and removes it", path.display()));
         };
+        let unverifiable = format!("A person checks that it is not running and runs `gatetrain batch advance {batch} --retry --clear-unverifiable-record --reason <why>`, which clears the record");
         let Some(pid) = v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else {
-            return Some(format!(
-                "{step} of batch {batch} was starting when its gatetrain stopped, before its pid was recorded: it may be running, and nothing can tell; the next step waits. A person checks that it is not running and runs `gatetrain batch advance {batch} --retry --reason <why>`, which clears the record"
-            ));
+            return Rec::Unverifiable(format!("{step} of batch {batch} was starting when its gatetrain stopped, before its pid was recorded: it may be running, and nothing can tell; the next step waits. {unverifiable}"));
         };
         let (group, end) = if cfg!(unix) { (format!(" (process group {pid})"), format!("`kill -KILL -- -{pid}`")) } else { (String::new(), format!("`taskkill /T /F /PID {pid}`")) };
-        let clear = format!("If it is stuck, a person ends it ({end}) and runs `gatetrain batch advance {batch} --retry --reason <why>`, which clears the record");
         let Some(token) = v["token"].as_u64() else {
-            return Some(format!("{step} of batch {batch} was recorded as pid {pid}{group} without a start token, so it cannot be told from a later process that reuses the pid; the next step waits. {clear}"));
+            return Rec::Unverifiable(format!("{step} of batch {batch} was recorded as pid {pid}{group} without a start token, so it cannot be told from a later process that reuses the pid; the next step waits. {unverifiable}"));
         };
+        let clear = format!("If it is stuck, a person ends it ({end}) and runs `gatetrain batch advance {batch} --retry --reason <why>`, which clears the record");
         if crate::runner::process_alive(pid, Some(token)) {
-            return Some(format!("{step} of batch {batch} is still running as pid {pid}{group}, started by a gatetrain that is gone; the next step waits for it. {clear}"));
+            return Rec::Live(format!("{step} of batch {batch} is still running as pid {pid}{group}, started by a gatetrain that is gone; the next step waits for it. {clear}"));
         }
         if crate::runner::process_token(pid).is_some_and(|now| now != token) {
-            return None; // a later process holds the pid: the recorded one and its group are gone
+            return Rec::Gone; // a later process holds the pid: the recorded one and its group are gone
         }
         let survives = v["survives_parent"].as_bool().unwrap_or(false);
-        (!survives && crate::runner::group_alive(pid)).then(|| format!("{step} of batch {batch}: its leader pid {pid} ended, but its process group {pid} still has members; the next step waits for them. {clear}"))
+        if !survives && crate::runner::group_alive(pid) {
+            return Rec::Live(format!("{step} of batch {batch}: its leader pid {pid} ended, but its process group {pid} still has members; the next step waits for them. {clear}"));
+        }
+        Rec::Gone
+    }
+
+    /// `Some(what)` while the process of this record may still run (it is live, or nothing can tell).
+    fn record_running(&self, path: &Path, v: &Value) -> Option<String> {
+        match self.record_state(path, v) {
+            Rec::Gone => None,
+            Rec::Live(w) | Rec::Unverifiable(w) => Some(w),
+        }
     }
 
     /// A T8a step of batch `id` a dead process left running: `Some(what)` while it lives.
@@ -1119,6 +1139,13 @@ impl<'a> Engine<'a> {
     /// `batch advance --retry --reason`: a person lets one more attempt of the transition whose last attempt failed through. It is an
     /// override row (`retry.person`) and a side event `retry` that leaves the state alone; the next `advance` takes the attempt.
     pub fn retry_failed(&mut self, id: &str, reason: &str) -> Result<Outcome> {
+        self.retry_failed_with(id, reason, false)
+    }
+
+    /// [`Engine::retry_failed`]; `clear_unverifiable` (`--clear-unverifiable-record`) also clears a record that cannot be told from a
+    /// live deploy (no pid or no start token was recorded). A record whose process (or, for a step that does not survive its parent,
+    /// its process group) still runs is never cleared: the retry is refused (`deploy.record-live`) and names what to end.
+    pub fn retry_failed_with(&mut self, id: &str, reason: &str, clear_unverifiable: bool) -> Result<Outcome> {
         let _git = self.git_scope(id);
         let f = self.fold(id)?;
         if let Some(o) = self.parked(id, &f)? {
@@ -1131,6 +1158,20 @@ impl<'a> Engine<'a> {
         // who checked that it is gone clears it here, with an override row that names what was cleared
         let mine: Vec<(PathBuf, Value)> = self.running_records().into_iter().filter(|(_, v)| v["batch"].as_str() == Some(id)).collect();
         if !mine.is_empty() {
+            let (mut live, mut unseen) = (vec![], vec![]);
+            for (p, v) in &mine {
+                match self.record_state(p, v) {
+                    Rec::Live(w) => live.push(w),
+                    Rec::Unverifiable(w) => unseen.push(w),
+                    Rec::Gone => {}
+                }
+            }
+            if !live.is_empty() {
+                return self.refuse(id, "deploy.record-live", format!("{}; the record is not cleared while it runs", live.join("; ")));
+            }
+            if !unseen.is_empty() && !clear_unverifiable {
+                return self.refuse(id, "deploy.record-unverifiable", format!("{}; without `--clear-unverifiable-record` the record is not cleared", unseen.join("; ")));
+            }
             let what: Vec<String> = mine
                 .iter()
                 .map(|(_, v)| {
@@ -1142,13 +1183,15 @@ impl<'a> Engine<'a> {
                     }
                 })
                 .collect();
-            let d = self.decide("override", id, None, "retry.person", "recorded", reason.trim().into(), Some(json!({"transition": "T8a", "from": f.state, "cleared_records": what})))?;
+            let blind = !unseen.is_empty();
+            let d = self.decide("override", id, None, "retry.person", "recorded", reason.trim().into(), Some(json!({"transition": "T8a", "from": f.state, "cleared_records": what, "unverifiable": blind})))?;
             for (p, _) in &mine {
                 std::fs::remove_file(p)?;
             }
             let n = f.max_attempt.get("retry").copied().unwrap_or(0) + 1;
             self.event(id, "retry", "done", n, Some(&f.state), None, None, None, Some(d), &json!({"transition": "T8a", "reason": reason.trim(), "cleared_records": what}))?;
-            return Ok(Outcome::Idle(format!("cleared the record of {}; the next advance probes the deploy: {}", what.join(", "), reason.trim())));
+            let warn = if blind { "; it could not be verified (--clear-unverifiable-record): if it still runs, a second deploy may start beside an unseen one" } else { "" };
+            return Ok(Outcome::Idle(format!("cleared the record of {}{warn}; the next advance probes the deploy: {}", what.join(", "), reason.trim())));
         }
         let Some(tr) = next_effect(&f.state) else { return Ok(Outcome::Idle(format!("batch {id} is {}: no transition with an effect to retry", f.state))) };
         let (crashes, stopped) = self.repeats(id, tr)?;

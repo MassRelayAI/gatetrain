@@ -376,6 +376,10 @@ enum BatchCmd {
         retry: bool,
         #[arg(long)]
         reason: Option<String>,
+        /// With --retry: also clear a deploy record that cannot be verified (no pid or no start token was recorded). If that deploy
+        /// still runs, a second deploy may start beside it: use it only after checking the target host by hand
+        #[arg(long, requires = "retry")]
+        clear_unverifiable_record: bool,
     },
     /// A person's hold
     Hold {
@@ -672,10 +676,12 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
             }
             ExitCode::SUCCESS
         }
-        BatchCmd::Advance { id, retry, reason } => {
+        BatchCmd::Advance { id, retry, reason, clear_unverifiable_record } => {
             if retry {
-                if let Outcome::Idle(m) = e.retry_failed(&id, &reason.unwrap_or_default())? {
-                    println!("{m}");
+                match e.retry_failed_with(&id, &reason.unwrap_or_default(), clear_unverifiable_record)? {
+                    Outcome::Idle(m) => println!("{m}"),
+                    // a refused retry (a deploy record whose process still runs) advances nothing
+                    o => return Ok(report(o)),
                 }
             }
             report(e.advance(&id)?)

@@ -1479,8 +1479,10 @@ fn minor2_a_crash_before_the_pid_is_recorded_leaves_a_marker_that_waits() {
     assert_eq!(lines_in(&fx, "deploy.txt"), 0, "nothing deployed beside a deploy that may be running");
     let r = fx.tick();
     assert!(r.lines[0].starts_with("b1: merged, waits: "), "{:?}", r.lines);
-    // MINOR 3: a person who checked that nothing runs clears the marker with a retry override
-    match fx.with(|e| e.retry_failed("b1", "no deploy process runs on the host")).unwrap() {
+    // MINOR 3: a person who checked that nothing runs clears the marker with a retry override (B1: a marker without a pid only with
+    // the explicit flag)
+    assert!(matches!(fx.with(|e| e.retry_failed("b1", "no deploy process runs on the host")).unwrap(), Outcome::Refused { .. }));
+    match fx.with(|e| e.retry_failed_with("b1", "no deploy process runs on the host", true)).unwrap() {
         Outcome::Idle(m) => assert!(m.contains("cleared") && m.contains("deploy staging"), "{m}"),
         o => panic!("{o:?}"),
     }
@@ -1561,7 +1563,9 @@ fn minor3_a_record_is_judged_by_its_start_token_and_a_person_clears_it() {
         }
         o => panic!("{o:?}"),
     }
-    // a person's retry clears it, with an override row
+    // the person ends it first (B1: a retry against a live record is refused), then the retry clears it, with an override row
+    let _ = live.kill();
+    let _ = live.wait();
     match fx.with(|e| e.retry_failed("b1", "the old deploy is stuck; I ended it")).unwrap() {
         Outcome::Idle(m) => assert!(m.contains("cleared") && m.contains(&format!("pid {pid}")), "{m}"),
         o => panic!("{o:?}"),
@@ -1569,8 +1573,89 @@ fn minor3_a_record_is_judged_by_its_start_token_and_a_person_clears_it() {
     assert!(!record_path(&fx, "staging").exists());
     assert_eq!(fx.count("decisions WHERE kind='override' AND rule='retry.person' AND json_extract(evidence,'$.cleared_records') IS NOT NULL"), 1);
     assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"));
+}
+
+/// B1 of the enable-readiness review (round 2): a person's retry never clears the record of a deploy that still runs. It is refused,
+/// names the pid (and group) and the command that ends it, removes nothing and writes no override, and the deploy is not run beside it.
+#[test]
+fn b1_a_retry_against_a_live_record_is_refused_and_clears_nothing() {
+    let mut live = std::process::Command::new("sh").args(["-c", "sleep 60"]).spawn().unwrap();
+    let pid = live.id();
+    let token = gatetrain_core::runner::process_token(pid);
+    assert!(token.is_some(), "this platform reads a start token");
+    let mut fx = pending_with_record(serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": pid, "token": token}));
+    let o = fx.with(|e| e.retry_failed("b1", "I think it is gone")).unwrap();
+    let still = record_path(&fx, "staging").exists();
+    let overrides = fx.count("decisions WHERE kind='override' AND rule='retry.person'");
+    let next = fx.adv("b1");
+    let deployed = lines_in(&fx, "deploy.txt");
     let _ = live.kill();
     let _ = live.wait();
+    match o {
+        Outcome::Refused { rule, because, clears_by_itself, .. } => {
+            assert_eq!(rule, "deploy.record-live");
+            assert!(!clears_by_itself);
+            assert!(because.contains(&format!("pid {pid}")), "{because}");
+            let end = if cfg!(unix) { format!("kill -KILL -- -{pid}") } else { format!("taskkill /T /F /PID {pid}") };
+            assert!(because.contains(&end), "names the command that ends it: {because}");
+        }
+        o => panic!("a retry cleared a live deploy's record: {o:?}"),
+    }
+    assert!(still, "the record of a live deploy stays");
+    assert_eq!(overrides, 0, "no override was recorded");
+    assert!(matches!(next, Outcome::Waiting(_)), "the deploy still waits for it: {next:?}");
+    assert_eq!(deployed, 0, "nothing deployed beside the live one");
+}
+
+/// B1: on Unix a record whose leader ended but whose process group lives (a step that does not survive its parent) is refused too.
+#[cfg(unix)]
+#[test]
+fn b1_a_retry_against_a_live_process_group_is_refused() {
+    use std::os::unix::process::CommandExt;
+    let mut c = std::process::Command::new("sh");
+    c.args(["-c", "sleep 60 & exit 0"]).process_group(0);
+    let mut leader = c.spawn().unwrap();
+    let pgid = leader.id();
+    let token = gatetrain_core::runner::process_token(pgid);
+    leader.wait().unwrap();
+    let mut fx = pending_with_record(serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": pgid, "token": token}));
+    let o = fx.with(|e| e.retry_failed("b1", "the leader is gone")).unwrap();
+    let still = record_path(&fx, "staging").exists();
+    let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pgid}")]).status();
+    match o {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "deploy.record-live");
+            assert!(because.contains(&format!("process group {pgid}")) && because.contains(&format!("kill -KILL -- -{pgid}")), "{because}");
+        }
+        o => panic!("{o:?}"),
+    }
+    assert!(still);
+}
+
+/// B1: a record that cannot be told from a live deploy (no pid, or no start token) is cleared only with the explicit
+/// `--clear-unverifiable-record`, whose message says that a second deploy may start beside one nobody can see.
+#[test]
+fn b1_an_unverifiable_record_is_cleared_only_with_the_explicit_flag() {
+    for rec in [
+        serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging"}),
+        serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": 4_000_000_000u32, "token": null}),
+    ] {
+        let mut fx = pending_with_record(rec.clone());
+        match fx.with(|e| e.retry_failed("b1", "nothing runs, I looked")).unwrap() {
+            Outcome::Refused { rule, because, .. } => {
+                assert_eq!(rule, "deploy.record-unverifiable", "{rec}");
+                assert!(because.contains("--clear-unverifiable-record"), "{because}");
+            }
+            o => panic!("{rec}: an unverifiable record was cleared without the flag: {o:?}"),
+        }
+        assert!(record_path(&fx, "staging").exists());
+        match fx.with(|e| e.retry_failed_with("b1", "nothing runs, I looked", true)).unwrap() {
+            Outcome::Idle(m) => assert!(m.contains("cleared") && m.contains("a second deploy may start beside an unseen one"), "{m}"),
+            o => panic!("{o:?}"),
+        }
+        assert!(!record_path(&fx, "staging").exists());
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"));
+    }
 }
 
 /// MINOR 3: a pid that a later process reuses is not the recorded deploy (its token differs), even when that process leads a live
