@@ -92,7 +92,7 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
     }
     // the ledger lock before anything is written: a second tick (or a `batch` command holding it) means this tick does nothing
     let lock = tick::lock_path(&a.db);
-    let _held = match tick::take(&lock, "tick")? {
+    let held = match tick::take(&lock, "tick")? {
         tick::Taken::Got(l) => l,
         tick::Taken::Held(info) => {
             let Some(i) = info else {
@@ -104,8 +104,19 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
                 println!("tick: another tick holds the lock");
                 return Ok(ExitCode::SUCCESS);
             };
+            if let (Some(over), Some(step)) = (i.overdue_min(), i.effect.as_deref()) {
+                // beating, but the step it runs is past its own deadline: the heartbeat proves the process is alive, not that it moves
+                if over > 1.0 {
+                    println!("tick: the ledger lock is held by pid {} ({}) running {step}, {over:.0} min past its deadline; look at that process", i.pid, i.by);
+                    return Ok(ExitCode::from(1));
+                }
+            }
             if i.age_min().is_some_and(|m| m > cfg.stuck_minutes) {
                 println!("tick: the ledger lock is held by pid {} ({}) since {}, longer than [tick] stuck_minutes = {}; look at that process", i.pid, i.by, i.started, cfg.stuck_minutes);
+                return Ok(ExitCode::from(1));
+            }
+            if i.held_min().is_some_and(|m| m > cfg.max_hold_minutes) {
+                println!("tick: the ledger lock is held by pid {} ({}) since {}, longer than [tick] max_hold_minutes = {}, however recently it beat; look at that process", i.pid, i.by, i.started, cfg.max_hold_minutes);
                 return Ok(ExitCode::from(1));
             }
             println!("tick: another tick holds the lock (pid {}, started {})", i.pid, i.started);
@@ -121,7 +132,7 @@ pub fn run(a: TickArgs) -> Result<ExitCode> {
     }
     let (real, adm, state_dir) = seams::engine_seams(&a.db, &cfg, a.lock.clone(), Some((a.hosts.clone(), engine_host)))?;
     let actor = std::env::var("GATETRAIN_ACTOR").unwrap_or_else(|_| "tick".into());
-    let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor };
+    let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor, progress: Some(held.beat()) };
     let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
     let seams = RealHosts { hosts_path: a.hosts.to_string_lossy().into_owned(), needs: hosts.needs.clone() };
     let now_us = gatetrain_core::logfmt::Ts::now_utc().instant_us();

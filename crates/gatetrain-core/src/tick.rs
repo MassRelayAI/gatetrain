@@ -5,6 +5,12 @@
 //! What it never does (engine-v2 section 4, `engine-and-governance.md:629-631`): open a batch, choose lanes, apply advice, run a
 //! probe, leave anything queued to fire later, or move a batch by any path but `advance` (so every guard and every ledger row is the
 //! state machine's own). The ledger lock ([`try_lock`]) keeps two ticks from overlapping; scheduling is the operator's (cron, a timer).
+//!
+//! Clocks. A duration inside one process (a plugin's time limit, the launch handshake, the heartbeat interval) is measured on the
+//! monotonic clock (`Instant`), which a stepped wall clock cannot move. An age that another process or a later tick reads (the
+//! sidecar's `beat_ms`, `started` and a step's `deadline_ms`, the ledger rows' `at`) is wall-clock time, because that is the only
+//! clock two processes share: a wall clock stepped back makes such an age look younger, so a limit fires late by the step; a clock
+//! stepped forward makes it fire early. Neither is silent for long: the next beat and the next row carry the corrected time.
 use crate::advise::{self, Minutes};
 use crate::batch::{Engine, Ev, Outcome};
 use crate::config::{Config, Host};
@@ -38,6 +44,18 @@ pub struct TickLock {
     info: Option<PathBuf>,
     /// the heartbeat thread that refreshes the sidecar while a long effect runs; stopped before the sidecar is removed
     beat: Option<(std::sync::Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>)>,
+    /// what the engine runs now (the step and its deadline), which the heartbeat writes into the sidecar
+    effect: Beat,
+}
+
+/// The step the engine runs under the ledger lock: `{"effect": "<batch> <transition> <step>", "since_ms", "deadline_ms"}`, or nothing.
+pub type Beat = std::sync::Arc<std::sync::Mutex<Option<Value>>>;
+
+impl TickLock {
+    /// The cell the engine names its running step in ([`crate::batch::Engine::progress`]); the heartbeat publishes it.
+    pub fn beat(&self) -> Beat {
+        self.effect.clone()
+    }
 }
 
 impl Drop for TickLock {
@@ -86,7 +104,7 @@ pub fn try_lock(path: &Path) -> Result<Option<TickLock>> {
     }
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(TickLock { _file: file, info: None, beat: None })),
+        Ok(()) => Ok(Some(TickLock { _file: file, info: None, beat: None, effect: Beat::default() })),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(e)) => Err(e.into()),
     }
@@ -108,6 +126,9 @@ pub struct LockInfo {
     pub by: String,
     /// epoch milliseconds of the holder's newest heartbeat
     pub beat_ms: Option<i64>,
+    /// the step the holder runs (`<batch> <transition> <step>`) and the epoch milliseconds by which it must end
+    pub effect: Option<String>,
+    pub deadline_ms: Option<i64>,
 }
 
 impl LockInfo {
@@ -116,15 +137,34 @@ impl LockInfo {
         if let Some(b) = self.beat_ms {
             return Some((epoch_ms() - b) as f64 / 60_000.0);
         }
+        self.held_min()
+    }
+
+    /// Minutes since the holder took the lock (`started`), however recently it beat.
+    pub fn held_min(&self) -> Option<f64> {
         let t = logfmt::parse_iso(&self.started).ok()?;
         Some(Ts::now_utc().secs_since(&t) / 60.0)
+    }
+
+    /// Minutes the running step is past its deadline, when it is.
+    pub fn overdue_min(&self) -> Option<f64> {
+        let d = self.deadline_ms?;
+        let over = epoch_ms() - d;
+        (over > 0).then(|| over as f64 / 60_000.0)
     }
 }
 
 /// The sidecar, when it parses. It may describe an earlier holder that died without removing it: see [`holder`].
 pub fn read_info(lock: &Path) -> Option<LockInfo> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(info_path(lock)).ok()?).ok()?;
-    Some(LockInfo { pid: v["pid"].as_i64()?, started: v["started"].as_str()?.to_string(), by: v["by"].as_str().unwrap_or("?").to_string(), beat_ms: v["beat_ms"].as_i64() })
+    Some(LockInfo {
+        pid: v["pid"].as_i64()?,
+        started: v["started"].as_str()?.to_string(),
+        by: v["by"].as_str().unwrap_or("?").to_string(),
+        beat_ms: v["beat_ms"].as_i64(),
+        effect: v["effect"].as_str().map(String::from),
+        deadline_ms: v["deadline_ms"].as_i64(),
+    })
 }
 
 /// The sidecar of a held lock, only when its pid is alive (a dead pid means a stale sidecar of an earlier holder).
@@ -196,13 +236,23 @@ pub fn take_beating(path: &Path, by: &str, every: std::time::Duration) -> Result
             write_sidecar(path, &json!({"pid": pid, "started": started, "by": by, "beat_ms": epoch_ms()}))?;
             l.info = Some(info_path(path));
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (s2, lock) = (stop.clone(), path.to_path_buf());
+            let (s2, lock, cell) = (stop.clone(), path.to_path_buf(), l.effect.clone());
             let h = std::thread::spawn(move || {
                 let mut last = std::time::Instant::now();
+                let mut said: Option<Value> = None;
                 while !s2.load(std::sync::atomic::Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(20).min(every));
-                    if last.elapsed() >= every {
-                        let _ = write_sidecar(&lock, &json!({"pid": pid, "started": started, "by": by, "beat_ms": epoch_ms()}));
+                    let now: Option<Value> = cell.lock().ok().and_then(|g| g.clone());
+                    // a beat every `every`, and at once when the running step changes
+                    if last.elapsed() >= every || now != said {
+                        let mut info = json!({"pid": pid, "started": started, "by": by, "beat_ms": epoch_ms()});
+                        if let Some(e) = &now {
+                            info["effect"] = e["effect"].clone();
+                            info["deadline_ms"] = e["deadline_ms"].clone();
+                            info["effect_since_ms"] = e["since_ms"].clone();
+                        }
+                        let _ = write_sidecar(&lock, &info);
+                        said = now;
                         last = std::time::Instant::now();
                     }
                 }

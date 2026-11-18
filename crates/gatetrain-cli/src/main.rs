@@ -545,7 +545,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
                     }
                 }
             };
-            run_batch(&db, &config, lock, hosts.zip(host), cmd)
+            run_batch(&db, &config, lock, hosts.zip(host), cmd, _held.as_ref().map(|l| l.beat()))
         }
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
@@ -629,13 +629,13 @@ fn precheck_cmd(config: &Path, base: Option<String>, repo: &Path, par: Option<us
     ExitCode::from(if r.reds() == 0 { 0 } else { 1 })
 }
 
-fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(PathBuf, String)>, cmd: BatchCmd) -> Result<ExitCode> {
+fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(PathBuf, String)>, cmd: BatchCmd, beat: Option<gatetrain_core::tick::Beat>) -> Result<ExitCode> {
     let mut ledger = open_existing(db)?;
     ledger.require_current().context("run `gatetrain ledger migrate` first")?;
     let cfg = if config.exists() { BatchConfig::load(config)? } else { BatchConfig::default() };
     let (real, adm, state_dir) = seams::engine_seams(db, &cfg, lock, hosts)?;
     let actor = std::env::var("GATETRAIN_ACTOR").unwrap_or_else(|_| "engine".into());
-    let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor };
+    let mut e = Engine { ledger: &mut ledger, cfg: &cfg, lock: &real, adm: &adm, now: &system_now, state_dir, actor, progress: beat };
     let report = |o: Outcome| -> ExitCode {
         match &o {
             Outcome::Advanced { from, to, note } => println!("{from} -> {to} {note}"),

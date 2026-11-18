@@ -224,7 +224,7 @@ fn minor1_a_tick_finding_the_lock_held_too_long_says_so_and_exits_1() {
     let t = String::from_utf8_lossy(&o.stdout).to_string();
     assert!(t.starts_with(&format!("tick: the ledger lock is held by pid {me} (tick) since 2026-01-01T00:00:00Z")), "{t}");
     assert!(t.contains("[tick] stuck_minutes = 60"), "{t}");
-    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[tick]\nenabled = true\nstuck_minutes = 999999999\n").unwrap();
+    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[tick]\nenabled = true\nstuck_minutes = 999999999\nmax_hold_minutes = 999999999\n").unwrap();
     let o = fx.tick(&[]);
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), format!("tick: another tick holds the lock (pid {me}, started 2026-01-01T00:00:00Z)"));
@@ -302,7 +302,9 @@ fn rev3_minor2_stuck_is_judged_by_the_heartbeat_not_the_start() {
     assert!(held.is_some());
     let me = std::process::id();
     let beat = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-    std::fs::write(gatetrain_core::tick::info_path(&lp), format!("{{\"pid\": {me}, \"started\": \"2026-01-01T00:00:00Z\", \"by\": \"tick\", \"beat_ms\": {beat}}}")).unwrap();
+    // started two hours ago (past stuck_minutes = 60, within max_hold_minutes) and beating now
+    let started = chrono_like_iso(2 * 3600);
+    std::fs::write(gatetrain_core::tick::info_path(&lp), format!("{{\"pid\": {me}, \"started\": \"{started}\", \"by\": \"tick\", \"beat_ms\": {beat}}}")).unwrap();
     let o = fx.tick(&[]);
     assert_eq!(o.status.code(), Some(0), "started long ago but beating now: a long deploy, not a stuck holder: {}", out(&o));
 }
@@ -350,4 +352,42 @@ fn s2_batch_advance_after_a_failed_attempt_is_refused_until_retry_with_a_reason(
     let o = adv(&["--retry", "--reason", "the stack script was fixed"]);
     assert_eq!(o.status.code(), Some(1), "one more attempt ran (and failed again): {}", out(&o));
     assert!(out(&o).contains("one more attempt of T1 is allowed"), "{}", out(&o));
+}
+
+/// An ISO time `secs` ago, in UTC.
+fn chrono_like_iso(secs: u64) -> String {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - secs;
+    gatetrain_core::batch::iso_of(t as i64)
+}
+
+fn beating_sidecar(fx: &Fx, started: &str, extra: &str) {
+    let me = std::process::id();
+    let beat = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    std::fs::write(gatetrain_core::tick::info_path(&lock_of(fx)), format!("{{\"pid\": {me}, \"started\": \"{started}\", \"by\": \"tick\", \"beat_ms\": {beat}{extra}}}")).unwrap();
+}
+
+#[test]
+fn s6_a_beating_holder_past_its_step_deadline_makes_the_tick_exit_1() {
+    let fx = Fx::new(true);
+    let held = gatetrain_core::tick::try_lock(&lock_of(&fx)).unwrap();
+    assert!(held.is_some());
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    beating_sidecar(&fx, &chrono_like_iso(60), &format!(", \"effect\": \"b1 T8a deploy staging\", \"deadline_ms\": {}", now_ms - 10 * 60_000));
+    let o = fx.tick(&[]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(out(&o).contains("b1 T8a deploy staging") && out(&o).contains("past its deadline"), "{}", out(&o));
+    // the same step within its deadline is a busy holder, exit 0
+    beating_sidecar(&fx, &chrono_like_iso(60), &format!(", \"effect\": \"b1 T8a deploy staging\", \"deadline_ms\": {}", now_ms + 10 * 60_000));
+    assert_eq!(fx.tick(&[]).status.code(), Some(0));
+}
+
+#[test]
+fn s6_a_holder_beating_for_longer_than_max_hold_minutes_makes_the_tick_exit_1() {
+    let fx = Fx::new(true);
+    let held = gatetrain_core::tick::try_lock(&lock_of(&fx)).unwrap();
+    assert!(held.is_some());
+    beating_sidecar(&fx, &chrono_like_iso(13 * 3600), "");
+    let o = fx.tick(&[]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(out(&o).contains("[tick] max_hold_minutes = 720"), "{}", out(&o));
 }

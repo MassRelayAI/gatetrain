@@ -123,6 +123,14 @@ pub struct BatchConfig {
     /// `[chain] launch_ack_secs` (default 60): how long a launch waits for the holder to name its run (the host lock, or `HOLDS <run>`
     /// in the log) before the launch fails clean and the holder is stopped.
     pub launch_ack_secs: f64,
+    /// `[timeouts] plugin_min` (default 30): the limit of every plugin without one of its own (stack, hub rebuild, regen, health,
+    /// cache verify, legacy stamp). `[preflight] timeout_min` (default 60) and `[postmerge] timeout_min` (default 30) for those two;
+    /// a deploy target has its own `timeout_min` (default 60). Every limit is a finite number of minutes above 0, at most 1440.
+    pub plugin_timeout_min: f64,
+    pub preflight_timeout_min: f64,
+    pub postmerge_timeout_min: f64,
+    /// `[tick] max_hold_minutes` (default 720): a holder of the ledger lock older than this needs a person even while it beats.
+    pub max_hold_minutes: f64,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -179,10 +187,22 @@ impl Default for BatchConfig {
             max_run_minutes: 360.0,
             retry_budgets: BTreeMap::new(),
             launch_ack_secs: 60.0,
+            plugin_timeout_min: 30.0,
+            preflight_timeout_min: 60.0,
+            postmerge_timeout_min: 30.0,
+            max_hold_minutes: 720.0,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
     }
+}
+
+/// The longest plugin limit accepted: a day.
+pub const MAX_LIMIT_MIN: f64 = 1440.0;
+
+/// A plugin limit: a finite number of minutes above 0 and at most [`MAX_LIMIT_MIN`].
+fn limit_min(x: &toml::Value) -> Option<f64> {
+    x.as_float().or_else(|| x.as_integer().map(|i| i as f64)).filter(|m| m.is_finite() && *m > 0.0 && *m <= MAX_LIMIT_MIN)
 }
 
 fn argv(v: Option<&toml::Value>) -> Vec<String> {
@@ -318,6 +338,18 @@ impl BatchConfig {
                 c.max_ahead = n.max(0) as usize;
             }
             c.prove_ahead = p.get("prove_ahead").and_then(|b| b.as_bool()).unwrap_or(false);
+        }
+        for (table, key, slot) in [
+            ("timeouts", "plugin_min", &mut c.plugin_timeout_min),
+            ("preflight", "timeout_min", &mut c.preflight_timeout_min),
+            ("postmerge", "timeout_min", &mut c.postmerge_timeout_min),
+        ] {
+            if let Some(x) = v.get(table).and_then(|t| t.get(key)) {
+                *slot = limit_min(x).ok_or_else(|| Error::Batch(format!("gatetrain.toml: [{table}] {key} is a number of minutes above 0 and at most {MAX_LIMIT_MIN}, not {x}")))?;
+            }
+        }
+        if let Some(x) = v.get("tick").and_then(|t| t.get("max_hold_minutes")) {
+            c.max_hold_minutes = x.as_float().or_else(|| x.as_integer().map(|i| i as f64)).filter(|m| m.is_finite() && *m > 0.0).ok_or_else(|| Error::Batch(format!("gatetrain.toml: [tick] max_hold_minutes is a number of minutes above 0, not {x}")))?;
         }
         if let Some(n) = v.get("chain").and_then(|c| c.get("launch_ack_secs")) {
             match n.as_float().or_else(|| n.as_integer().map(|i| i as f64)) {

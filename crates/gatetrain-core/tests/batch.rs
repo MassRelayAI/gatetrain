@@ -63,19 +63,19 @@ impl Fx {
 
     fn adv(&mut self, id: &str) -> gatetrain_core::Result<Outcome> {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         e.advance(id)
     }
 
     fn state(&mut self, id: &str) -> String {
         let adm = AllowAll;
-        let e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into() };
+        let e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         e.status(id).unwrap()["state"].as_str().unwrap().to_string()
     }
 
     fn open(&mut self, id: &str) {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         e.new_batch(id, "main", &self.repo, &["lane1".into(), "lane2".into()]).unwrap();
     }
 
@@ -291,7 +291,7 @@ fn admission_refusal_is_a_refusal_with_its_reason() {
     fx.step("b1", "stacked");
     fx.step("b1", "settled");
     let deny = DenyRole("light", "no free slot on the light host");
-    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &deny, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into() };
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &deny, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into(), progress: None };
     assert!(matches!(e.advance("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "host.admission"));
 }
 
@@ -302,18 +302,18 @@ fn hold_and_release_round_trip_and_abandon_deletes_nothing() {
     fx.step("b1", "stacked");
     let adm = AllowAll;
     {
-        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
         e.hold("b1", "waiting on a review").unwrap();
     }
     assert_eq!(fx.state("b1"), "held");
     assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "batch.held"));
     {
-        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
         e.release("b1").unwrap();
     }
     assert_eq!(fx.state("b1"), "stacked");
     {
-        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
         e.abandon("b1", "dropped").unwrap();
     }
     assert_eq!(fx.state("b1"), "abandoned");
@@ -341,7 +341,7 @@ fn later() -> String {
 impl Fx {
     fn adv_at(&mut self, id: &str, now: &'static fn() -> String) -> gatetrain_core::Result<Outcome> {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now, state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now, state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         e.advance(id)
     }
 
@@ -698,7 +698,7 @@ fn an_admission_refusal_leaves_with_the_exit_code_of_the_hold_that_would_refuse(
         fx.step("b1", "stacked");
         fx.step("b1", "settled");
         let deny = Rule(rule);
-        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &deny, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &deny, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into(), progress: None };
         let o = e.advance("b1").unwrap();
         assert!(matches!(&o, Outcome::Refused { rule: r, .. } if r == rule), "{o:?}");
         assert_eq!(o.exit_code(), code, "{rule}");
@@ -708,7 +708,7 @@ fn an_admission_refusal_leaves_with_the_exit_code_of_the_hold_that_would_refuse(
 
 fn status_fact(fx: &mut Fx, id: &str, path: &[&str]) -> serde_json::Value {
     let adm = AllowAll;
-    let e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into() };
+    let e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into(), progress: None };
     let mut v = e.status(id).unwrap()["facts"].clone();
     for p in path {
         v = v[*p].clone();
@@ -807,13 +807,13 @@ const RED_LOG: &str = "STEP_START a 2026-11-11T09:00:00Z\nSTEP_TIME a 1s\nSTEP_E
 impl Fx {
     fn retry(&mut self, id: &str) -> Outcome {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         e.retry(id).unwrap()
     }
 
     fn note(&mut self, id: &str, class: &str, reason: &str) {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "human:me".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "human:me".into(), progress: None };
         e.note_cause(id, class, reason).unwrap();
     }
 
@@ -989,7 +989,7 @@ fn a_note_is_for_one_red_run_only_and_needs_a_reason_and_a_known_class() {
     fx.red("b1");
     {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
         assert!(e.note_cause("b1", "flake", "  ").is_err(), "no reason, no note");
         assert!(e.note_cause("b1", "bug", "it is fine").is_err(), "only flake or infra");
     }
@@ -1598,7 +1598,7 @@ fn the_launched_preflight_is_admitted_as_light() {
     fx.launched_preflight();
     fx.get_settled("b1");
     let deny = DenyRole("light", "the host is proving");
-    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &deny, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into() };
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &deny, now: &NOW, state_dir: fx.state.clone(), actor: "engine".into(), progress: None };
     assert!(matches!(e.advance("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "host.admission"));
     assert_eq!(fx.launches(), 0);
 }
@@ -1622,13 +1622,13 @@ impl Fx {
 
     fn open_on(&mut self, id: &str, base: &str, wd: &Path, lanes: &[&str]) -> gatetrain_core::Result<()> {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         e.new_batch(id, base, wd, &lanes.iter().map(|l| l.to_string()).collect::<Vec<_>>())
     }
 
     fn restack(&mut self, id: &str) -> Outcome {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         e.restack(id).unwrap()
     }
 
@@ -1821,7 +1821,7 @@ impl Admission for CloseAdm {
 
 impl Fx {
     fn adv_with(&mut self, id: &str, adm: &dyn Admission) -> Outcome {
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm, now: &NOW, state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         e.advance(id).unwrap()
     }
 
@@ -2008,7 +2008,7 @@ fn a_refusal_never_blocks_the_next_batch_and_a_person_may_close_with_residue() {
     fx.open_on("b2", "main", &repo, &[]).unwrap();
     assert!(matches!(fx.adv_with("b2", &adm), Outcome::Advanced { to, .. } if to == "stacked"));
     // a reason is required; with one, the batch closes and the residue is on the record
-    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
     assert!(e.close_with_residue("b1", " ").is_err());
     let o = e.close_with_residue("b1", "the lane worktree is kept on purpose").unwrap();
     assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "closed"), "{o:?}");
@@ -2380,7 +2380,7 @@ fn minor6_a_root_that_holds_the_main_checkout_owns_nothing() {
 }
 
 fn engine<'a>(fx: &'a mut Fx, adm: &'a CloseAdm) -> Engine<'a> {
-    Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() }
+    Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None }
 }
 
 #[test]
@@ -2517,7 +2517,7 @@ fn s1_a_held_batch_with_a_pending_t7_intent_merges_nothing_and_its_resume_re_run
     assert!(fx.adv("b1").is_err());
     crash_seam::set(None);
     let adm = AllowAll;
-    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
     e.hold("b1", "looking").unwrap();
     for _ in 0..2 {
         assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "batch.held"));
@@ -2525,7 +2525,7 @@ fn s1_a_held_batch_with_a_pending_t7_intent_merges_nothing_and_its_resume_re_run
     assert_eq!(g(&fx.repo, &["rev-parse", "main"]), main0, "nothing merged while held");
     assert_eq!(fx.state("b1"), "held");
     // released, but the batch branch moved meanwhile: the resume runs the T7 guards again and refuses instead of merging
-    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
     e.release("b1").unwrap();
     std::fs::write(fx.repo.join("late.txt"), "late\n").unwrap();
     g(&fx.repo, &["add", "--", "late.txt"]);
@@ -2545,7 +2545,7 @@ fn s1_an_abandoned_batch_with_a_pending_intent_is_never_resumed() {
     assert!(fx.adv("b1").is_err());
     crash_seam::set(None);
     let adm = AllowAll;
-    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into() };
+    let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &NOW, state_dir: fx.state.clone(), actor: "human:me".into(), progress: None };
     e.abandon("b1", "given up").unwrap();
     assert!(matches!(fx.adv("b1").unwrap(), Outcome::Idle(_)));
     assert_eq!(fx.state("b1"), "abandoned");
@@ -2629,4 +2629,19 @@ fn s5_a_launched_preflight_whose_holder_never_names_the_run_fails_clean_once() {
     assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "batch.failed-needs-person"));
     assert_eq!(fx.lock.launches.lock().unwrap().len(), 1);
     assert_eq!(outcome_of(&fx, "T3"), "failed-clean");
+}
+
+#[test]
+fn s6_a_hung_regen_fails_at_the_plugin_timeout() {
+    let mut fx = Fx::new("");
+    fx.cfg.regen_command = vec!["sh".into(), "-c".into(), "sleep 30".into()];
+    fx.cfg.plugin_timeout_min = 0.02;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    let t0 = std::time::Instant::now();
+    match fx.adv("b1").unwrap() {
+        Outcome::Failed(m) => assert!(m.contains("regen timed out after 0.02 min"), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    assert!(t0.elapsed() < std::time::Duration::from_secs(20));
 }

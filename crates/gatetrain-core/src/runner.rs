@@ -147,6 +147,131 @@ pub(crate) fn kill_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+/// What [`run_isolated`] saw: the exit code with both streams, or a timeout after which its process group (job) was ended.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Isolated {
+    Done { rc: i32, stdout: String, stderr: String },
+    TimedOut,
+}
+
+/// How long the output of a command that ended is waited for: a daemon it left behind may hold its pipes open for ever.
+const DRAIN: Duration = Duration::from_secs(2);
+
+/// Run a plugin command with a time limit of `secs` (a finite number above 0, else an `Err` and nothing runs). It runs in a
+/// process group of its own (Unix) or a job object (Windows), so a timeout ends every process it started, an orphaned grandchild
+/// included; a command that ends by itself leaves whatever it started on purpose alone. A daemon that detached itself into its own
+/// session (or a remote deploy) is beyond any local kill: the caller says so.
+pub fn run_isolated(mut c: Command, secs: f64) -> Result<Isolated, String> {
+    let limit = Duration::try_from_secs_f64(secs).ok().filter(|d| !d.is_zero()).ok_or_else(|| format!("{secs} s is not a usable time limit"))?;
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+    }
+    let mut child = c.spawn().map_err(|e| e.to_string())?;
+    let job = group::Job::adopt(&child);
+    let drain = |mut r: Box<dyn Read + Send>| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = r.read_to_end(&mut b);
+            let _ = tx.send(b);
+        });
+        rx
+    };
+    let so = drain(Box::new(child.stdout.take().unwrap()));
+    let se = drain(Box::new(child.stderr.take().unwrap()));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            break st;
+        }
+        if start.elapsed() > limit {
+            job.kill(&child);
+            kill_tree(&mut child);
+            let _ = child.wait();
+            return Ok(Isolated::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let (o, e) = (so.recv_timeout(DRAIN).unwrap_or_default(), se.recv_timeout(DRAIN).unwrap_or_default());
+    Ok(Isolated::Done { rc: status.code().unwrap_or(-1), stdout: text(&o), stderr: text(&e) })
+}
+
+/// The process group (Unix) or job object (Windows) a plugin runs in.
+mod group {
+    pub struct Job {
+        #[cfg(windows)]
+        handle: *mut std::ffi::c_void,
+    }
+
+    #[cfg(windows)]
+    extern "system" {
+        fn CreateJobObjectW(attrs: *mut std::ffi::c_void, name: *const u16) -> *mut std::ffi::c_void;
+        fn AssignProcessToJobObject(job: *mut std::ffi::c_void, process: *mut std::ffi::c_void) -> i32;
+        fn TerminateJobObject(job: *mut std::ffi::c_void, code: u32) -> i32;
+        fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
+    }
+
+    impl Job {
+        /// Put the child in a job of its own (Windows); on Unix the child leads its own process group already. A job that cannot be
+        /// made leaves the parent-pid walk of `kill_tree` as the only kill.
+        #[cfg(windows)]
+        pub fn adopt(child: &std::process::Child) -> Job {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: plain Win32 calls; the job handle is ours and closed in Drop; the process handle is borrowed from `child`.
+            unsafe {
+                let h = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+                if !h.is_null() && AssignProcessToJobObject(h, child.as_raw_handle() as *mut std::ffi::c_void) == 0 {
+                    CloseHandle(h);
+                    return Job { handle: std::ptr::null_mut() };
+                }
+                Job { handle: h }
+            }
+        }
+        #[cfg(not(windows))]
+        pub fn adopt(_child: &std::process::Child) -> Job {
+            Job {}
+        }
+
+        /// End every process of the group (job).
+        #[cfg(windows)]
+        pub fn kill(&self, _child: &std::process::Child) {
+            if !self.handle.is_null() {
+                // SAFETY: the handle is a live job object owned by self
+                unsafe {
+                    TerminateJobObject(self.handle, 1);
+                }
+            }
+        }
+        #[cfg(unix)]
+        pub fn kill(&self, child: &std::process::Child) {
+            // the child is the leader of its own process group: `kill -KILL -<pgid>` reaches an orphaned grandchild as well
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        #[cfg(not(any(unix, windows)))]
+        pub fn kill(&self, _child: &std::process::Child) {}
+    }
+
+    #[cfg(windows)]
+    impl Drop for Job {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                // SAFETY: closing our own handle once; without KILL_ON_JOB_CLOSE this leaves the processes of the job running
+                unsafe {
+                    CloseHandle(self.handle);
+                }
+            }
+        }
+    }
+}
+
 /// Run a prepared command with stdout AND stderr written straight to `file` as they come (nothing is held in memory, the file can
 /// be followed while the command runs, and a timeout keeps what was written). `Ok(Some(code))` = it ended; `Ok(None)` = it ran past
 /// `timeout` seconds and its whole process tree was killed.

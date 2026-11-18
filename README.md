@@ -480,7 +480,13 @@ The ledger lock is shared with people: every `batch` command that writes (`new`,
 `<canonical db path>.tick.lock`; the holder writes `<lock>.info` (pid, start time, who) whole, through a rename, and removes it when it
 lets go. A sidecar whose pid is dead is ignored. A tick that finds the lock held longer than `[tick] stuck_minutes` (default 60), by the
 sidecar's heartbeat (`beat_ms`, refreshed every 30 s while the holder runs, so a long healthy deploy is not stuck) or, with none, by
-the lock file's age, says so and exits 1. A hung deploy is ended by `[deploy.<name>] timeout_min` (default: no limit) and fails. Before it advances anything the tick verifies the decision log; a
+the lock file's age, says so and exits 1. The heartbeat also names the step the holder runs (`<batch> <transition> <step>`) and
+that step's deadline: a holder that beats but runs a step more than a minute past its deadline, or that has held the lock longer than
+`[tick] max_hold_minutes` (default 720) however recently it beat, makes the tick exit 1 too. Every plugin runs with a time limit, in a
+process group (a job object on Windows) of its own so a timeout ends what it started: a deploy target's `timeout_min` (default 60),
+`[preflight] timeout_min` (60), `[postmerge] timeout_min` (30), and `[timeouts] plugin_min` (30) for the stack command, hub rebuilds,
+regen, health checks, cache verification and the legacy stamp. A command past its limit fails the attempt (`the local process tree
+was signalled; a remote or detached deploy may still run`); a health check past it is a wait. Before it advances anything the tick verifies the decision log; a
 log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
 

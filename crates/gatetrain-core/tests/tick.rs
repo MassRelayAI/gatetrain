@@ -110,7 +110,7 @@ impl Fx {
 
     fn with<R>(&mut self, f: impl FnOnce(&mut Engine) -> R) -> R {
         let adm = AllowAll;
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: &adm, now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         f(&mut e)
     }
 
@@ -168,7 +168,7 @@ impl Fx {
     fn tick_full(&mut self, max_steps: usize, now_us: i64, adm: Box<dyn Admission>) -> TickReport {
         let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
         let hosts = self.hosts.clone();
-        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: adm.as_ref(), now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut self.ledger, cfg: &self.cfg, lock: &self.lock, adm: adm.as_ref(), now: &now_at(self.clock.get()), state_dir: self.state.clone(), actor: "engine".into(), progress: None };
         let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: self.cfg.storm_reds, now_us, max_steps, max_wait_minutes: self.cfg.max_wait_minutes, max_run_minutes: self.cfg.max_run_minutes };
         tick::tick(&mut e, &o).unwrap()
     }
@@ -869,7 +869,7 @@ fn s5_rev4_a_holder_that_never_names_its_run_is_launched_once_and_fails_clean() 
     let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
     let hosts = fx.hosts.clone();
     let r = {
-        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &late, adm: &AllowAll, now: &now_at(0), state_dir: fx.state.clone(), actor: "engine".into() };
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &late, adm: &AllowAll, now: &now_at(0), state_dir: fx.state.clone(), actor: "engine".into(), progress: None };
         let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: fx.cfg.storm_reds, now_us: NOW_US, max_steps: tick::MAX_STEPS, max_wait_minutes: fx.cfg.max_wait_minutes, max_run_minutes: fx.cfg.max_run_minutes };
         tick::tick(&mut e, &o).unwrap()
     };
@@ -890,4 +890,117 @@ fn s5_a_holder_that_names_its_run_late_is_waited_for_not_stopped_and_launched_ag
     assert_eq!(r.lines[0], "b1: open -> stacked -> settled -> preflighted -> proving, waits: run b1-p1 is still proving", "{:?}", r.lines);
     assert_eq!(fx.lock.launches.lock().unwrap().len(), 1);
     assert_eq!(fx.count("batch_events WHERE transition='T5s'"), 0);
+}
+
+fn sh(cmd: &str) -> Vec<String> {
+    vec!["sh".into(), "-c".into(), cmd.into()]
+}
+
+#[test]
+fn s6_a_hung_postmerge_fails_at_its_timeout() {
+    let mut fx = Fx::new("");
+    fx.cfg.postmerge_command = sh("sleep 30");
+    fx.cfg.postmerge_timeout_min = 0.02;
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let t0 = std::time::Instant::now();
+    let r = fx.tick();
+    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the post-merge command was ended at its timeout");
+    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, FAILED T8a: post-merge timed out after 0.02 min"), "{:?}", r.lines);
+    assert!(r.lines[0].contains("the local process tree was signalled; a remote or detached deploy may still run"), "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 0);
+}
+
+#[test]
+fn s6_a_hung_health_check_is_a_wait_not_a_hang() {
+    let mut fx = Fx::new("");
+    fx.cfg.targets.get_mut("staging").unwrap().health = sh("sleep 30");
+    fx.cfg.plugin_timeout_min = 0.02;
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let t0 = std::time::Instant::now();
+    let r = fx.tick();
+    assert!(t0.elapsed() < std::time::Duration::from_secs(20));
+    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged -> deploying, waits: target staging: health timed out after 0.02 min"), "{:?}", r.lines);
+}
+
+#[test]
+fn s6_a_deploy_timeout_that_is_not_a_finite_number_fails_closed_with_a_row() {
+    let mut fx = Fx::new("");
+    fx.cfg.targets.get_mut("staging").unwrap().timeout_min = Some(f64::INFINITY);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, FAILED T8a: "), "{:?}", r.lines);
+    assert!(r.lines[0].contains("is not a usable time limit"), "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "deploy.txt"), 0, "fails before the command runs");
+    assert_eq!(fx.count("batch_events WHERE transition='T8a' AND phase='failed'"), 1, "a failed row, so no tick deploys it again");
+}
+
+#[test]
+fn s6_a_failing_deploy_reports_its_stderr() {
+    let mut fx = Fx::new("");
+    fx.cfg.targets.get_mut("staging").unwrap().command = sh("echo to-stdout; echo the-real-cause >&2; exit 4");
+    fx.cfg.targets.get_mut("staging").unwrap().timeout_min = Some(1.0);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let r = fx.tick();
+    assert!(r.lines[0].contains("deploy staging exited 4: the-real-cause"), "{:?}", r.lines);
+}
+
+#[test]
+fn s6_a_timed_out_plugin_takes_its_orphaned_grandchildren_with_it() {
+    let mut fx = Fx::new("");
+    let late = fwd(&fx.t.path().join("late.txt"));
+    // the inner subshell is orphaned at once (its parent exits), so a walk over parent pids cannot find it; its group or job can
+    fx.cfg.postmerge_command = sh(&format!("( (sleep 3; echo late >> '{late}') & ); sleep 30"));
+    fx.cfg.postmerge_timeout_min = 0.02;
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    fx.tick();
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    assert!(!fx.t.path().join("late.txt").exists(), "the orphaned grandchild outlived the timeout kill");
+}
+
+#[test]
+fn s6_the_heartbeat_names_the_running_step_and_its_deadline() {
+    let mut fx = Fx::new("");
+    fx.cfg.postmerge_command = sh("sleep 1");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    for want in ["proven", "merged"] {
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == want));
+    }
+    let lp = fx.t.path().join("g.db.tick.lock");
+    let held = match tick::take_beating(&lp, "tick", std::time::Duration::from_millis(50)).unwrap() {
+        tick::Taken::Got(l) => l,
+        tick::Taken::Held(_) => panic!("free"),
+    };
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s2, lp2) = (stop.clone(), lp.clone());
+    let reader = std::thread::spawn(move || {
+        let mut seen = vec![];
+        while !s2.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Some(i) = tick::read_info(&lp2) {
+                if let (Some(e), Some(d)) = (i.effect.clone(), i.deadline_ms) {
+                    seen.push((e, d, i.beat_ms.unwrap_or(0)));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        seen
+    });
+    let beat = held.beat();
+    let adm = AllowAll;
+    {
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &fx.lock, adm: &adm, now: &now_at(0), state_dir: fx.state.clone(), actor: "engine".into(), progress: Some(beat) };
+        assert!(matches!(e.advance("b1").unwrap(), Outcome::Advanced { to, .. } if to == "deploying"));
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let seen = reader.join().unwrap();
+    let (effect, deadline, beat_ms) = seen.iter().find(|(e, _, _)| e.contains("postmerge")).cloned().unwrap_or_else(|| panic!("never named the step: {seen:?}"));
+    assert!(effect.starts_with("b1 T8a postmerge"), "{effect}");
+    assert!(deadline > beat_ms, "the deadline lies ahead of the beat: {deadline} vs {beat_ms}");
+    drop(held);
+    assert!(tick::read_info(&lp).is_none());
 }

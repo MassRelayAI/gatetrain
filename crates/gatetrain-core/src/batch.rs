@@ -308,6 +308,9 @@ pub struct Engine<'a> {
     /// Stamps and chain logs live here.
     pub state_dir: PathBuf,
     pub actor: String,
+    /// The heartbeat of the ledger lock this engine runs under ([`crate::tick::TickLock::beat`]): while a plugin runs it names the
+    /// batch, the transition, the step and the step's deadline, so a holder that beats but is stuck past its deadline is seen.
+    pub progress: Option<crate::tick::Beat>,
 }
 
 /// Crash injection for tests only (feature `test-fakes`): the engine "dies" at a named point, so no row after it is written. The point
@@ -346,7 +349,11 @@ fn crash_point(_point: &str) -> Result<()> {
 // ---------------------------------------------------------------- helpers
 
 pub fn system_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    iso_of(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0))
+}
+
+/// Seconds since the epoch as `YYYY-MM-DDTHH:MM:SS+00:00`.
+pub fn iso_of(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     // civil-from-days (Howard Hinnant)
     let z = days + 719468;
@@ -507,21 +514,11 @@ fn in_dirs(path: &str, dirs: &[String]) -> bool {
     dirs.iter().any(|d| path.starts_with(&format!("{}/", d.trim_end_matches('/'))))
 }
 
-fn run_plugin(cmd: &[String], dir: &Path, env: &[(String, String)]) -> Result<(i32, String)> {
-    let (prog, args) = cmd.split_first().ok_or_else(|| Error::Batch("empty plugin command".into()))?;
-    let o = Command::new(prog).args(args).current_dir(dir).envs(env.iter().map(|(k, v)| (k, v))).output()?;
-    Ok((o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stderr).trim().to_string()))
-}
+/// The default limit of a deploy command without `timeout_min` (a tick refuses such a target, `[tick] enabled`).
+pub const DEPLOY_TIMEOUT_MIN: f64 = 60.0;
 
-/// [`run_plugin`] with a time limit: `None` when it ran out and its process tree was ended.
-fn run_plugin_within(cmd: &[String], dir: &Path, env: &[(String, String)], secs: f64) -> Result<Option<(i32, String)>> {
-    let (prog, args) = cmd.split_first().ok_or_else(|| Error::Batch("empty plugin command".into()))?;
-    let mut c = Command::new(prog);
-    c.args(args).current_dir(dir).envs(env.iter().map(|(k, v)| (k, v)));
-    Ok(match crate::runner::run_cmd(c, Some(secs)).map_err(Error::Batch)? {
-        crate::runner::RunOut::Done { rc, out } => Some((rc as i32, out.trim().to_string())),
-        crate::runner::RunOut::TimedOut => None,
-    })
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 /// Does the holder's log say it holds `run` (`HOLDS <run>`, written once the holder took the host lock)?
@@ -573,6 +570,44 @@ fn short(sha: &str) -> &str {
 }
 
 impl<'a> Engine<'a> {
+    /// Every plugin command runs here: with a time limit (`min` minutes), in a process group (a job object on Windows) of its own so
+    /// a timeout ends everything it started, and named in the heartbeat while it runs (`<batch> <transition> <step>`, its deadline).
+    /// `Ok(Err(why))` = it ran out of time, or the limit is not a usable number (fail closed: nothing ran); `Ok(Ok((rc, why)))` = it
+    /// ended, with its stderr (else its stdout) as the reason. The deadline in the heartbeat is wall-clock milliseconds, because
+    /// another process reads it; the limit itself is measured on this process's monotonic clock.
+    #[allow(clippy::too_many_arguments)]
+    fn plugin(&self, id: &str, tr: &str, step: &str, key: &str, cmd: &[String], dir: &Path, env: &[(String, String)], min: f64) -> Result<std::result::Result<(i32, String), String>> {
+        let noun = if step == "postmerge" { "post-merge".to_string() } else { step.to_string() };
+        let secs = min * 60.0;
+        if !(secs.is_finite() && secs > 0.0) || std::time::Duration::try_from_secs_f64(secs).is_err() {
+            return Ok(Err(format!("{noun}: {min} min{key} is not a usable time limit; nothing was run")));
+        }
+        let (prog, args) = cmd.split_first().ok_or_else(|| Error::Batch(format!("{noun}: empty plugin command")))?;
+        let mut c = Command::new(prog);
+        c.args(args).current_dir(dir).envs(env.iter().map(|(k, v)| (k, v)));
+        let since = epoch_ms();
+        if let Some(b) = &self.progress {
+            if let Ok(mut g) = b.lock() {
+                *g = Some(json!({"effect": format!("{id} {tr} {step}"), "since_ms": since, "deadline_ms": since + (secs * 1000.0) as i64}));
+            }
+        }
+        let r = crate::runner::run_isolated(c, secs);
+        if let Some(b) = &self.progress {
+            if let Ok(mut g) = b.lock() {
+                *g = None;
+            }
+        }
+        Ok(match r.map_err(|e| Error::Batch(format!("{noun}: {e}")))? {
+            crate::runner::Isolated::Done { rc, stdout, stderr } => Ok((rc, if stderr.trim().is_empty() { stdout.trim().to_string() } else { stderr.trim().to_string() })),
+            crate::runner::Isolated::TimedOut => Err(format!("{noun} timed out after {min} min{key}; the local process tree was signalled; a remote or detached deploy may still run")),
+        })
+    }
+
+    /// The limit of a plugin without one of its own (`[timeouts] plugin_min`).
+    fn plugin_min(&self) -> f64 {
+        self.cfg.plugin_timeout_min
+    }
+
     /// A cherry-pick stopped on conflicts: hubs are rebuilt by their command, other paths are taken from a side by their resolver,
     /// anything else (or a result that still holds conflict markers) stops the stack. `Err(why)` leaves the pick for the caller to abort.
     fn resolve(&self, id: &str, wd: &Path, first_err: &str) -> Result<std::result::Result<(), String>> {
@@ -600,7 +635,10 @@ impl<'a> Engine<'a> {
                         a.replace("{base}", &fwd(&b)).replace("{ours}", &fwd(&o)).replace("{theirs}", &fwd(&t)).replace("{path}", &fwd(&target))
                     })
                     .collect();
-                let (rc, err) = run_plugin(&cmd, wd, &[])?;
+                let (rc, err) = match self.plugin(id, "T1", "hub rebuild", " ([timeouts] plugin_min)", &cmd, wd, &[], self.plugin_min())? {
+                    Ok(x) => x,
+                    Err(why) => return Ok(Err(why)),
+                };
                 if rc != 0 {
                     return Ok(Err(format!("the hub rebuild for {p} exited {rc}: {err}")));
                 }
@@ -1580,7 +1618,10 @@ impl<'a> Engine<'a> {
                     env.push(("GATETRAIN_BRANCH".into(), branch.clone()));
                     env.push(("GATETRAIN_LANES".into(), refs.join(" ")));
                     env.push(("GATETRAIN_LANE_TIPS".into(), tips.join(" ")));
-                    let (rc, err) = run_plugin(&self.cfg.stack_command, &wd, &env)?;
+                    let (rc, err) = match self.plugin(id, "T1", "stack command", " ([timeouts] plugin_min)", &self.cfg.stack_command, &wd, &env, self.plugin_min())? {
+                        Ok(x) => x,
+                        Err(why) => return Ok(Err(why)),
+                    };
                     if rc != 0 {
                         return Ok(Err(format!("stack command exited {rc}: {err}")));
                     }
@@ -1637,7 +1678,10 @@ impl<'a> Engine<'a> {
                         return Ok(Err(format!("no fixpoint after {} regen passes", self.cfg.max_passes)));
                     }
                     passes += 1;
-                    let (rc, err) = run_plugin(&self.cfg.regen_command, &wd, &env)?;
+                    let (rc, err) = match self.plugin(id, "T2", "regen", " ([timeouts] plugin_min)", &self.cfg.regen_command, &wd, &env, self.plugin_min())? {
+                        Ok(x) => x,
+                        Err(why) => return Ok(Err(why)),
+                    };
                     if rc != 0 {
                         return Ok(Err(format!("regen command exited {rc}: {err}")));
                     }
@@ -1677,7 +1721,10 @@ impl<'a> Engine<'a> {
             "T3" => {
                 let sha = plan.input_sha.clone().unwrap_or_default();
                 let env = self.env(id, f, &sha, "", "");
-                let (rc, err) = run_plugin(&self.cfg.preflight_command, &wd, &env)?;
+                let (rc, err) = match self.plugin(id, "T3", "preflight", " ([preflight] timeout_min)", &self.cfg.preflight_command, &wd, &env, self.cfg.preflight_timeout_min)? {
+                    Ok(x) => x,
+                    Err(why) => return Ok(Err(why)),
+                };
                 if rc != 0 {
                     return Ok(Err(format!("preflight exited {rc}: {err}")));
                 }
@@ -1725,7 +1772,10 @@ impl<'a> Engine<'a> {
                     git(&wd, &c.iter().map(String::as_str).collect::<Vec<_>>())?; // an explicit pathspec: only these files, whatever else is staged
                     if !self.cfg.regen_command.is_empty() {
                         let env = self.env(id, f, &tested, "", "");
-                        let (rc, err) = run_plugin(&self.cfg.regen_command, &wd, &env)?;
+                        let (rc, err) = match self.plugin(id, "T7", "regen", " ([timeouts] plugin_min)", &self.cfg.regen_command, &wd, &env, self.plugin_min())? {
+                            Ok(x) => x,
+                            Err(why) => return Ok(Err(why)),
+                        };
                         if rc != 0 {
                             return Ok(Err(format!("regen command exited {rc} while re-settling the chain's generated files: {err}")));
                         }
@@ -1771,7 +1821,10 @@ impl<'a> Engine<'a> {
                     // the target checkout needs its dependencies and packages before anything is deployed from it
                     let dir = self.cfg.postmerge_dir.as_deref().map(PathBuf::from).unwrap_or_else(|| wd.clone());
                     let env = self.env(id, f, &sha, "", "");
-                    let (rc, err) = run_plugin(&substitute(&self.cfg.postmerge_command, &sha), &dir, &env)?;
+                    let (rc, err) = match self.plugin(id, "T8a", "postmerge", " ([postmerge] timeout_min)", &substitute(&self.cfg.postmerge_command, &sha), &dir, &env, self.cfg.postmerge_timeout_min)? {
+                        Ok(x) => x,
+                        Err(why) => return Ok(Err(why)),
+                    };
                     if rc != 0 {
                         return Ok(Err(format!("post-merge command exited {rc}: {err}")));
                     }
@@ -1785,12 +1838,10 @@ impl<'a> Engine<'a> {
                     let t = &self.cfg.targets[name];
                     let env = self.env(id, f, &sha, "", "");
                     let cmd = substitute(&t.command, &sha);
-                    let (rc, err) = match t.timeout_min {
-                        None => run_plugin(&cmd, &wd, &env)?,
-                        Some(min) => match run_plugin_within(&cmd, &wd, &env, min * 60.0)? {
-                            Some(x) => x,
-                            None => return Ok(Err(format!("deploy {name} timed out after {min} min ([deploy.{name}] timeout_min); its process tree was ended"))),
-                        },
+                    let min = t.timeout_min.unwrap_or(DEPLOY_TIMEOUT_MIN);
+                    let (rc, err) = match self.plugin(id, "T8a", &format!("deploy {name}"), &format!(" ([deploy.{name}] timeout_min)"), &cmd, &wd, &env, min)? {
+                        Ok(x) => x,
+                        Err(why) => return Ok(Err(why)),
                     };
                     if rc != 0 {
                         return Ok(Err(format!("deploy {name} exited {rc}: {err}")));
@@ -1855,7 +1906,10 @@ impl<'a> Engine<'a> {
             for s in keyless {
                 let mut env = self.env(id, f, tested, run, &log.to_string_lossy());
                 env.push(("GATETRAIN_STEP".into(), s.to_string()));
-                let (rc, _) = run_plugin(&substitute(&self.cfg.cache_verify_command, tested), &wd, &env)?;
+                let rc = match self.plugin(id, "T5", "cache verify", " ([timeouts] plugin_min)", &substitute(&self.cfg.cache_verify_command, tested), &wd, &env, self.plugin_min())? {
+                    Ok((rc, _)) => rc,
+                    Err(why) => return refuse("evidence-missing", format!("cached step {s} is not verified for {}: {why}", short(tested))),
+                };
                 if rc != 0 {
                     return refuse("evidence-missing", format!("cached step {s} is not verified for {} (the verify command exited {rc})", short(tested)));
                 }
@@ -1919,7 +1973,10 @@ impl<'a> Engine<'a> {
             // the bridge for a launcher that still demands the repository's old stamp: runs once the chain stamp is read, idempotent by contract
             let stamp = self.abs(&wd, self.cfg.preflight_stamp_dir.as_deref().unwrap_or_default()).join(format!("stamp-{sha}.json"));
             let cmd: Vec<String> = self.cfg.legacy_stamp_command.iter().map(|a| a.replace("{sha}", &sha).replace("{results}", &stamp.to_string_lossy())).collect();
-            let (rc, err) = run_plugin(&cmd, &wd, &self.env(id, f, &sha, &run, &log.to_string_lossy()))?;
+            let (rc, err) = match self.plugin(id, "T3o", "legacy stamp", " ([timeouts] plugin_min)", &cmd, &wd, &self.env(id, f, &sha, &run, &log.to_string_lossy()), self.plugin_min())? {
+                Ok(x) => x,
+                Err(why) => (-1, why),
+            };
             if rc != 0 {
                 return self.refuse(id, "preflight.legacy-stamp", format!("[preflight] legacy_stamp_command exited {rc}: {err}; the batch stays preflighting and the command is tried again"));
             }
@@ -1994,7 +2051,10 @@ impl<'a> Engine<'a> {
                 return self.refuse(id, "deploy.health-missing", format!("target {name} has no health check; live cannot be confirmed"));
             }
             let env = self.env(id, f, &sha, "", "");
-            let (rc, _) = run_plugin(&substitute(&health, &sha), &wd, &env)?;
+            let rc = match self.plugin(id, "T8b", &format!("health {name}"), " ([timeouts] plugin_min)", &substitute(&health, &sha), &wd, &env, self.plugin_min())? {
+                Ok((rc, _)) => rc,
+                Err(why) => return Ok(Outcome::Waiting(format!("target {name}: {}", why.trim_start_matches(&format!("health {name} ")).replacen("timed out", "health timed out", 1)))),
+            };
             if rc != 0 {
                 if tmo > 0.0 {
                     let since: Option<String> = self.ledger.conn.query_row("SELECT at FROM batch_events WHERE batch=? AND transition='T8a' AND phase='done' ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).ok();
