@@ -66,8 +66,9 @@ pub enum WtOverlap {
     None,
     /// It is this registered worktree, by some spelling.
     Is(String),
-    /// It sits inside this worktree; `work` = it holds a tracked file or an untracked file that is not ignored (`None`: unknown).
-    Inside { worktree: String, work: Option<bool> },
+    /// It sits inside this worktree (`within`: every registered worktree it sits inside, nested ones included); `work` = it holds a
+    /// tracked file or an untracked file that is not ignored (`None`: unknown).
+    Inside { worktree: String, within: Vec<String>, work: Option<bool> },
 }
 
 /// What close needs to know and do. Every probe may fail or be unknown; unknown is never read as safe.
@@ -270,15 +271,18 @@ fn judge(set: &OwnedSet, it: &OwnedItem, env: &dyn CloseEnv) -> Result<std::resu
             }
             // a worktree goes only as a worktree (dirty, locked, live-lane and keep checks); a folder inside one only when it holds no work
             let overlap = env.worktree_overlap(key)?;
-            if let WtOverlap::Inside { worktree, .. } = &overlap {
-                if let Some(why) = env.kept(Some(worktree), env.worktree_branch(worktree)?.as_deref()) {
-                    return refuse("tidy.protected", format!("{key} sits inside the worktree {worktree}, which is kept: {why}"));
+            if let WtOverlap::Inside { within, .. } = &overlap {
+                // every worktree it sits inside: a kept worktree nested inside another one keeps its folders too
+                for w in within {
+                    if let Some(why) = env.kept(Some(w), env.worktree_branch(w)?.as_deref()) {
+                        return refuse("tidy.protected", format!("{key} sits inside the worktree {w}, which is kept: {why}"));
+                    }
                 }
             }
             match overlap {
                 WtOverlap::Is(w) => return refuse("tidy.not-owned", format!("{key} is the registered worktree {w}; a worktree is closed only as a worktree, with its checks")),
-                WtOverlap::Inside { worktree, work: Some(true) } => return refuse("tidy.not-owned", format!("{key} sits inside the worktree {worktree} and holds tracked or uncommitted files")),
-                WtOverlap::Inside { worktree, work: None } => return refuse("tidy.unreadable", format!("whether {key} (inside the worktree {worktree}) holds tracked or uncommitted files could not be read")),
+                WtOverlap::Inside { worktree, work: Some(true), .. } => return refuse("tidy.not-owned", format!("{key} sits inside the worktree {worktree} and holds tracked or uncommitted files")),
+                WtOverlap::Inside { worktree, work: None, .. } => return refuse("tidy.unreadable", format!("whether {key} (inside the worktree {worktree}) holds tracked or uncommitted files could not be read")),
                 WtOverlap::Inside { work: Some(false), .. } | WtOverlap::None => {}
             }
             for s in &set.shared_targets {
@@ -550,36 +554,48 @@ impl CloseEnv for OpsEnv<'_> {
     }
     fn worktree_overlap(&self, path: &str) -> Result<WtOverlap> {
         let forms = self.item_forms(path)?;
-        let mut inside_of: Option<String> = None;
+        let mut within: Vec<String> = vec![];
         for w in self.ops.worktrees().map_err(e)? {
             let wf = self.place_forms(&w.path)?;
             if wf.iter().any(|x| forms.contains(x)) {
                 return Ok(WtOverlap::Is(w.path));
             }
-            if inside_of.is_none() && wf.iter().any(|x| forms.iter().any(|f| inside(f, x))) {
-                inside_of = Some(w.path);
+            if wf.iter().any(|x| forms.iter().any(|f| inside(f, x))) {
+                within.push(w.path);
             }
         }
-        let Some(worktree) = inside_of else { return Ok(WtOverlap::None) };
+        let Some(worktree) = within.first().cloned() else { return Ok(WtOverlap::None) };
         // asked from the parent of where the item sits, with its own name as the pathspec: a tracked link is seen as tracked (the
         // move acts on the link itself, not on where it leads). The name as written keeps its case; on Windows it is matched without case.
         let at = self.resolved(path, false)?;
         let parent = at.rsplit_once('/').map(|x| x.0).unwrap_or(&at).to_string();
         let base = path.replace('\\', "/").trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string();
         let spec = if self.ops.win { format!(":(literal,icase){base}") } else { format!(":(literal){base}") };
-        let mut work = Some(false);
-        for a in [&["ls-files", "--", spec.as_str()][..], &["status", "--porcelain", "--untracked-files=all", "--", spec.as_str()][..]] {
-            let c = self.ops.git(&parent, a).map_err(e)?;
-            if !c.ok() {
-                work = None;
-                break;
+        // Some(true) work, Some(false) none, None unknown: `ls-files` (tracked) then `status` (changed or untracked, whatever git's
+        // configuration hides), both under one pathspec, run in one folder
+        let ask = |dir: &str, spec: &str| -> Result<Option<bool>> {
+            for a in [&["ls-files", "--", spec][..], &["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none", "--", spec][..]] {
+                let c = self.ops.git(dir, a).map_err(e)?;
+                if !c.ok() {
+                    return Ok(None);
+                }
+                if !c.out.trim().is_empty() {
+                    return Ok(Some(true));
+                }
             }
-            if !c.out.trim().is_empty() {
-                work = Some(true);
-                break;
-            }
+            Ok(Some(false))
+        };
+        let mut work = ask(&parent, &spec)?;
+        if work == Some(false) {
+            // git matches the name as text, Windows opens `src.`, `src ` and another case of a non-ASCII name as the tracked folder:
+            // nothing found by name, and the item is not a link, so ask again from inside it (MA9). Work or unknown from either wins.
+            work = match self.ops.is_link(path).map_err(e)? {
+                Some(false) => ask(path, ".")?,
+                Some(true) => Some(false),
+                None => None,
+            };
         }
-        Ok(WtOverlap::Inside { worktree, work })
+        Ok(WtOverlap::Inside { worktree, within, work })
     }
     fn owned_under(&self, path: &str, roots: &[String]) -> Result<bool> {
         // below a root as written, and where it sits below where that root leads

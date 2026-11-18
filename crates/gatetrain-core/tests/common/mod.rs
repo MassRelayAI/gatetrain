@@ -495,7 +495,7 @@ impl Sim {
             let prefix = format!("{}/", n(&st.main));
             return ok(st.tracked().iter().map(|k| k.strip_prefix(&prefix).unwrap_or(k).to_string()).collect::<Vec<_>>().join("\n") + "\n"); // git lists paths relative to the checkout
         }
-        if a == "status --porcelain --untracked-files=all" {
+        if a == "status --porcelain --untracked-files=all --ignore-submodules=none" {
             return ok(if st.dirty.contains(&repo) { "M x\n".into() } else { String::new() });
         }
         if a.starts_with("worktree list") {

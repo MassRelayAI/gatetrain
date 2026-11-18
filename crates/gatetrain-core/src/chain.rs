@@ -463,7 +463,8 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     // the tree must be clean before AND after; the out folder is not part of the tree it proves
     let out_abs = o.out.canonicalize().unwrap_or_else(|_| o.out.clone());
     let cwd_abs = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
-    let mut porcelain: Vec<String> = vec!["status".into(), "--porcelain".into(), "--".into(), ".".into()];
+    // untracked files count whatever `status.showUntrackedFiles` says: a stamp is never written over a file git was told to hide
+    let mut porcelain: Vec<String> = vec!["status".into(), "--porcelain".into(), "--untracked-files=all".into(), "--".into(), ".".into()];
     if let Ok(rel) = out_abs.strip_prefix(&cwd_abs) {
         if !rel.as_os_str().is_empty() {
             porcelain.push(format!(":(exclude){}", rel.to_string_lossy().replace('\\', "/")));
@@ -809,7 +810,7 @@ fn cache_key(step: &Step, cwd: &Path) -> Result<String, String> {
     let mut spec: Vec<&str> = vec!["--"];
     spec.extend(step.inputs.iter().map(String::as_str));
     let with = |head: &[&'static str]| -> Vec<&str> { head.iter().copied().chain(spec.iter().copied()).collect() };
-    match git_out(cwd, &with(&["status", "--porcelain"])) {
+    match git_out(cwd, &with(&["status", "--porcelain", "--untracked-files=all"])) {
         Some(d) if d.is_empty() => {}
         Some(_) => return Err("inputs are dirty (git status --porcelain is not empty for them); the step ran and no entry was written".into()),
         None => return Err("git status failed for the inputs".into()),

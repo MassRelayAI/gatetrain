@@ -605,7 +605,7 @@ impl<'a> Ops<'a> {
         let Some(m) = &self.cfg.main_checkout else { return Ok(None) };
         let files = self.git(m, &["ls-files"])?;
         // untracked files are listed whatever `status.showUntrackedFiles` says (BL4)
-        let st = self.git(m, &["status", "--porcelain", "--untracked-files=all"])?;
+        let st = self.git(m, &["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"])?;
         if !files.ok() || !st.ok() {
             return guard(format!("cannot read the main checkout {m}"));
         }
@@ -689,9 +689,21 @@ impl<'a> Ops<'a> {
     }
 
     pub fn dirty(&self, path: &str) -> R<Option<bool>> {
-        // `status.showUntrackedFiles = no` must never make untracked work look clean (BL4)
-        let c = self.git(path, &["status", "--porcelain", "--untracked-files=all"])?;
-        Ok(if !c.ok() { None } else { Some(!strip(&c.out).is_empty()) })
+        // `status.showUntrackedFiles = no` (BL4) or an ignored submodule (round-5 minor 6) must never make work look clean
+        let c = self.git(path, &["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"])?;
+        if !c.ok() {
+            return Ok(None);
+        }
+        if !strip(&c.out).is_empty() {
+            return Ok(Some(true));
+        }
+        // an edit hidden by `update-index --skip-worktree` (tag `S`) or `--assume-unchanged` (a lower-case tag) is not in `status`:
+        // such an entry is read as work (BL5); a sparse checkout is then always refused, which is the safe side
+        let v = self.git(path, &["ls-files", "-v"])?;
+        if !v.ok() {
+            return Ok(None);
+        }
+        Ok(Some(splitlines(&v.out).iter().any(|l| l.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == 'S'))))
     }
 
     // -- links (L12, L44)

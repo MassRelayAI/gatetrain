@@ -258,6 +258,15 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             repr_str(&t.worktree_prefix)
         ));
     }
+    for k in &t.keep_paths {
+        // a relative entry cannot be resolved against anything and would refuse every path item as unreadable
+        let w = k.replace('\\', "/");
+        let b = w.as_bytes();
+        let drive_abs = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/';
+        if !(w.starts_with('/') || drive_abs) {
+            return err(format!("tidy.keep_paths: {} is not an absolute path; write it from the root (/srv/... or C:/...)", repr_str(k)));
+        }
+    }
     for k in t.main_checkout.iter().chain(t.root_checkout.iter()).chain(t.keep_paths.iter()).chain(t.protect.iter()) {
         if k.starts_with("\\\\") || k.replace('\\', "/").starts_with("//") {
             return err(format!("tidy: the path {} is a UNC or extended-length (\\\\?\\) spelling; write the drive path (C:/dir) so the keep list compares like the removal guards", repr_str(k)));

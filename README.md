@@ -370,7 +370,12 @@ it tidies nothing at all).
 
 A recorded target or temp folder is never a registered worktree, never inside the main checkout, never one of `[chain] target_dirs`
 (nor holds or sits inside one), and inside a lane worktree only when it holds no tracked or uncommitted file (an ignored `target/`).
-The tidy config's `keep_paths`, `keep_lanes` and `keep_branches` are honoured for every item.
+The tidy config's `keep_paths` (absolute paths only), `keep_lanes` and `keep_branches` are honoured for every item, and for anything
+inside a kept worktree. A recorded folder with a `.git` at its top (a repository of its own) is never moved.
+
+Known limit: a git repository further down inside a recorded target or temp folder (for example `<target>/vendor/clone`, or a bare
+repository) is not looked for; it goes to the recycle bin with the folder. A clone inside a lane worktree that git does not ignore is
+still caught, because `git status` shows it.
 
 ```toml
 # main checkout /srv/repos/main, lane worktrees /srv/repos/main-wt-<lane>, build output /srv/build
