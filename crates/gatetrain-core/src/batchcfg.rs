@@ -138,6 +138,11 @@ pub struct BatchConfig {
     pub postmerge_timeout_min: f64,
     /// `[tick] max_hold_minutes` (default 720): a holder of the ledger lock older than this needs a person even while it beats.
     pub max_hold_minutes: f64,
+    /// `[retry] max_interrupts` (default 3): consecutive crashes of one transition, or consecutive stopped proof runs, after which
+    /// the batch needs a person (`batch.interrupt-cap`, `batch.stopped-cap`).
+    pub max_interrupts: usize,
+    /// `[postmerge] idempotent = true`: the post-merge command is safe to run twice (required when `[tick] enabled`).
+    pub postmerge_idempotent: bool,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -198,6 +203,8 @@ impl Default for BatchConfig {
             preflight_timeout_min: 60.0,
             postmerge_timeout_min: 30.0,
             max_hold_minutes: 720.0,
+            max_interrupts: 3,
+            postmerge_idempotent: false,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -378,6 +385,15 @@ impl BatchConfig {
                 }
             }
         }
+        if let Some(n) = v.get("retry").and_then(|r| r.get("max_interrupts")) {
+            match n.as_integer() {
+                Some(n) if n >= 1 => c.max_interrupts = n as usize,
+                _ => return Err(Error::Batch(format!("gatetrain.toml: [retry] max_interrupts is a whole number of at least 1, not {n}"))),
+            }
+        }
+        if let Some(x) = v.get("postmerge").and_then(|p| p.get("idempotent")) {
+            c.postmerge_idempotent = x.as_bool().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [postmerge] idempotent is true or false, not {x}")))?;
+        }
         if let Some(p) = v.get("postmerge") {
             c.postmerge_command = argv(p.get("command"));
             c.postmerge_dir = p.get("dir").and_then(|d| d.as_str()).map(String::from);
@@ -441,6 +457,10 @@ impl BatchConfig {
     /// run twice (`idempotent = true`) or has a `probe` that says whether it already serves the sha, so a crash mid-deploy is never
     /// settled by guessing; with `[tick] enabled` it also has a `timeout_min`, so an unattended deploy cannot hang for its default.
     fn check_targets(&self) -> Result<()> {
+        if self.tick_enabled && !self.postmerge_command.is_empty() && !self.postmerge_idempotent {
+            // a resume runs the post-merge command again when a crash left it in doubt
+            return Err(Error::Batch("gatetrain.toml: [postmerge] idempotent = true is required while [tick] enabled = true (a crash during the post-merge command means it runs again)".into()));
+        }
         for (name, t) in self.targets.iter().filter(|(_, t)| t.tier != "production") {
             if t.probe.is_empty() && !t.idempotent {
                 return Err(Error::Batch(format!(

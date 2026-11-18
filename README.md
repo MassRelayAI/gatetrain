@@ -451,7 +451,8 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 only when every deploy target has `timeout_min` and a deploy command that is safe to run twice (a tick that dies mid-deploy may leave a
 target for a person or a probe to settle, and a target the tick deploys again must not break by being deployed twice).
 A target's `tier` is `staging`, `production` (never deployed by the engine) or a tier listed in `[deploy] auto_tiers`, spelled
-exactly; any other spelling (`Production`, `prod`) is refused at load. `gatetrain.toml` is refused at load when an automatic deploy target (any tier but `production`) has neither `idempotent = true` nor a
+exactly; any other spelling (`Production`, `prod`) is refused at load. With `[tick] enabled`, a `[postmerge] command` needs `[postmerge] idempotent = true` too: a crash during it means it runs again.
+`gatetrain.toml` is refused at load when an automatic deploy target (any tier but `production`) has neither `idempotent = true` nor a
 `probe = [...]` that exits 0 when the target already serves `{sha}`, and, with `[tick] enabled`, when it has no `timeout_min` (a
 finite number of minutes, at most 1440). Each target that deployed is a `deploy.checkpoint` row of the decision log, so a later
 attempt for the same sha never deploys it again; a target a crash left in doubt is asked its probe, deployed again only when it is
@@ -509,7 +510,9 @@ The engine, not the tick, decides whether a failed transition is tried again, an
 the failed attempts of a transition exceed its `[retry] budget` (`budget = { T4 = 1 }`; every transition defaults to 0, T7 and T8a
 included) the batch is refused with `batch.failed-needs-person` (a tick shows it `BLOCKED`, exit 1; a plain `batch advance` exits 3)
 until a person runs `batch advance <id> --retry --reason <why>`, which records an override row and lets one more attempt through. A
-hold and a release do not clear it. So a failing deploy, merge or launch runs once, not once per tick. A wait has an age, read
+hold and a release do not clear it. Crashes are not failures, but `[retry] max_interrupts` (default 3) crashes of one transition in a
+row (`batch.interrupt-cap`), or as many proof runs in a row that stop without `GATES_DONE` (`batch.stopped-cap`), need the same
+override. A deploy target that is removed from `gatetrain.toml` while a batch deploys it is refused `deploy.target-unknown`. So a failing deploy, merge or launch runs once, not once per tick. A wait has an age, read
 from the ledger row that put the batch in its state: past `[tick] max_run_minutes` (default 360) for a proving or pre-flight run, or
 `[tick] max_wait_minutes` (default 120) for anything else (a host that keeps refusing), the batch is
 `BLOCKED tick.wait-too-long` with its age (exit 1). A health check that never passes has one timer, the engine's: the target's

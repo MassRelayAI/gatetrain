@@ -1204,3 +1204,105 @@ fn m2_without_survives_parent_a_plugin_dies_with_its_parent() {
     std::thread::sleep(std::time::Duration::from_secs(5));
     assert!(!fx.t.path().join("late.txt").exists(), "the deploy outlived its parent");
 }
+
+fn t8a_outcome(fx: &Fx) -> String {
+    fx.ledger.conn.query_row("SELECT json_extract(detail,'$.outcome') FROM batch_events WHERE transition='T8a' AND phase='failed' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn minor1_a_t8a_plugin_that_fails_or_times_out_leaves_the_attempt_dirty() {
+    // the post-merge command ran and failed: it may have changed the target checkout
+    let mut fx = Fx::new("");
+    fx.cfg.postmerge_command = sh("exit 5");
+    merged_with(&mut fx, |_| {});
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)));
+    assert_eq!(t8a_outcome(&fx), "failed-dirty");
+    // a deploy that ran out of time
+    let mut fx = Fx::new("");
+    fx.cfg.postmerge_command = vec![];
+    merged_with(&mut fx, |t| {
+        t.command = sh("sleep 30");
+        t.timeout_min = Some(0.02);
+    });
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)));
+    assert_eq!(t8a_outcome(&fx), "failed-dirty");
+    // nothing ran (a limit that is not a number): clean
+    let mut fx = Fx::new("");
+    fx.cfg.postmerge_command = vec![];
+    merged_with(&mut fx, |t| t.timeout_min = Some(f64::NAN));
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)));
+    assert_eq!(t8a_outcome(&fx), "failed-clean");
+}
+
+#[test]
+fn minor2_the_postmerge_command_says_it_is_idempotent_when_the_tick_is_on() {
+    let base = "[deploy.web]\nidempotent = true\ncommand = [\"x\"]\ntimeout_min = 5\n[tick]\nenabled = true\n";
+    let e = BatchConfig::parse(&format!("{base}[postmerge]\ncommand = [\"npm\", \"ci\"]\n")).unwrap_err().to_string();
+    assert!(e.contains("[postmerge] idempotent = true"), "{e}");
+    assert!(BatchConfig::parse(&format!("{base}[postmerge]\ncommand = [\"npm\", \"ci\"]\nidempotent = true\n")).is_ok());
+    assert!(BatchConfig::parse("[postmerge]\ncommand = [\"npm\", \"ci\"]\n").is_ok(), "without the tick a person runs it");
+}
+
+#[test]
+fn minor3_consecutive_interruptions_of_one_transition_stop_at_a_cap_and_need_a_person() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "proven"));
+    crash_seam::set(Some("before:T7".into()));
+    for _ in 0..3 {
+        assert!(fx.with(|e| e.advance("b1")).is_err(), "a crash loop");
+    }
+    match fx.with(|e| e.advance("b1")).unwrap() {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "batch.interrupt-cap");
+            assert!(because.contains("[retry] max_interrupts = 3"), "{because}");
+        }
+        o => panic!("{o:?}"),
+    }
+    crash_seam::set(None);
+    fx.with(|e| e.retry_failed("b1", "the host was fixed")).unwrap();
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "merged"));
+}
+
+#[test]
+fn minor3_consecutive_stopped_runs_stop_at_a_cap_and_need_a_person() {
+    let mut fx = Fx::new("");
+    fx.drive_to_proving("b1", "lane1");
+    for _ in 0..3 {
+        fx.lock.named.lock().unwrap().clear(); // the holder dies every time
+        assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "preflighted"));
+        let o = fx.adv("b1");
+        if fx.count("batch_events WHERE transition='T5s'") < 3 {
+            assert!(matches!(&o, Outcome::Advanced { to, .. } if to == "proving"), "{o:?}");
+        } else {
+            assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "batch.stopped-cap"), "{o:?}");
+        }
+    }
+    assert_eq!(fx.lock.launches.lock().unwrap().len(), 3, "the first launch and two relaunches");
+    fx.with(|e| e.retry_failed("b1", "the host is stable again")).unwrap();
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "proving"));
+}
+
+#[test]
+fn minor4_a_target_removed_from_the_config_is_a_refusal_not_a_panic() {
+    let mut fx = Fx::new("");
+    merged_with(&mut fx, |_| {});
+    assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"));
+    fx.cfg.targets.clear();
+    match fx.with(|e| e.advance("b1")).unwrap() {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "deploy.target-unknown");
+            assert!(because.contains("staging"), "{because}");
+        }
+        o => panic!("{o:?}"),
+    }
+    // the same while a deploy intent is pending
+    let mut fx = Fx::new("");
+    merged_with(&mut fx, |_| {});
+    crash_seam::set(Some("before:T8a".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err());
+    crash_seam::set(None);
+    fx.cfg.targets.clear();
+    assert!(fx.with(|e| e.advance("b1")).is_ok(), "no panic");
+}

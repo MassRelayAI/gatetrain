@@ -990,7 +990,8 @@ impl<'a> Engine<'a> {
             return Err(Error::Batch("a retry override needs a reason (--reason)".into()));
         }
         let Some(tr) = next_effect(&f.state) else { return Ok(Outcome::Idle(format!("batch {id} is {}: no transition with an effect to retry", f.state))) };
-        if self.failures_since(id, tr)?.is_empty() {
+        let (crashes, stopped) = self.repeats(id, tr)?;
+        if self.failures_since(id, tr)?.is_empty() && crashes.max(stopped) < self.cfg.max_interrupts {
             return Ok(Outcome::Idle(format!("the last attempt of {tr} did not fail: nothing to retry")));
         }
         let d = self.decide("override", id, None, "retry.person", "recorded", reason.trim().into(), Some(json!({"transition": tr, "from": f.state})))?;
@@ -1009,6 +1010,27 @@ impl<'a> Engine<'a> {
         let since = entered.max(overridden);
         let settled_crash = |e: &Ev| e.detail["outcome"].as_str() == Some("interrupted") && e.detail["settled"].as_bool() != Some(false);
         Ok(ev.into_iter().filter(|e| e.seq > since && e.transition == tr && e.phase == "failed" && !settled_crash(e)).collect())
+    }
+
+    /// Repeats that are not failures of the effect but still need a person when they go on: consecutive crashes of `tr` (settled
+    /// interruptions) and, for a launch, consecutive stopped runs (T5s), each since the newest person's override for `tr`.
+    fn repeats(&self, id: &str, tr: &str) -> Result<(usize, usize)> {
+        let ev = self.events(id)?;
+        let entered = ev.iter().rev().find(|e| e.phase == "done" && !matches!(e.transition.as_str(), "hold" | "release" | "retry")).map_or(0, |e| e.seq);
+        let overridden = ev.iter().rev().find(|e| e.transition == "retry" && e.phase == "done" && e.detail["transition"].as_str() == Some(tr)).map_or(0, |e| e.seq);
+        let since = entered.max(overridden);
+        let crashes = ev.iter().filter(|e| e.seq > since && e.transition == tr && e.phase == "failed" && e.detail["outcome"].as_str() == Some("interrupted") && e.detail["settled"].as_bool() != Some(false)).count();
+        let mut stopped = 0;
+        if matches!(tr, "T4" | "T6a") {
+            for e in ev.iter().rev().filter(|e| e.seq > overridden && e.phase == "done") {
+                match e.transition.as_str() {
+                    "T5s" => stopped += 1,
+                    "T4" | "T6a" | "hold" | "release" | "retry" => {}
+                    _ => break,
+                }
+            }
+        }
+        Ok((crashes, stopped))
     }
 
     /// A failed merge or deploy may have happened after all: the fast-forward moved the protected branch and only the check after it
@@ -1043,6 +1065,16 @@ impl<'a> Engine<'a> {
     /// The engine's one retry decision, used by every path that starts an attempt (`advance`, a tick, `retry`): a transition whose
     /// failed attempts exceed its `[retry] budget` (default 0) is refused (`batch.failed-needs-person`) until a person's override.
     fn failure_gate(&mut self, id: &str, tr: &str) -> Result<Option<Outcome>> {
+        let cap = self.cfg.max_interrupts;
+        let (crashes, stopped) = self.repeats(id, tr)?;
+        if crashes >= cap {
+            let because = format!("{tr} was interrupted {crashes} times in a row ([retry] max_interrupts = {cap}): something kills the engine during it; a person looks, then runs `gatetrain batch advance {id} --retry --reason <why>`");
+            return Ok(Some(self.refuse(id, "batch.interrupt-cap", because)?));
+        }
+        if stopped >= cap {
+            let because = format!("the proof run stopped without GATES_DONE {stopped} times in a row ([retry] max_interrupts = {cap}): the holder or the host keeps dying; a person looks, then runs `gatetrain batch advance {id} --retry --reason <why>`");
+            return Ok(Some(self.refuse(id, "batch.stopped-cap", because)?));
+        }
         let failed = self.failures_since(id, tr)?;
         let Some(last) = failed.last() else { return Ok(None) };
         let budget = self.cfg.retry_budget(tr);
@@ -1190,7 +1222,8 @@ impl<'a> Engine<'a> {
                 let branch = f.s("branch").unwrap_or_default();
                 rev(&format!("refs/heads/{branch}")) != plan.input_sha || rev(&format!("refs/heads/{}", self.cfg.protected)).as_deref() != plan.detail["merge_old"].as_str()
             }
-            "T8a" => self.checkpoints_of(id, plan.attempt).map(|n| n > 0).unwrap_or(true),
+            // a plugin that ran (post-merge, a deploy, even one that failed or timed out) may have changed the target
+            "T8a" => T8A_SPAWNED.with(|c| c.get()) || self.checkpoints_of(id, plan.attempt).map(|n| n > 0).unwrap_or(true),
             _ => false,
         }
     }
@@ -1972,6 +2005,7 @@ impl<'a> Engine<'a> {
                 Ok(Ok(Done { output: Some(new.into()), extra: json!({"merge_new": new}) }))
             }
             "T8a" => {
+                T8A_SPAWNED.with(|c| c.set(false));
                 let sha = plan.input_sha.clone().unwrap_or_default();
                 if !self.cfg.postmerge_command.is_empty() && !self.checkpointed(id, &sha, POSTMERGE)? {
                     // the target checkout needs its dependencies and packages before anything is deployed from it
@@ -1991,7 +2025,9 @@ impl<'a> Engine<'a> {
                     if self.checkpointed(id, &sha, name)? {
                         continue; // deployed by an earlier attempt for this sha: never twice
                     }
-                    let t = &self.cfg.targets[name];
+                    let Some(t) = self.cfg.targets.get(name) else {
+                        return Ok(Err(format!("deploy.target-unknown: target {name} is not in gatetrain.toml any more; a person decides what this batch deploys")));
+                    };
                     let env = self.env(id, f, &sha, "", "");
                     if !t.probe.is_empty() {
                         // no checkpoint: ask the target whether it already serves the sha (a crash after its deploy, before its row)
@@ -2004,7 +2040,7 @@ impl<'a> Engine<'a> {
                             continue;
                         }
                     }
-                    let t = &self.cfg.targets[name];
+                    let Some(t) = self.cfg.targets.get(name) else { return Ok(Err(format!("deploy.target-unknown: target {name} is not in gatetrain.toml any more"))) };
                     let cmd = substitute(&t.command, &sha);
                     let (min, survives) = (t.timeout_min.unwrap_or(DEPLOY_TIMEOUT_MIN), t.survives_parent);
                     let (rc, err) = match self.plugin_as(id, "T8a", &format!("deploy {name}"), &format!(" ([deploy.{name}] timeout_min)"), &cmd, &wd, &env, min, survives)? {
@@ -2211,9 +2247,8 @@ impl<'a> Engine<'a> {
         let sha = f.need("merge_new")?;
         for n in f.facts.get("targets").and_then(|t| t.as_array()).cloned().unwrap_or_default() {
             let name = n.as_str().unwrap_or_default();
-            let (health, tmo) = {
-                let t = &self.cfg.targets[name];
-                (t.health.clone(), t.health_timeout_min)
+            let Some((health, tmo)) = self.cfg.targets.get(name).map(|t| (t.health.clone(), t.health_timeout_min)) else {
+                return self.refuse(id, "deploy.target-unknown", format!("target {name} was deployed by this batch but is not in gatetrain.toml any more; live cannot be confirmed, a person decides"));
             };
             if health.is_empty() {
                 return self.refuse(id, "deploy.health-missing", format!("target {name} has no health check; live cannot be confirmed"));
