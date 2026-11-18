@@ -250,3 +250,17 @@ fn round3_a_every_signal_a_plugin_sends_its_group_leaves_the_watchdog_standing()
     }
     assert!(died.is_empty(), "the watchdog died alone on: {died:?}");
 }
+
+/// Round 3, C: a TERM a member of the plugin's group sends the group (`kill -TERM 0`) reaches the plugin once. The watchdog gets it
+/// too, from a sender inside the group, and does not forward it a second time (terraform and docker compose read a second interrupt
+/// as a force-quit).
+#[cfg(target_os = "linux")]
+#[test]
+fn round3_c_a_term_a_member_sends_its_group_runs_the_plugins_trap_once() {
+    let t = tempfile::tempdir().unwrap();
+    let hits = t.path().join("hits");
+    let line = format!("trap 'echo hit >> \"{}\"' TERM; kill -TERM 0; for i in 1 2 3 4 5 6 7 8 9 10; do sleep 0.1; done; exit 0", hits.display());
+    let r = run_watched(bash(&line));
+    assert_eq!(rc_out(&r).0, 0, "{r:?}");
+    assert_eq!(std::fs::read_to_string(&hits).unwrap_or_default().lines().count(), 1, "the trap ran once");
+}
