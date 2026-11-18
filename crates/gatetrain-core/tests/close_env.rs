@@ -341,3 +341,40 @@ fn r4minor1_whether_a_folder_is_its_own_repository_unknown_is_unreadable() {
     let rep = run_close(&set(&[("target", "/build/targets/lane-a")], &[]), &env_for(&ops, &t));
     assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.unreadable" && r.why.contains("repository")), "{rep:?}");
 }
+
+// ---- review round 5
+
+#[test]
+fn bl5_a_worktree_whose_index_hides_an_edit_is_uncommitted() {
+    // `status` is empty; `ls-files -v` shows an entry flagged skip-worktree (`S`) or assume-unchanged (lower case)
+    let (sim, h, t) = setup(json!({}));
+    sim.s().hidden_flags.insert("/repo/wt/lane-a".into());
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("worktree", "/repo/wt/lane-a")], &["line/lane-a"]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.uncommitted"), "{rep:?}");
+    assert!(sim.s().has("/repo/wt/lane-a"));
+}
+
+#[test]
+fn bl5_a_worktree_whose_index_flags_cannot_be_read_is_unreadable() {
+    let (sim, h, t) = setup(json!({}));
+    sim.s().ls_v_fails.insert("/repo/wt/lane-a".into());
+    let ops = Ops::new(&h, &sim, &t);
+    let rep = run_close(&set(&[("worktree", "/repo/wt/lane-a")], &["line/lane-a"]), &env_for(&ops, &t));
+    assert!(rep.done.is_empty() && rep.refusals.iter().any(|r| r.code == "tidy.unreadable"), "{rep:?}");
+    assert!(sim.s().has("/repo/wt/lane-a"));
+}
+
+#[test]
+fn minor4_a_relative_keep_paths_entry_is_refused_when_the_config_is_read() {
+    use gatetrain_core::tidy::config::build_cfg;
+    for rel in ["rel/keep", "./keep", "../keep", "C:keep"] {
+        let (cfg, h) = hostcfg(json!({"keep_paths": [rel]}), false, 50.0);
+        let got = build_cfg(&cfg, &h);
+        assert!(got.as_ref().is_err_and(|e| e.to_string().contains("absolute")), "{rel}: {:?}", got.map(|_| ()));
+    }
+    for abs in ["/build/keep", "C:/build/keep", "D:\\build\\keep"] {
+        let (cfg, h) = hostcfg(json!({"keep_paths": [abs]}), false, 50.0);
+        assert!(build_cfg(&cfg, &h).is_ok(), "{abs}");
+    }
+}

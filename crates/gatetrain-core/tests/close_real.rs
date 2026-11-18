@@ -600,3 +600,145 @@ fn bl4_the_main_checkout_snapshot_lists_untracked_files_when_git_hides_them() {
     let (_, status) = ops.snapshot_main().unwrap().unwrap();
     assert!(status.contains("untracked.txt"), "the snapshot that guards main must see untracked files: {status:?}");
 }
+
+// ---- review round 5
+
+/// A merged sibling worktree with `f.txt` flagged by `update-index <flag>` and then edited: `status` shows nothing.
+fn hidden_edit(f: &Fx, lane: &str, flag: &str) -> std::path::PathBuf {
+    let wt = f.sib(lane);
+    git(&wt, &["update-index", flag, "f.txt"]);
+    write(wt.join("f.txt"), "a local edit git is told not to look at\n");
+    age(&wt);
+    assert!(git(&wt, &["status", "--porcelain", "--untracked-files=all"]).trim().is_empty(), "status hides the edit");
+    wt
+}
+
+#[test]
+fn bl5_a_merged_worktree_with_a_skip_worktree_edit_is_not_removed() {
+    let f = fx();
+    let wt = hidden_edit(&f, "s", "--skip-worktree");
+    let rep = f.close_set(&[("worktree", fwd(&f.root) + "/main-wt-s")], &["line/s"], &f.prefix(), json!({}));
+    assert!(wt.join("f.txt").exists(), "a worktree with a hidden edit was removed: {rep:?}");
+    assert!(refused_with(&rep, "tidy.uncommitted"), "{rep:?}");
+}
+
+#[test]
+fn bl5_a_merged_worktree_with_an_assume_unchanged_edit_is_not_removed() {
+    let f = fx();
+    let wt = hidden_edit(&f, "au", "--assume-unchanged");
+    let rep = f.close_set(&[("worktree", fwd(&f.root) + "/main-wt-au")], &["line/au"], &f.prefix(), json!({}));
+    assert!(wt.join("f.txt").exists(), "a worktree with a hidden edit was removed: {rep:?}");
+    assert!(refused_with(&rep, "tidy.uncommitted"), "{rep:?}");
+}
+
+/// The recorded name is a spelling Windows opens as the tracked folder but git does not match by name.
+fn odd_name_is_refused(name: &str, real: &str) {
+    let f = fx();
+    let wt = live_worktree(&f);
+    if real != "src" {
+        write(wt.join(real).join("a.rs"), "fn a() {}\n");
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-q", "-m", "another tracked folder"]);
+        write(wt.join(real).join("a.rs"), "fn a() { /* uncommitted */ }\n");
+        age(&wt);
+    }
+    // Windows opens all three spellings as the tracked folder (Rust's own `exists` does not trim a trailing dot or space, so it is not
+    // asked there); elsewhere they are other names, and there is nothing to judge
+    if !cfg!(windows) && !wt.join(name).exists() {
+        eprintln!("{name:?} does not open {real:?} on this platform: nothing to judge");
+        return;
+    }
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/" + name), &[fwd(&f.build)]);
+    assert!(wt.join(real).join("a.rs").exists(), "{name:?}: a tracked folder with an uncommitted edit was moved: {rep:?}, trash {:?}", f.trash());
+    assert!(rep.done.is_empty() && !rep.refusals.is_empty(), "{name:?}: {rep:?}");
+}
+
+#[test]
+fn ma9_a_tracked_folder_recorded_with_a_trailing_dot_is_seen_as_holding_work() {
+    odd_name_is_refused("src.", "src");
+}
+
+#[test]
+fn ma9_a_tracked_folder_recorded_with_a_trailing_space_is_seen_as_holding_work() {
+    odd_name_is_refused("src ", "src");
+}
+
+#[test]
+fn ma9_a_tracked_folder_recorded_in_another_non_ascii_case_is_seen_as_holding_work() {
+    odd_name_is_refused("\u{dc}NITS", "\u{fc}nits");
+}
+
+#[test]
+fn minor6_a_merged_worktree_with_a_dirty_submodule_is_not_removed_when_git_ignores_submodules() {
+    let f = fx();
+    let sub = f.root.join("subsrc");
+    std::fs::create_dir_all(&sub).unwrap();
+    git(&sub, &["init", "-q", "-b", "main"]);
+    write(sub.join("s.txt"), "one\n");
+    git(&sub, &["add", "."]);
+    git(&sub, &["commit", "-q", "-m", "sub"]);
+    git(&f.main, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &fwd(&sub), "sub"]);
+    git(&f.main, &["commit", "-q", "-m", "a submodule"]);
+    git(&f.main, &["config", "diff.ignoreSubmodules", "all"]);
+    let wt = f.sib("sm");
+    git(&wt, &["-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init"]);
+    write(wt.join("sub/s.txt"), "two, not committed in the submodule\n");
+    age_all(&wt);
+    assert!(git(&wt, &["status", "--porcelain", "--untracked-files=all"]).trim().is_empty(), "status hides the dirty submodule");
+    let rep = f.close_set(&[("worktree", fwd(&f.root) + "/main-wt-sm")], &["line/sm"], &f.prefix(), json!({}));
+    assert!(wt.join("sub/s.txt").exists(), "a worktree with a dirty submodule was removed: {rep:?}");
+    assert!(refused_with(&rep, "tidy.uncommitted"), "{rep:?}");
+}
+
+#[test]
+fn minor2_a_kept_worktree_nested_inside_another_worktree_keeps_its_folders() {
+    let f = fx();
+    git(&f.main, &["worktree", "add", "-q", "-b", "line/outer", &(fwd(&f.build) + "/wt-outer")]);
+    let outer = f.build.join("wt-outer");
+    write(outer.join(".gitignore"), "inner/\ntarget/\n");
+    git(&outer, &["add", "."]);
+    git(&outer, &["commit", "-q", "-m", "ignore inner"]);
+    git(&f.main, &["worktree", "add", "-q", "-b", "line/k", &(fwd(&f.build) + "/wt-outer/inner/wt-k")]);
+    let inner = outer.join("inner/wt-k");
+    write(inner.join(".gitignore"), "target/\n");
+    git(&inner, &["add", "."]);
+    git(&inner, &["commit", "-q", "-m", "ignore target"]);
+    write(inner.join("target/x.o"), "obj\n");
+    age(&outer);
+    let rep = f.close_set(&[("target", fwd(&f.build) + "/wt-outer/inner/wt-k/target")], &[], &[fwd(&f.build)], json!({"keep_lanes": ["k"], "worktree_prefix": "wt-"}));
+    assert!(inner.join("target/x.o").exists(), "{rep:?}, trash {:?}", f.trash());
+    assert!(refused_with(&rep, "tidy.protected"), "{rep:?}");
+}
+
+#[test]
+fn minor1_a_tracked_folder_named_with_a_glob_character_is_seen_as_holding_work() {
+    let f = fx();
+    let wt = live_worktree(&f);
+    write(wt.join("s[r]c/a.rs"), "fn a() {}\n");
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-q", "-m", "a glob character"]);
+    write(wt.join("s[r]c/a.rs"), "fn a() { /* uncommitted */ }\n");
+    age(&wt);
+    let rep = f.close(&fwd(&f.main), "target", &(fwd(&f.build) + "/wt-live/s[r]c"), &[fwd(&f.build)]);
+    assert!(wt.join("s[r]c/a.rs").exists(), "{rep:?}");
+    assert!(refused_with(&rep, "tidy.not-owned"), "{rep:?}");
+}
+
+#[test]
+fn minor1_an_ignored_folder_named_like_a_glob_is_judged_by_its_own_name_not_as_a_pattern() {
+    // literal: `s[r]c` names that folder only. As a glob it would match the dirty `src` and the judge would refuse the folder for work
+    // it does not hold. The judge clears it; the executor then refuses any name with a glob character (`check_path`), so it stays.
+    let f = fx();
+    let wt = live_worktree(&f);
+    write(wt.join(".gitignore"), "target/\ns[[]r]c/\n");
+    git(&wt, &["add", ".gitignore"]);
+    git(&wt, &["commit", "-q", "-m", "ignore the glob-named folder"]);
+    write(wt.join("s[r]c/x.o"), "obj\n");
+    age(&wt);
+    assert!(git(&wt, &["status", "--porcelain", "--untracked-files=all", "--", ":(literal)s[r]c"]).trim().is_empty(), "the folder is ignored");
+    let key = fwd(&f.build) + "/wt-live/s[r]c";
+    let rep = f.close(&fwd(&f.main), "target", &key, &[fwd(&f.build)]);
+    assert!(rep.refusals.is_empty(), "the judge read the name as a pattern: {rep:?}");
+    assert!(rep.residue.iter().any(|r| r.contains("glob character")), "{rep:?}");
+    assert!(wt.join("s[r]c/x.o").exists() && wt.join("src/a.rs").exists());
+}

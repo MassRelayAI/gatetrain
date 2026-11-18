@@ -88,6 +88,10 @@ pub struct SimState {
     pub saved: HashMap<String, String>,
     /// a path at or below one of these cannot be resolved (`realpath` fails)
     pub realpath_fails: Vec<String>,
+    /// repositories whose index holds an entry flagged skip-worktree (`git ls-files -v` prints it with `S`)
+    pub hidden_flags: HashSet<String>,
+    /// repositories where `git ls-files -v` fails
+    pub ls_v_fails: HashSet<String>,
 }
 
 impl SimState {
@@ -481,6 +485,12 @@ impl Sim {
         let m = re(r"^git -C (\S+) (.+)$").captures(c).unwrap();
         let (repo, a) = (n(&m[1]), m[2].to_string());
         let ok = |s: String| RunOut::done(0, s);
+        if a == "ls-files -v" {
+            if st.ls_v_fails.contains(&repo) {
+                return RunOut::done(128, "");
+            }
+            return ok(if st.hidden_flags.contains(&repo) { "H a.rs\nS f.rs\n".into() } else { "H a.rs\n".into() });
+        }
         if a == "ls-files" {
             let prefix = format!("{}/", n(&st.main));
             return ok(st.tracked().iter().map(|k| k.strip_prefix(&prefix).unwrap_or(k).to_string()).collect::<Vec<_>>().join("\n") + "\n"); // git lists paths relative to the checkout

@@ -538,3 +538,34 @@ fn two_worktrees_of_one_commit_share_a_cache_key() {
     assert!(r2.stdout.contains("STEP_CACHED a"), "the second worktree of the same commit missed the cache: {}", r2.stdout);
     assert!(!marker.exists());
 }
+
+// ---- review round 5, minor 7: git's configuration never decides whether a stamp or a cache entry is written
+
+#[test]
+fn minor7_an_untracked_file_hidden_by_git_config_still_makes_the_tree_dirty_for_the_stamp() {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q"]);
+    std::fs::write(repo.path().join("f.txt"), "one").unwrap();
+    git(repo.path(), &["add", "f.txt"]);
+    git(repo.path(), &["commit", "-q", "-m", "init"]);
+    git(repo.path(), &["config", "status.showUntrackedFiles", "no"]); // the temp repository only
+    std::fs::write(repo.path().join("untracked.txt"), "never added").unwrap();
+    let toml = format!("cwd = '{}'\n\n{}", repo.path().display(), step("ok", "fast", &[], None, &["pass"]));
+    let work = tempfile::tempdir().unwrap();
+    let r = chain(work.path(), &toml, &["--par", "1"]);
+    assert_eq!(code(&r), 0, "{}", r.stdout);
+    assert!(stamps(&r.out).is_empty(), "a stamp was written over an untracked file");
+}
+
+#[test]
+fn minor7_an_untracked_input_hidden_by_git_config_writes_no_cache_entry() {
+    let repo = cache_repo();
+    git(repo.path(), &["config", "status.showUntrackedFiles", "no"]); // the temp repository only
+    std::fs::write(repo.path().join("new.txt"), "an input nobody added").unwrap();
+    let (work, cache, mk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let marker = mk.path().join("ran");
+    let toml = with_cwd(repo.path(), &cstep("a", &[], &["in.txt", "new.txt"], &marker, &[]));
+    let r = chain(work.path(), &toml, &["--cache", cache.path().to_str().unwrap()]);
+    assert!(marker.exists(), "{}", r.stdout);
+    assert_eq!(entries(cache.path(), "a"), 0, "a cache entry was written over an untracked input");
+}
