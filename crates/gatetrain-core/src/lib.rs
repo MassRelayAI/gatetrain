@@ -54,6 +54,9 @@ pub enum Error {
     Batch(String),
     #[error("bad timestamp: {0:?}")]
     Timestamp(String),
+    /// A test hook's crash: the process "dies" here, so no `failed` row is written (a real crash cannot write one either).
+    #[error("simulated crash: {0}")]
+    SimulatedCrash(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -425,6 +425,17 @@ fn run_plugin(cmd: &[String], dir: &Path, env: &[(String, String)]) -> Result<(i
     Ok((o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stderr).trim().to_string()))
 }
 
+/// [`run_plugin`] with a time limit: `None` when it ran out and its process tree was ended.
+fn run_plugin_within(cmd: &[String], dir: &Path, env: &[(String, String)], secs: f64) -> Result<Option<(i32, String)>> {
+    let (prog, args) = cmd.split_first().ok_or_else(|| Error::Batch("empty plugin command".into()))?;
+    let mut c = Command::new(prog);
+    c.args(args).current_dir(dir).envs(env.iter().map(|(k, v)| (k, v)));
+    Ok(match crate::runner::run_cmd(c, Some(secs)).map_err(Error::Batch)? {
+        crate::runner::RunOut::Done { rc, out } => Some((rc as i32, out.trim().to_string())),
+        crate::runner::RunOut::TimedOut => None,
+    })
+}
+
 fn substitute(cmd: &[String], sha: &str) -> Vec<String> {
     cmd.iter().map(|a| a.replace("{sha}", sha)).collect()
 }
@@ -796,16 +807,22 @@ impl<'a> Engine<'a> {
         let r = self.effect(id, f, &plan);
         let done = match r {
             Ok(Ok(d)) => d,
-            Ok(Err(msg)) | Err(Error::Batch(msg)) => {
-                self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": msg}))?;
-                return Ok(Outcome::Failed(format!("{}: {msg}", plan.tr)));
-            }
-            Err(e) => return Err(e),
+            // a test hook's crash leaves the intent as a real crash would: the next advance probes it
+            Err(e @ Error::SimulatedCrash(_)) => return Err(e),
+            // every other error of the effect (a command that cannot be spawned, a missing folder, a marker that cannot be written)
+            // is a failed attempt with its row, so no caller runs the effect again without a person
+            Ok(Err(msg)) | Err(Error::Batch(msg)) => return self.failed(id, &plan, msg),
+            Err(e) => return self.failed(id, &plan, e.to_string()),
         };
         if self.crash_after_effect.as_deref() == Some(plan.tr.as_str()) {
-            return Err(Error::Batch("simulated crash after the effect".into()));
+            return Err(Error::SimulatedCrash("after the effect".into()));
         }
         self.finish(id, &plan, done.output, done.extra, "")
+    }
+
+    fn failed(&mut self, id: &str, plan: &Plan, msg: String) -> Result<Outcome> {
+        self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": msg}))?;
+        Ok(Outcome::Failed(format!("{}: {msg}", plan.tr)))
     }
 
     fn finish(&mut self, id: &str, plan: &Plan, output: Option<String>, extra: Value, why: &str) -> Result<Outcome> {
@@ -1490,13 +1507,20 @@ impl<'a> Engine<'a> {
                     let name = n.as_str().unwrap_or_default();
                     let t = &self.cfg.targets[name];
                     let env = self.env(id, f, &sha, "", "");
-                    let (rc, err) = run_plugin(&substitute(&t.command, &sha), &wd, &env)?;
+                    let cmd = substitute(&t.command, &sha);
+                    let (rc, err) = match t.timeout_min {
+                        None => run_plugin(&cmd, &wd, &env)?,
+                        Some(min) => match run_plugin_within(&cmd, &wd, &env, min * 60.0)? {
+                            Some(x) => x,
+                            None => return Ok(Err(format!("deploy {name} timed out after {min} min ([deploy.{name}] timeout_min); its process tree was ended"))),
+                        },
+                    };
                     if rc != 0 {
                         return Ok(Err(format!("deploy {name} exited {rc}: {err}")));
                     }
                     if self.crash_after_effect.as_deref() == Some(format!("T8a:{name}").as_str()) {
                         // test hook: the process dies right after this target deployed, before the marker and before `done`
-                        return Err(Error::Io(std::io::Error::other(format!("simulated crash after deploying {name}"))));
+                        return Err(Error::SimulatedCrash(format!("after deploying {name}")));
                     }
                 }
                 let marker = self.deploy_marker(id, plan.attempt);

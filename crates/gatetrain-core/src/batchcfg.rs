@@ -12,6 +12,8 @@ pub struct Target {
     pub tier: String,
     /// How long `deploying` may wait for a healthy answer before it refuses (`deploy.health-timeout`); 0 = wait for ever.
     pub health_timeout_min: f64,
+    /// How long the deploy command may run before its process tree is ended and the deploy fails; `None` = no limit.
+    pub timeout_min: Option<f64>,
 }
 
 /// A shared file ("hub") that is rebuilt, not merged, when two lanes change it: `[stack] hubs = [{ glob, rebuild }]`.
@@ -308,6 +310,13 @@ impl BatchConfig {
                         health: argv(t.get("health")),
                         tier: t.get("tier").and_then(|x| x.as_str()).unwrap_or("staging").to_string(),
                         health_timeout_min: t.get("health_timeout_min").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).unwrap_or(0.0),
+                        timeout_min: match t.get("timeout_min") {
+                            None => None,
+                            Some(x) => match x.as_float().or_else(|| x.as_integer().map(|i| i as f64)) {
+                                Some(m) if m > 0.0 => Some(m),
+                                _ => return Err(Error::Batch(format!("gatetrain.toml: [deploy.{name}] timeout_min is a number of minutes above 0, not {x}"))),
+                            },
+                        },
                     },
                 );
             }
