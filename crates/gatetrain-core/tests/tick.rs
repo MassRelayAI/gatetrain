@@ -586,6 +586,9 @@ fn minor1_s3_a_crash_inside_a_target_is_not_deployed_again_unless_the_target_is_
         assert!(fx.with(|e| e.advance("b1")).is_err(), "the simulated crash right after the staging deploy");
         gatetrain_core::batch::crash_seam::set(None);
         assert_eq!(lines_in(&fx, "deploy.txt"), 1);
+        // the deploy marked its record `deployed` (round 2, MINOR 8); a crash INSIDE the target, before that mark, leaves no such
+        // record, which is what this test is about: remove it
+        std::fs::remove_file(fx.state.join("running").join("staging.json")).unwrap();
         let r = fx.tick();
         if idempotent {
             assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
@@ -595,6 +598,18 @@ fn minor1_s3_a_crash_inside_a_target_is_not_deployed_again_unless_the_target_is_
             assert_eq!(lines_in(&fx, "deploy.txt"), 1, "a target that may be half deployed is not deployed again without a person");
             assert_eq!(r.exit_code(), 1);
         }
+    }
+    // MINOR 8 (round 2): with the record the deploy marked, a crash right after the deploy is settled, idempotent or not
+    for idempotent in [false, true] {
+        let mut fx = Fx::new("");
+        fx.cfg.targets.get_mut("staging").unwrap().idempotent = idempotent;
+        merged_with(&mut fx, |_| {});
+        gatetrain_core::batch::crash_seam::set(Some("T8a:staging".into()));
+        assert!(fx.with(|e| e.advance("b1")).is_err());
+        gatetrain_core::batch::crash_seam::set(None);
+        let r = fx.tick();
+        assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+        assert_eq!(lines_in(&fx, "deploy.txt"), 1, "deployed once: the record said it was done");
     }
 }
 
@@ -1848,4 +1863,40 @@ fn minor9_a_batch_whose_health_checks_run_holds_the_next_deploy_on_its_target() 
     assert_eq!(r.lines[0], "b1: deploying -> live -> closed", "{:?}", r.lines);
     assert_eq!(r.lines[1], "b2: merged -> deploying -> live -> closed", "{:?}", r.lines);
     assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b1", "deployed b2"], "every health check ran against its own sha");
+}
+
+/// MINOR 8 (round 2): a crash between a successful deploy and its checkpoint row. The deploy's own last act marks its record
+/// `deployed <sha>` before the checkpoint is written, so the next advance of any batch writes the checkpoint from it and
+/// `deploy.superseded` sees the newer sha: an older batch a person retries never deploys over it, and the crashed batch does not
+/// deploy again.
+#[test]
+fn minor8_a_crash_after_a_deploy_before_its_checkpoint_is_still_seen_by_superseded() {
+    let mut fx = Fx::new("");
+    let (log, fixed) = (fwd(&fx.t.path().join("deploy-log.txt")), fwd(&fx.t.path().join("fixed")));
+    b1_merged_b2_proven(&mut fx, |t| {
+        t.command = vec!["sh".into(), "-c".into(), format!("if [ $GATETRAIN_BATCH = b1 ] && [ ! -e '{fixed}' ]; then exit 1; fi; echo deployed $GATETRAIN_BATCH >> '{log}'")];
+        t.timeout_min = Some(1.0);
+    });
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)), "b1's deploy fails and needs a person");
+    assert!(matches!(fx.adv("b2"), Outcome::Advanced { to, .. } if to == "merged"));
+    // b2 deploys its newer sha; gatetrain dies before the checkpoint row
+    crash_seam::set(Some("T8a:staging".into()));
+    assert!(fx.with(|e| e.advance("b2")).is_err());
+    crash_seam::set(None);
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b2"]);
+    let rec: Option<serde_json::Value> = std::fs::read_to_string(record_path(&fx, "staging")).ok().and_then(|t| serde_json::from_str(&t).ok());
+    std::fs::write(fx.t.path().join("fixed"), "").unwrap();
+    fx.with(|e| e.retry_failed("b1", "the deploy host was fixed")).unwrap();
+    match fx.adv("b1") {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "deploy.superseded");
+            assert!(because.contains("b2"), "{because}");
+        }
+        o => panic!("the older sha was deployed over b2's: {o:?}"),
+    }
+    assert_eq!(fx.count("decisions WHERE rule='deploy.checkpoint' AND batch='b2' AND subject='staging'"), 1, "the checkpoint was written from the record");
+    assert!(!record_path(&fx, "staging").exists(), "the record is gone once its checkpoint is written");
+    assert!(matches!(fx.adv("b2"), Outcome::Advanced { to, .. } if to == "deploying"), "b2 resumes as deployed");
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b2"], "nothing deployed twice, nothing older over newer");
+    assert!(rec.as_ref().is_some_and(|r| r["deployed"].as_str().is_some_and(|s| s.len() == 40)), "the record said what was deployed: {rec:?}");
 }

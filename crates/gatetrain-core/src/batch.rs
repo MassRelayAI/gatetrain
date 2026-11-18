@@ -732,7 +732,18 @@ impl<'a> Engine<'a> {
             return Err(e); // a test's crash: the process "died" with the plugin running, its record left behind
         }
         if let Some(p) = &record {
-            let _ = std::fs::remove_file(p);
+            // a T8a step that succeeded marks its record `deployed <sha>` as its last act, before the caller writes the checkpoint row:
+            // a crash in between leaves a record that the next advance turns into that checkpoint (`adopt_deployed`), so
+            // `deploy.superseded` and the probe see the deploy. Any other ending removes the record.
+            let ok = matches!(&r, Ok(crate::runner::IsolatedRaw::Done { rc: 0, .. }));
+            let marked = ok && {
+                let mut v = marker.clone();
+                v["deployed"] = json!(sha);
+                write_record(p, &v).is_ok()
+            };
+            if !marked {
+                let _ = std::fs::remove_file(p);
+            }
         }
         if let Some(b) = &self.progress {
             if let Ok(mut g) = b.lock() {
@@ -783,6 +794,9 @@ impl<'a> Engine<'a> {
         // a held, abandoned or closed batch is never retried: its record is cleared by `clear-record`
         let parked = self.fold(batch).is_ok_and(|f| matches!(f.state.as_str(), "held" | "abandoned" | "closed"));
         let cmd = |flag: &str| if parked { format!("`gatetrain batch clear-record {batch} --reason <why>{flag}`") } else { format!("`gatetrain batch advance {batch} --retry{flag} --reason <why>`") };
+        if v["deployed"].as_str().is_some() {
+            return Rec::Gone; // the step ended and succeeded; only its checkpoint row is missing (`adopt_deployed`)
+        }
         let unverifiable = format!("A person checks that it is not running and runs {}, which clears the record", cmd(" --clear-unverifiable-record"));
         let Some(pid) = v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else {
             return Rec::Unverifiable(format!("{step} of batch {batch} was starting when its gatetrain stopped, before its pid was recorded: it may be running, and nothing can tell, so nothing clears it by itself. {unverifiable}"));
@@ -1183,6 +1197,7 @@ impl<'a> Engine<'a> {
     /// closed batch too, which `--retry` never reaches), under the same liveness check as a retry. An override row
     /// (`record.clear-person`, `cleared_records`) and nothing else: no batch moves.
     pub fn clear_record(&mut self, id: &str, reason: &str, clear_unverifiable: bool) -> Result<Outcome> {
+        self.adopt_deployed()?;
         let f = self.fold(id)?;
         if reason.trim().is_empty() {
             return Err(Error::Batch("clearing a record needs a reason (--reason)".into()));
@@ -1241,6 +1256,7 @@ impl<'a> Engine<'a> {
     /// its process group) still runs is never cleared: the retry is refused (`deploy.record-live`) and names what to end.
     pub fn retry_failed_with(&mut self, id: &str, reason: &str, clear_unverifiable: bool) -> Result<Outcome> {
         let _git = self.git_scope(id);
+        self.adopt_deployed()?;
         let f = self.fold(id)?;
         if let Some(o) = self.parked(id, &f)? {
             return Ok(o);
@@ -1414,6 +1430,7 @@ impl<'a> Engine<'a> {
     /// One step: resume a pending intent, else take the transition the state allows, or refuse naming the rule.
     pub fn advance(&mut self, id: &str) -> Result<Outcome> {
         let _git = self.git_scope(id);
+        self.adopt_deployed()?;
         let f = self.fold(id)?;
         if let Some(o) = self.parked(id, &f)? {
             return Ok(o);
@@ -1710,6 +1727,40 @@ impl<'a> Engine<'a> {
     fn checkpoint(&mut self, id: &str, sha: &str, attempt: i64, target: &str) -> Result<i64> {
         let what = if target == POSTMERGE { "the post-merge command ran".to_string() } else { format!("target {target} deployed") };
         self.decide("deploy", id, Some(target.into()), "deploy.checkpoint", "recorded", format!("{what} for {}", short(sha)), Some(json!({"sha": sha, "attempt": attempt, "target": target})))
+    }
+
+    /// The checkpoint of a T8a step that just succeeded, then its record (marked `deployed` by [`Engine::plugin_as`]) is removed.
+    fn checkpoint_step(&mut self, id: &str, sha: &str, attempt: i64, target: &str) -> Result<i64> {
+        let d = self.checkpoint(id, sha, attempt, target)?;
+        let p = self.running_path(target);
+        if std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["batch"].as_str() == Some(id) && v["deployed"].as_str() == Some(sha)) {
+            let _ = std::fs::remove_file(&p);
+        }
+        Ok(d)
+    }
+
+    /// MINOR 8 of round 2: a record marked `deployed <sha>` is a T8a step that succeeded and whose checkpoint row a crash prevented.
+    /// Its checkpoint is written now (for the batch, the sha and the target the record names, under that batch's T8a attempt) and the
+    /// record removed, before any guard reads the checkpoints. Run at the start of every command that moves or clears a batch.
+    fn adopt_deployed(&mut self) -> Result<()> {
+        for (p, v) in self.running_records() {
+            let (Some(b), Some(sha), Some(t)) = (v["batch"].as_str(), v["deployed"].as_str(), v["target"].as_str()) else { continue };
+            if !self.checkpointed(b, sha, t)? {
+                let attempt = self.fold(b).ok().map(|f| f.pending.as_ref().filter(|e| e.transition == "T8a").map(|e| e.attempt).unwrap_or_else(|| f.max_attempt.get("T8a").copied().unwrap_or(0))).unwrap_or(0);
+                let what = if t == POSTMERGE { "the post-merge command ran".to_string() } else { format!("target {t} deployed") };
+                self.decide(
+                    "deploy",
+                    b,
+                    Some(t.into()),
+                    "deploy.checkpoint",
+                    "recorded",
+                    format!("{what} for {} (from its record: gatetrain stopped after the step, before this row)", short(sha)),
+                    Some(json!({"sha": sha, "attempt": attempt, "target": t, "from_record": true})),
+                )?;
+            }
+            std::fs::remove_file(&p)?;
+        }
+        Ok(())
     }
 
     fn checkpointed(&self, id: &str, sha: &str, target: &str) -> Result<bool> {
@@ -2320,7 +2371,7 @@ impl<'a> Engine<'a> {
                     if rc != 0 {
                         return Ok(Err(format!("post-merge command exited {rc}: {err}")));
                     }
-                    self.checkpoint(id, &sha, plan.attempt, POSTMERGE)?;
+                    self.checkpoint_step(id, &sha, plan.attempt, POSTMERGE)?;
                 }
                 for n in plan.detail["targets"].as_array().cloned().unwrap_or_default() {
                     let name = n.as_str().unwrap_or_default();
@@ -2338,7 +2389,7 @@ impl<'a> Engine<'a> {
                             Err(why) => return Ok(Err(why)),
                         };
                         if rc == 0 {
-                            self.checkpoint(id, &sha, plan.attempt, name)?;
+                            self.checkpoint_step(id, &sha, plan.attempt, name)?;
                             continue;
                         }
                     }
@@ -2354,7 +2405,7 @@ impl<'a> Engine<'a> {
                     }
                     // test seam: the process dies right after this target deployed, before its checkpoint and before `done`
                     crash_point(&format!("T8a:{name}"))?;
-                    self.checkpoint(id, &sha, plan.attempt, name)?;
+                    self.checkpoint_step(id, &sha, plan.attempt, name)?;
                 }
                 Ok(Ok(Done { output: Some(sha), extra: json!({}) }))
             }

@@ -451,7 +451,7 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 > | a deploy is recorded before it runs | an intent marker before the spawn; the pid and its start token right after the spawn (the command has started; a crash in between leaves a marker without a pid, which needs a person: `deploy.record-unverifiable`, exit 1) | an intent marker before the spawn; the pid and its start token while the process is still suspended, before it runs |
 > | a recorded deploy is told from a dead one | the leader's pid under its start token (`/proc/<pid>/stat` starttime); a pid reused by a later process is not it; members of its process group count unless the target says `survives_parent` | the leader's pid under its creation time, alive by its wait state (an exit code of 259 is not "alive"); only the leader is judged |
 > | one deploy per target at a time, across batches | the per-target record and `deploy.another-batch-deploying`; a batch merges only after the batch merged before it settled its deploy, and deploys only once no other batch is `deploying` (health checks running) on the same target | the same |
-> | an older sha is never deployed over a newer one | `deploy.superseded`, from the ledger's per-target checkpoints, for a fresh and a resumed attempt | the same |
+> | an older sha is never deployed over a newer one | `deploy.superseded`, from the ledger's per-target checkpoints, for a fresh and a resumed attempt; a step that succeeded marks its record `deployed <sha>` before its checkpoint row, and the next advance of any batch writes a checkpoint a crash prevented from that record | the same |
 >
 > Neither platform sees a deploy that runs on another machine (an ssh or API deploy that outlives its local command), and a record
 > without a pid or start token, or one that cannot be read, needs a person at once (`deploy.record-unverifiable`, the tick exits 1), for
@@ -467,7 +467,8 @@ default `staging` is not assumed for an unattended deploy), and `[deploy] auto_t
 `gatetrain.toml` is refused at load when an automatic deploy target (any tier but `production`) has neither `idempotent = true` nor a
 `probe = [...]` that exits 0 when the target already serves `{sha}`, and, with `[tick] enabled`, when it has no `timeout_min` (a
 finite number of minutes, at most 1440). Each target that deployed is a `deploy.checkpoint` row of the decision log, so a later
-attempt for the same sha never deploys it again; a target a crash left in doubt is asked its probe, deployed again only when it is
+attempt for the same sha never deploys it again (the step's last act marks its record `deployed <sha>` before that row, so a
+crash in between is turned into the row by the next advance, `from_record`); a target a crash left in doubt is asked its probe, deployed again only when it is
 idempotent, and otherwise waits for a person (`batch advance --retry`).
 
 `gatetrain tick` is one bounded pass. It takes the ledger lock (`<db>.tick.lock`; a second tick prints
