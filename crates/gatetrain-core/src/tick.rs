@@ -596,6 +596,9 @@ fn judge_wait_age(e: &Engine, results: &mut [BatchResult], o: &TickOpts) {
             End::Blocked { rule, because, person: false } => format!("{rule}: {because}"),
             _ => continue,
         };
+        if r.states.last().is_some_and(|s| s == "deploying") {
+            continue; // the health check has its own timer in the engine (`deploy.health-timeout`): one timer, not two
+        }
         let Ok(evs) = e.events(&r.batch) else { continue };
         let since: Option<i64> = evs.iter().rev().find(|ev| ev.phase == "done").and_then(|ev| event_at(e, ev.seq)).and_then(|at| logfmt::parse_iso(&at).ok()).map(|t| t.instant_us());
         let Some(since) = since else { continue };

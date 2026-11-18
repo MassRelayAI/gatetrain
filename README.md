@@ -501,8 +501,9 @@ included) the batch is refused with `batch.failed-needs-person` (a tick shows it
 until a person runs `batch advance <id> --retry --reason <why>`, which records an override row and lets one more attempt through. A
 hold and a release do not clear it. So a failing deploy, merge or launch runs once, not once per tick. A wait has an age, read
 from the ledger row that put the batch in its state: past `[tick] max_run_minutes` (default 360) for a proving or pre-flight run, or
-`[tick] max_wait_minutes` (default 120) for anything else (a health check that never passes, a host that keeps refusing), the batch is
-`BLOCKED tick.wait-too-long` with its age (exit 1). A host with no close environment is `BLOCKED close.no-environment` with the
+`[tick] max_wait_minutes` (default 120) for anything else (a host that keeps refusing), the batch is
+`BLOCKED tick.wait-too-long` with its age (exit 1). A health check that never passes has one timer, the engine's: the target's
+`health_timeout_min`, else `[tick] max_wait_minutes`, from the row that put the batch in `deploying` (`BLOCKED deploy.health-timeout`). A host with no close environment is `BLOCKED close.no-environment` with the
 reason. A held batch reads `held (<reason>)` and is exit 0: a person already decided.
 
 ## The basic workflow

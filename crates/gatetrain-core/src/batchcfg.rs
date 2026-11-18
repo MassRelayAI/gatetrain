@@ -10,7 +10,8 @@ pub struct Target {
     pub health: Vec<String>,
     /// `production` is never deployed automatically (floor.production-human).
     pub tier: String,
-    /// How long `deploying` may wait for a healthy answer before it refuses (`deploy.health-timeout`); 0 = wait for ever.
+    /// How long `deploying` may wait for a healthy answer before it refuses (`deploy.health-timeout`); 0 = `[tick] max_wait_minutes`.
+    /// It is the only health timer: the tick's wait age does not judge `deploying`.
     pub health_timeout_min: f64,
     /// How long the deploy command may run before its process tree is ended and the deploy fails; `None` = no limit.
     pub timeout_min: Option<f64>,

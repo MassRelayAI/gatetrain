@@ -2108,12 +2108,13 @@ impl<'a> Engine<'a> {
                 Err(why) => return Ok(Outcome::Waiting(format!("target {name}: {}", why.trim_start_matches(&format!("health {name} ")).replacen("timed out", "health timed out", 1)))),
             };
             if rc != 0 {
-                if tmo > 0.0 {
-                    let since: Option<String> = self.ledger.conn.query_row("SELECT at FROM batch_events WHERE batch=? AND transition='T8a' AND phase='done' ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).ok();
-                    if let (Some(t0), Some(t1)) = (since.as_deref().and_then(parse_iso), parse_iso(&(self.now)())) {
-                        if (t1 - t0) as f64 > tmo * 60.0 {
-                            return self.refuse(id, "deploy.health-timeout", format!("target {name} did not report {} healthy within {tmo} min; the deploy is left as it is for a person to look at", short(&sha)));
-                        }
+                // the one health timer: the target's own limit, else `[tick] max_wait_minutes`; it runs from the row that put the batch
+                // in `deploying` (a release starts it again), read from the ledger
+                let tmo = if tmo > 0.0 { tmo } else { self.cfg.max_wait_minutes };
+                let since: Option<String> = self.ledger.conn.query_row("SELECT at FROM batch_events WHERE batch=? AND phase='done' ORDER BY seq DESC LIMIT 1", [id], |r| r.get(0)).ok();
+                if let (Some(t0), Some(t1)) = (since.as_deref().and_then(parse_iso), parse_iso(&(self.now)())) {
+                    if (t1 - t0) as f64 > tmo * 60.0 {
+                        return self.refuse(id, "deploy.health-timeout", format!("target {name} did not report {} healthy within {tmo} min; the deploy is left as it is for a person to look at", short(&sha)));
                     }
                 }
                 return Ok(Outcome::Waiting(format!("target {name} does not report {} healthy yet", short(&sha))));

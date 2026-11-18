@@ -529,9 +529,11 @@ fn major2_a_deploy_that_never_turns_healthy_needs_a_person_after_max_wait_minute
     let r = fx.tick();
     assert!(r.lines[0].starts_with("b1: proving -> proven -> merged -> deploying, waits: target sick does not report "), "{:?}", r.lines);
     assert_eq!(r.exit_code(), 0);
+    fx.clock.set(121 * 60);
     let r = fx.tick_at(NOW_US + 121 * MIN_US);
-    assert!(r.lines[0].starts_with("b1: deploying, BLOCKED tick.wait-too-long: target sick does not report "), "{:?}", r.lines);
-    assert!(r.lines[0].ends_with(", for 121 min (over [tick] max_wait_minutes = 120)"), "{:?}", r.lines);
+    // one health timer: the engine's, with [tick] max_wait_minutes as the limit of a target that names none
+    assert!(r.lines[0].starts_with("b1: deploying, BLOCKED deploy.health-timeout: target sick did not report "), "{:?}", r.lines);
+    assert!(r.lines[0].contains("healthy within 120 min"), "{:?}", r.lines);
     assert_eq!(r.exit_code(), 1);
 }
 
@@ -1045,4 +1047,22 @@ fn s8_a_probe_settles_a_target_a_crash_left_in_doubt() {
     assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
     assert_eq!(lines_in(&fx, "deploy.txt"), 1, "the probe found staging deployed: not deployed again");
     assert_eq!(fx.count("decisions WHERE rule='deploy.checkpoint' AND subject='staging'"), 1);
+}
+
+#[test]
+fn one_health_timer_the_targets_own_limit_decides_not_a_second_one_in_the_tick() {
+    let sick = "[deploy.sick]\nidempotent = true\ncommand = [\"sh\", \"-c\", \"true\"]\nhealth = [\"sh\", \"-c\", \"exit 1\"]\ntier = \"staging\"\nhealth_timeout_min = 300\n";
+    let mut fx = Fx::new(sick);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    assert_eq!(fx.tick().exit_code(), 0);
+    // past [tick] max_wait_minutes (120), within the target's own 300 min: still a wait
+    fx.clock.set(121 * 60);
+    let r = fx.tick_at(NOW_US + 121 * MIN_US);
+    assert!(r.lines[0].starts_with("b1: deploying, waits: target sick does not report "), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 0);
+    fx.clock.set(301 * 60);
+    let r = fx.tick_at(NOW_US + 301 * MIN_US);
+    assert!(r.lines[0].starts_with("b1: deploying, BLOCKED deploy.health-timeout: target sick did not report "), "{:?}", r.lines);
+    assert_eq!(r.exit_code(), 1);
 }
