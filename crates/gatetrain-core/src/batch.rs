@@ -171,7 +171,7 @@ pub fn fold(events: &[Ev]) -> Option<Folded> {
                         }
                         f.state = to.clone();
                     }
-                    if !matches!(e.transition.as_str(), "hold" | "release" | "abandon" | "restack") {
+                    if !matches!(e.transition.as_str(), "hold" | "release" | "abandon" | "restack" | "retry") {
                         if let Some(o) = e.detail.as_object() {
                             for (k, v) in o {
                                 f.facts.insert(k.clone(), v.clone());
@@ -193,7 +193,8 @@ pub enum Outcome {
     Advanced { from: String, to: String, note: String },
     Waiting(String),
     Idle(String),
-    Refused { rule: String, because: String, decision: i64 },
+    /// `clears_by_itself`: the refusal goes away without a person (a busy host, a base batch still on its way); a tick waits on it.
+    Refused { rule: String, because: String, decision: i64, clears_by_itself: bool },
     Failed(String),
 }
 
@@ -214,6 +215,23 @@ impl Outcome {
             _ => 0,
         }
     }
+}
+
+/// Refusals that clear by themselves (a busy host, a base batch still on its way); every other refusal needs a person.
+pub const CLEARS_BY_ITSELF: &[&str] = &["host.refuse", "host.refuse-proof-running", "host.refuse-memory", "pipeline.base-unproven", "pipeline.base-not-merged"];
+
+/// The transition with an effect that `advance` takes from `state`, if any.
+fn next_effect(state: &str) -> Option<&'static str> {
+    Some(match state {
+        "open" => "T1",
+        "stacked" => "T2",
+        "settled" => "T3",
+        "preflighted" => "T4",
+        "red" => "T6a",
+        "proven" => "T7",
+        "merged" => "T8a",
+        _ => return None,
+    })
 }
 
 enum Planned {
@@ -631,7 +649,7 @@ impl<'a> Engine<'a> {
             Some((seq, k, r, reason)) if k == "refusal" && r.as_deref() == Some(rule) && reason == because => seq,
             _ => self.decide("refusal", id, None, rule, "refused", because.clone(), None)?,
         };
-        Ok(Outcome::Refused { rule: rule.into(), because, decision })
+        Ok(Outcome::Refused { rule: rule.into(), because, decision, clears_by_itself: CLEARS_BY_ITSELF.contains(&rule) })
     }
 
     // ------------------------------------------------------------ commands: new, status, hold, release, abandon
@@ -768,6 +786,54 @@ impl<'a> Engine<'a> {
         })
     }
 
+    /// `batch advance --retry --reason`: a person lets one more attempt of the transition whose last attempt failed through. It is an
+    /// override row (`retry.person`) and a side event `retry` that leaves the state alone; the next `advance` takes the attempt.
+    pub fn retry_failed(&mut self, id: &str, reason: &str) -> Result<Outcome> {
+        let f = self.fold(id)?;
+        if let Some(o) = self.parked(id, &f)? {
+            return Ok(o);
+        }
+        if reason.trim().is_empty() {
+            return Err(Error::Batch("a retry override needs a reason (--reason)".into()));
+        }
+        let Some(tr) = next_effect(&f.state) else { return Ok(Outcome::Idle(format!("batch {id} is {}: no transition with an effect to retry", f.state))) };
+        if self.failures_since(id, tr)?.is_empty() {
+            return Ok(Outcome::Idle(format!("the last attempt of {tr} did not fail: nothing to retry")));
+        }
+        let d = self.decide("override", id, None, "retry.person", "recorded", reason.trim().into(), Some(json!({"transition": tr, "from": f.state})))?;
+        let n = f.max_attempt.get("retry").copied().unwrap_or(0) + 1;
+        self.event(id, "retry", "done", n, Some(&f.state), None, None, None, Some(d), &json!({"transition": tr, "reason": reason.trim()}))?;
+        Ok(Outcome::Idle(format!("one more attempt of {tr} is allowed: {}", reason.trim())))
+    }
+
+    /// The failed attempts of `tr` that still count: after the row that put the batch in its state (a hold, a release or a retry
+    /// override is not such a row) and after the newest person's retry override. A crash is not a failure of the effect: an attempt
+    /// closed as `interrupted` does not count. Oldest first.
+    fn failures_since(&self, id: &str, tr: &str) -> Result<Vec<Ev>> {
+        let ev = self.events(id)?;
+        let entered = ev.iter().rev().find(|e| e.phase == "done" && !matches!(e.transition.as_str(), "hold" | "release" | "retry")).map_or(0, |e| e.seq);
+        let overridden = ev.iter().rev().find(|e| e.transition == "retry" && e.phase == "done" && e.detail["transition"].as_str() == Some(tr)).map_or(0, |e| e.seq);
+        let since = entered.max(overridden);
+        Ok(ev.into_iter().filter(|e| e.seq > since && e.transition == tr && e.phase == "failed" && e.detail["outcome"].as_str() != Some("interrupted")).collect())
+    }
+
+    /// The engine's one retry decision, used by every path that starts an attempt (`advance`, a tick, `retry`): a transition whose
+    /// failed attempts exceed its `[retry] budget` (default 0) is refused (`batch.failed-needs-person`) until a person's override.
+    fn failure_gate(&mut self, id: &str, tr: &str) -> Result<Option<Outcome>> {
+        let failed = self.failures_since(id, tr)?;
+        let Some(last) = failed.last() else { return Ok(None) };
+        let budget = self.cfg.retry_budget(tr);
+        if failed.len() <= budget {
+            let why = format!("attempt {} of {tr} after {} failed attempt(s), within [retry] budget {tr} = {budget}", last.attempt + 1, failed.len());
+            self.decide("retry", id, None, "retry.budget", "allowed", why, Some(json!({"transition": tr, "failed": failed.len()})))?;
+            return Ok(None);
+        }
+        let err = last.detail.get("error").and_then(Value::as_str).unwrap_or("no error recorded");
+        let err: String = if err.chars().count() > 120 { format!("{}...", err.chars().take(120).collect::<String>()) } else { err.to_string() };
+        let because = format!("the last attempt of {tr} failed ({err}); [retry] budget {tr} = {budget} is spent; a person runs `gatetrain batch advance {id} --retry --reason <why>` to try again");
+        Ok(Some(self.refuse(id, "batch.failed-needs-person", because)?))
+    }
+
     /// Retry a red proof (T6a, red -> proving): a full rerun, refused while a cause of the red run is open (`retry.causes-open`).
     /// A cause is addressed when the batch tip moved past the tested commit, or a person recorded the run's red as a flake or
     /// infrastructure with a reason (`note_cause`).
@@ -846,6 +912,9 @@ impl<'a> Engine<'a> {
     }
 
     fn go(&mut self, id: &str, f: &Folded, tr: &str) -> Result<Outcome> {
+        if let Some(o) = self.failure_gate(id, tr)? {
+            return Ok(o);
+        }
         let attempt = f.max_attempt.get(tr).copied().unwrap_or(0) + 1;
         match self.plan(tr, id, f, attempt)? {
             Planned::Refuse(rule, because) => self.refuse(id, &rule, because),
@@ -875,7 +944,7 @@ impl<'a> Engine<'a> {
     }
 
     fn failed(&mut self, id: &str, plan: &Plan, msg: String) -> Result<Outcome> {
-        self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": msg}))?;
+        self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": msg, "outcome": "failed"}))?;
         Ok(Outcome::Failed(format!("{}: {msg}", plan.tr)))
     }
 
@@ -914,7 +983,7 @@ impl<'a> Engine<'a> {
             }
             Probe::Partly => {
                 // Finish forward under a new attempt; the partial result is kept, never deleted.
-                self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": "partly done; finishing forward under a new attempt"}))?;
+                self.event(id, &plan.tr, "failed", plan.attempt, None, plan.input_sha.as_deref(), None, plan.run_id.as_deref(), None, &json!({"error": "partly done; finishing forward under a new attempt", "outcome": "interrupted"}))?;
                 let attempt = p.attempt + 1;
                 let f2 = self.fold(id)?;
                 match self.plan(&plan.tr, id, &f2, attempt)? {
@@ -1818,7 +1887,7 @@ impl<'a> Engine<'a> {
             return self.plain(id, f, "T9", "closed", None, None, json!({"tidied": rep.done, "gone": rep.gone}), "recorded", note);
         }
         let (code, why) = rep.refusals.first().map(|r| (r.code.clone(), r.why.clone())).unwrap_or_else(|| ("tidy.check-not-clean".into(), rep.residue.first().cloned().unwrap_or_default()));
-        Ok(Outcome::Refused { rule: code, because: format!("{why} ({} refusal(s), {} left over; the batch stays live and is retried)", rep.refusals.len(), rep.residue.len()), decision: last.unwrap_or(0) })
+        Ok(Outcome::Refused { clears_by_itself: false, rule: code, because: format!("{why} ({} refusal(s), {} left over; the batch stays live and is retried)", rep.refusals.len(), rep.residue.len()), decision: last.unwrap_or(0) })
     }
 
     /// The rows of one close run: a refusal row per refusal and per left-over item, a `tidy.moved` row per item that went. The last

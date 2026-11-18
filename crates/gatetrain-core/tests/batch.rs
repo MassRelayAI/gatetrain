@@ -240,7 +240,7 @@ fn a_sha_mismatch_refuses_with_the_rule_id() {
     let before = g(&fx.repo, &["rev-parse", "main"]);
     let o = fx.adv("b1").unwrap();
     match &o {
-        Outcome::Refused { rule, because, decision } => {
+        Outcome::Refused { rule, because, decision, .. } => {
             assert_eq!(rule, "merge.tested-equals-merged");
             assert!(because.contains("tested"), "{because}");
             assert!(*decision > 0);
@@ -1588,7 +1588,7 @@ fn the_proof_launch_needs_the_chain_stamp_when_the_preflight_is_launched() {
 
 #[test]
 fn a_preflight_run_on_a_proving_host_is_refused_with_the_hold_exit_code() {
-    let o = Outcome::Refused { rule: "host.refuse-proof-running".into(), because: "x".into(), decision: 1 };
+    let o = Outcome::Refused { rule: "host.refuse-proof-running".into(), because: "x".into(), decision: 1, clears_by_itself: true };
     assert_eq!(o.exit_code(), 75);
 }
 

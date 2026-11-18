@@ -114,9 +114,15 @@ pub struct BatchConfig {
     pub max_wait_minutes: f64,
     /// `[tick] max_run_minutes` (default 360): the same for a proving or pre-flight run that never finishes.
     pub max_run_minutes: f64,
+    /// `[retry] budget = { T4 = 1 }`: failed attempts of a transition the engine may start again without a person, per transition;
+    /// a transition not named has 0 (T7 and T8a included), so its failure waits for `batch advance --retry --reason`.
+    pub retry_budgets: BTreeMap<String, usize>,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
+
+/// The transitions that have an effect and so a failed attempt: the keys `[retry] budget` accepts.
+pub const RETRYABLE: &[&str] = &["T1", "T2", "T3", "T4", "T6a", "T7", "T8a"];
 
 impl Default for BatchConfig {
     fn default() -> Self {
@@ -165,6 +171,7 @@ impl Default for BatchConfig {
             stuck_minutes: 60.0,
             max_wait_minutes: 120.0,
             max_run_minutes: 360.0,
+            retry_budgets: BTreeMap::new(),
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -176,6 +183,10 @@ fn argv(v: Option<&toml::Value>) -> Vec<String> {
 }
 
 impl BatchConfig {
+    /// How many failed attempts of `tr` the engine starts again by itself (`[retry] budget`, default 0: a person's override row).
+    pub fn retry_budget(&self, tr: &str) -> usize {
+        self.retry_budgets.get(tr).copied().unwrap_or(0)
+    }
     pub fn load(path: &Path) -> Result<BatchConfig> {
         let text = std::fs::read_to_string(path).map_err(|e| Error::Batch(format!("reading {}: {e}", path.display())))?;
         BatchConfig::parse(&text)
@@ -300,6 +311,20 @@ impl BatchConfig {
                 c.max_ahead = n.max(0) as usize;
             }
             c.prove_ahead = p.get("prove_ahead").and_then(|b| b.as_bool()).unwrap_or(false);
+        }
+        if let Some(b) = v.get("retry").and_then(|r| r.get("budget")) {
+            let t = b.as_table().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [retry] budget is a table of transition = count, not {b}")))?;
+            for (tr, n) in t {
+                if !RETRYABLE.contains(&tr.as_str()) {
+                    return Err(Error::Batch(format!("gatetrain.toml: [retry] budget names {tr}; a budget is for one of {}", RETRYABLE.join(", "))));
+                }
+                match n.as_integer() {
+                    Some(n) if n >= 0 => {
+                        c.retry_budgets.insert(tr.clone(), n as usize);
+                    }
+                    _ => return Err(Error::Batch(format!("gatetrain.toml: [retry] budget {tr} is a whole number of at least 0, not {n}"))),
+                }
+            }
         }
         if let Some(p) = v.get("postmerge") {
             c.postmerge_command = argv(p.get("command"));

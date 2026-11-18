@@ -329,3 +329,25 @@ fn s0_tick_is_off_unless_the_config_turns_it_on() {
     assert_eq!(fx.tick(&[]).status.code(), Some(2));
     assert!(gatetrain_core::batchcfg::BatchConfig::parse("[tick]\nenabled = \"yes\"\n").is_err(), "enabled is a boolean");
 }
+
+#[test]
+fn s2_batch_advance_after_a_failed_attempt_is_refused_until_retry_with_a_reason() {
+    let fx = Fx::new(true);
+    std::fs::write(fx.root.join("gatetrain.toml"), "[chain]\ncommand = [\"sh\", \"-c\", \"true\"]\n[stack]\ncommand = [\"sh\", \"-c\", \"exit 3\"]\n[tick]\nenabled = true\n").unwrap();
+    let c = fx.cfg();
+    let adv = |extra: &[&str]| {
+        let mut a = vec!["batch", "advance", "b1", "--db", &fx.db, "--config", &c];
+        a.extend(extra);
+        gt(&a)
+    };
+    let o = adv(&[]);
+    assert_eq!(o.status.code(), Some(1), "the first attempt fails: {}", out(&o));
+    let o = adv(&[]);
+    assert_eq!(o.status.code(), Some(3), "{}", out(&o));
+    assert!(out(&o).contains("rule    batch.failed-needs-person"), "{}", out(&o));
+    let o = adv(&["--retry"]);
+    assert_eq!(o.status.code(), Some(2), "--retry needs --reason: {}", out(&o));
+    let o = adv(&["--retry", "--reason", "the stack script was fixed"]);
+    assert_eq!(o.status.code(), Some(1), "one more attempt ran (and failed again): {}", out(&o));
+    assert!(out(&o).contains("one more attempt of T1 is allowed"), "{}", out(&o));
+}

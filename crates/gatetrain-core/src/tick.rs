@@ -25,8 +25,6 @@ pub const MAX_PASSES: usize = 3;
 /// Batch lines in the report; more batches fold into one line.
 pub const MAX_BATCH_LINES: usize = 3;
 
-/// Refusals that clear by themselves (a busy host, a base batch still on its way); every other refusal needs a person (exit 1).
-const WAITS_ON_ITS_OWN: &[&str] = &["host.refuse", "host.refuse-proof-running", "host.refuse-memory", "pipeline.base-unproven", "pipeline.base-not-merged"];
 /// Refusals that may clear when another batch moves in this tick.
 const RETRY_AFTER_A_MOVE: &[&str] = &["pipeline.base-unproven", "pipeline.base-not-merged"];
 
@@ -493,17 +491,8 @@ fn judge_pipeline_waits(e: &Engine, results: &mut [BatchResult]) {
 
 /// Advance one batch until it waits, is refused, fails, or rests; each transition is a row `advance` writes.
 fn drive(e: &mut Engine, r: &mut BatchResult, max_steps: usize) -> Result<()> {
-    // a transition whose latest attempt failed is not started again by a tick: every tick would rerun a deploy, a merge or a launch
-    // that fails. A person's `batch advance` tries again (and clears this when it gets past it).
-    if let Some(last) = e.events(&r.batch)?.last().filter(|ev| ev.phase == "failed") {
-        let err = last.detail.get("error").and_then(Value::as_str).unwrap_or("no error recorded");
-        r.end = End::Blocked {
-            rule: "tick.failed-needs-person".into(),
-            because: format!("the last attempt of {} failed ({}); a person runs `gatetrain batch advance {}` to try again", last.transition, cap(err, 120), r.batch),
-            person: true,
-        };
-        return Ok(());
-    }
+    // a transition whose failed attempts spent their `[retry] budget` is refused by the engine itself (`batch.failed-needs-person`), for
+    // a tick and a person's `advance` alike: the retry decision is the state machine's, not the tick's
     for _ in 0..max_steps {
         match e.advance(&r.batch)? {
             Outcome::Advanced { to, .. } => {
@@ -525,8 +514,8 @@ fn drive(e: &mut Engine, r: &mut BatchResult, max_steps: usize) -> Result<()> {
                 r.end = End::Held(hold_reason(e, &r.batch));
                 return Ok(());
             }
-            Outcome::Refused { rule, because, .. } => {
-                let person = !WAITS_ON_ITS_OWN.contains(&rule.as_str());
+            Outcome::Refused { rule, because, clears_by_itself, .. } => {
+                let person = !clears_by_itself;
                 let because = cause_of(e, &r.batch, &rule).unwrap_or(because);
                 r.end = End::Blocked { rule, because, person };
                 return Ok(());

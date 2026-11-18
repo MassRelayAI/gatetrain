@@ -500,8 +500,10 @@ fn major1_a_failed_transition_is_not_retried_by_the_next_ticks() {
     assert_eq!(exits, vec![1, 1, 1]);
     assert_eq!(lines_in(&fx, "broken.txt"), 1, "one deploy call in three ticks");
     assert_eq!(postmerge_runs(&fx), 1, "one postmerge run in three ticks");
-    assert!(last.starts_with("b1: merged, BLOCKED tick.failed-needs-person: "), "{last}");
-    // a person's advance tries again, as before
+    assert!(last.starts_with("b1: merged, BLOCKED batch.failed-needs-person: "), "{last}");
+    // a person's plain advance is refused too; an explicit retry override tries again
+    assert!(matches!(fx.adv("b1"), Outcome::Refused { rule, .. } if rule == "batch.failed-needs-person"));
+    fx.with(|e| e.retry_failed("b1", "a person tries again")).unwrap();
     assert!(matches!(fx.adv("b1"), Outcome::Failed(_)));
     assert_eq!(lines_in(&fx, "broken.txt"), 2);
 }
@@ -637,7 +639,7 @@ fn rev3_b1_a_target_that_cannot_be_spawned_fails_once_and_is_not_rerun() {
     assert_eq!(lines_in(&fx, "deploy.txt"), 1, "staging deployed once");
     assert_eq!(postmerge_runs(&fx), 1, "postmerge ran once");
     let r = fx.tick();
-    assert!(r.lines[0].starts_with("b1: merged, BLOCKED tick.failed-needs-person: the last attempt of T8a failed ("), "{:?}", r.lines);
+    assert!(r.lines[0].starts_with("b1: merged, BLOCKED batch.failed-needs-person: the last attempt of T8a failed ("), "{:?}", r.lines);
 }
 
 #[test]
@@ -756,4 +758,63 @@ fn s1_rev4_a_held_batch_with_a_pending_t7_intent_is_not_moved_by_a_tick() {
     let r = fx.tick();
     assert_eq!(r.lines[0], "b1: proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
     assert_eq!(lines_in(&fx, "deploy.txt"), 1);
+}
+
+const BROKEN: &str = "[deploy.broken]\ncommand = [\"sh\", \"-c\", \"echo x >> ../broken.txt; exit 1\"]\nhealth = [\"sh\", \"-c\", \"true\"]\ntier = \"staging\"\n";
+
+#[test]
+fn s2_a_plain_advance_after_a_failed_attempt_is_refused_and_a_retry_override_tries_once_more() {
+    let mut fx = Fx::new(BROKEN);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, FAILED T8a: deploy broken exited 1"), "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "broken.txt"), 1);
+    // a person's plain advance is refused by the engine, naming the rule and the way past it
+    match fx.adv("b1") {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "batch.failed-needs-person");
+            assert!(because.contains("--retry"), "{because}");
+            assert!(because.contains("[retry] budget"), "{because}");
+        }
+        o => panic!("{o:?}"),
+    }
+    assert_eq!(lines_in(&fx, "broken.txt"), 1, "the refused advance deployed nothing");
+    // the override is a row, and it lets exactly one more attempt through
+    assert!(fx.with(|e| e.retry_failed("b1", "")).is_err(), "an override needs a reason");
+    fx.with(|e| e.retry_failed("b1", "the broken target was fixed")).unwrap();
+    assert_eq!(fx.count("decisions WHERE kind='override' AND rule='retry.person'"), 1);
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)));
+    assert_eq!(lines_in(&fx, "broken.txt"), 2);
+    assert!(matches!(fx.adv("b1"), Outcome::Refused { rule, .. } if rule == "batch.failed-needs-person"), "one override, one attempt");
+    assert_eq!(lines_in(&fx, "broken.txt"), 2);
+}
+
+#[test]
+fn s2_rev4_hold_then_release_after_a_failed_transition_does_not_unmask_it() {
+    let mut fx = Fx::new(BROKEN);
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    assert_eq!(fx.tick().exit_code(), 1);
+    fx.with(|e| e.hold("b1", "looking at the deploy")).unwrap();
+    fx.with(|e| e.release("b1")).unwrap();
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: merged, BLOCKED batch.failed-needs-person: "), "{:?}", r.lines);
+    assert_eq!(lines_in(&fx, "broken.txt"), 1, "the failed deploy is not run again by the release");
+    assert_eq!(postmerge_runs(&fx), 1);
+}
+
+#[test]
+fn s2_a_retry_budget_lets_the_engine_try_a_failed_transition_again_that_many_times() {
+    let mut fx = Fx::new(&format!("{BROKEN}[retry]\nbudget = {{ T8a = 1 }}\n"));
+    fx.drive_to_proving("b1", "lane1");
+    fx.write_log("b1", GREEN);
+    let exits: Vec<u8> = (0..3).map(|_| fx.tick().exit_code()).collect();
+    assert_eq!(exits, vec![1, 1, 1]);
+    assert_eq!(lines_in(&fx, "broken.txt"), 2, "the first attempt and one retry from the budget");
+    assert_eq!(fx.count("decisions WHERE kind='retry' AND rule='retry.budget'"), 1);
+    assert!(BatchConfig::parse("[retry]\nbudget = { T99 = 1 }\n").is_err(), "an unknown transition");
+    assert!(BatchConfig::parse("[retry]\nbudget = { T4 = -1 }\n").is_err(), "a negative budget");
+    let d = BatchConfig::parse("").unwrap();
+    assert_eq!((d.retry_budget("T7"), d.retry_budget("T8a"), d.retry_budget("T4")), (0, 0, 0), "default 0");
 }

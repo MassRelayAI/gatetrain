@@ -367,8 +367,16 @@ enum BatchCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Take the next step (or resume a pending intent); exit 3 when a rule refuses
-    Advance { id: String },
+    /// Take the next step (or resume a pending intent); exit 3 when a rule refuses. After a failed attempt that spent its
+    /// `[retry] budget`, a plain advance is refused (`batch.failed-needs-person`): `--retry --reason` records a person's override
+    /// row and lets one more attempt through
+    Advance {
+        id: String,
+        #[arg(long, requires = "reason")]
+        retry: bool,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// A person's hold
     Hold {
         id: String,
@@ -633,7 +641,7 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
             Outcome::Advanced { from, to, note } => println!("{from} -> {to} {note}"),
             Outcome::Waiting(m) | Outcome::Idle(m) => println!("{m}"),
             Outcome::Failed(m) => eprintln!("FAILED {m}"),
-            Outcome::Refused { rule, because, decision } => {
+            Outcome::Refused { rule, because, decision, .. } => {
                 println!("REFUSED
   rule    {rule}
   because {because}
@@ -664,7 +672,14 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
             }
             ExitCode::SUCCESS
         }
-        BatchCmd::Advance { id } => report(e.advance(&id)?),
+        BatchCmd::Advance { id, retry, reason } => {
+            if retry {
+                if let Outcome::Idle(m) = e.retry_failed(&id, &reason.unwrap_or_default())? {
+                    println!("{m}");
+                }
+            }
+            report(e.advance(&id)?)
+        }
         BatchCmd::Hold { id, reason } => report(e.hold(&id, &reason)?),
         BatchCmd::Release { id } => report(e.release(&id)?),
         BatchCmd::Restack { id } => report(e.restack(&id)?),

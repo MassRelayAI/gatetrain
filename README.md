@@ -484,8 +484,11 @@ the lock file's age, says so and exits 1. A hung deploy is ended by `[deploy.<na
 log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
 
-A tick never starts a transition whose latest attempt failed: the batch is `BLOCKED tick.failed-needs-person` (exit 1) until a person's
-`batch advance` gets past it, so a failing deploy, merge or launch runs once, not once per tick. A wait has an age, read
+The engine, not the tick, decides whether a failed transition is tried again, and it decides the same for a tick and a person: once
+the failed attempts of a transition exceed its `[retry] budget` (`budget = { T4 = 1 }`; every transition defaults to 0, T7 and T8a
+included) the batch is refused with `batch.failed-needs-person` (a tick shows it `BLOCKED`, exit 1; a plain `batch advance` exits 3)
+until a person runs `batch advance <id> --retry --reason <why>`, which records an override row and lets one more attempt through. A
+hold and a release do not clear it. So a failing deploy, merge or launch runs once, not once per tick. A wait has an age, read
 from the ledger row that put the batch in its state: past `[tick] max_run_minutes` (default 360) for a proving or pre-flight run, or
 `[tick] max_wait_minutes` (default 120) for anything else (a health check that never passes, a host that keeps refusing), the batch is
 `BLOCKED tick.wait-too-long` with its age (exit 1). A host with no close environment is `BLOCKED close.no-environment` with the
