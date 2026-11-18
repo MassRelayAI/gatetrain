@@ -576,6 +576,19 @@ fn epoch_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
+/// Write a record whole: a temporary file in the same folder, flushed to disk, then renamed over the record, so a reader (or a crash)
+/// never sees half of one.
+fn write_record(path: &Path, v: &Value) -> std::result::Result<(), String> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let tmp = dir.join(format!(".{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("record")));
+    let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    f.write_all(v.to_string().as_bytes()).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
+    drop(f);
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
 /// Does the holder's log say it holds `run` (`HOLDS <run>`, written once the holder took the host lock)?
 fn holder_named(log: &Path, run: &str) -> bool {
     let want = format!("HOLDS {run}");
@@ -650,31 +663,49 @@ impl<'a> Engine<'a> {
         let mut c = Command::new(prog);
         c.args(args).current_dir(dir).envs(env.iter().map(|(k, v)| (k, v)));
         let since = epoch_ms();
+        let target = step.strip_prefix("deploy ").or_else(|| step.strip_prefix("probe ")).unwrap_or(if step == "postmerge" { POSTMERGE } else { step });
+        let sha = env.iter().find(|(k, _)| k == "GATETRAIN_SHA").map(|(_, v)| v.clone()).unwrap_or_default();
+        let record = (tr == "T8a").then(|| self.running_path(target));
+        let marker = json!({"step": step, "batch": id, "target": target, "sha": sha, "since_ms": since, "survives_parent": survives_parent});
+        if let Some(p) = &record {
+            // the intent marker, before anything runs: a crash from here until the pid is written leaves a record without a pid,
+            // which every later advance reads as "may be running" (it waits), never as "did not happen"
+            if let Err(e) = write_record(p, &marker) {
+                return Ok(Err(format!("{noun}: its record {} cannot be written ({e}); nothing was run", p.display())));
+            }
+            crash_point(&format!("T8a:starting:{step}"))?;
+        }
         if let Some(b) = &self.progress {
             if let Ok(mut g) = b.lock() {
                 *g = Some(json!({"effect": format!("{id} {tr} {step}"), "since_ms": since, "deadline_ms": since + (secs * 1000.0) as i64}));
             }
         }
-        let key = step.strip_prefix("deploy ").or_else(|| step.strip_prefix("probe ")).unwrap_or(if step == "postmerge" { POSTMERGE } else { step });
-        let sha = env.iter().find(|(k, _)| k == "GATETRAIN_SHA").map(|(_, v)| v.clone()).unwrap_or_default();
-        let record = (tr == "T8a").then(|| self.running_path(key));
         let crashed: std::cell::RefCell<Option<Error>> = std::cell::RefCell::new(None);
-        let mut on_spawn = |pid: u32| -> std::result::Result<(), String> {
+        // the pid (and its start token) is recorded before the plugin runs on: on Windows while it is still suspended; a record that
+        // cannot be written ends it and fails the step
+        let mut on_start = |pid: u32| -> std::result::Result<(), String> {
             if tr == "T8a" {
                 T8A_SPAWNED.with(|c| c.set(true));
             }
             if let Some(p) = &record {
-                let v = json!({"pid": pid, "token": crate::runner::process_token(pid), "step": step, "batch": id, "target": key, "sha": sha, "since_ms": since, "survives_parent": survives_parent});
-                let _ = std::fs::create_dir_all(p.parent().unwrap_or(Path::new(".")));
-                let _ = std::fs::write(p, v.to_string());
+                let mut v = marker.clone();
+                v["pid"] = json!(pid);
+                v["token"] = json!(crate::runner::process_token(pid));
+                crash_point(&format!("T8a:record:{step}"))
+                    .map_err(|_| "the test seam refused the write".to_string())
+                    .and_then(|_| write_record(p, &v))
+                    .map_err(|e| format!("the pid {pid} could not be recorded in {} ({e}); the plugin was ended", p.display()))?;
             }
+            Ok(())
+        };
+        let mut on_spawn = |_pid: u32| -> std::result::Result<(), String> {
             if let Err(e) = crash_point(&format!("{tr}:spawned:{step}")) {
                 *crashed.borrow_mut() = Some(e);
                 return Err("the parent died".into());
             }
             Ok(())
         };
-        let r = crate::runner::run_isolated_with(c, secs, crate::runner::Opts { survives_parent, on_spawn: Some(&mut on_spawn) });
+        let r = crate::runner::run_isolated_with(c, secs, crate::runner::Opts { survives_parent, on_spawn: Some(&mut on_spawn), on_start: Some(&mut on_start) });
         if let Some(e) = crashed.borrow_mut().take() {
             return Err(e); // a test's crash: the process "died" with the plugin running, its record left behind
         }
@@ -723,7 +754,11 @@ impl<'a> Engine<'a> {
         let Some(batch) = v["batch"].as_str() else {
             return Some(format!("the record {} cannot be read; a person checks that no deploy runs and removes it", path.display()));
         };
-        let pid = u32::try_from(v["pid"].as_u64()?).ok()?;
+        let Some(pid) = v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else {
+            return Some(format!(
+                "{step} of batch {batch} was starting when its gatetrain stopped, before its pid was recorded: it may be running, and nothing can tell; the next step waits. A person checks that it is not running and runs `gatetrain batch advance {batch} --retry --reason <why>`, which clears the record"
+            ));
+        };
         let alive = crate::runner::process_alive(pid, v["token"].as_u64()) || crate::runner::group_alive(pid);
         alive.then(|| format!("{step} of batch {batch} is still running as pid {pid}, started by a gatetrain that is gone; the next step waits for it"))
     }

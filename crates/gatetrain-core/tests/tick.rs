@@ -692,7 +692,7 @@ fn rev3_minor2_a_deploy_over_its_timeout_ends_as_failed() {
     let t0 = std::time::Instant::now();
     let r = fx.tick();
     assert!(t0.elapsed() < std::time::Duration::from_secs(20), "the deploy was ended at its timeout, not waited for");
-    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, FAILED T8a: deploy slow timed out after 0.02 min"), "{:?}", r.lines);
+    assert!(r.lines[0].starts_with("b1: proving -> proven -> merged, FAILED T8a: deploy slow timed out after 0.02 min ([deploy.slow] timeout_min)"), "{:?}", r.lines);
     assert_eq!(r.exit_code(), 1);
 }
 
@@ -1451,4 +1451,64 @@ fn major1_a_deploy_behind_a_newer_batch_on_its_target_is_refused_superseded() {
     assert!(matches!(fx.adv("b1"), Outcome::Refused { rule, .. } if rule == "deploy.superseded"));
     assert!(matches!(fx.adv("b1"), Outcome::Refused { rule, .. } if rule == "deploy.superseded"), "never re-run by a later advance");
     assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b2"]);
+}
+
+/// The record of the running step on `target` (`<state>/running/<target>.json`).
+fn record_path(fx: &Fx, target: &str) -> PathBuf {
+    fx.state.join("running").join(format!("{target}.json"))
+}
+
+/// MINOR 2: an intent marker is written before the deploy is spawned. A crash between it and the pid leaves a record without a pid:
+/// every later advance waits (it may be running), never takes it for "not happened", and a person's retry clears it.
+#[test]
+fn minor2_a_crash_before_the_pid_is_recorded_leaves_a_marker_that_waits() {
+    let mut fx = Fx::new("");
+    merged_with(&mut fx, |t| t.timeout_min = Some(1.0));
+    crash_seam::set(Some("T8a:starting:deploy staging".into()));
+    assert!(fx.with(|e| e.advance("b1")).is_err(), "gatetrain dies after the marker, before the spawn");
+    crash_seam::set(None);
+    let rec: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(record_path(&fx, "staging")).unwrap()).unwrap();
+    assert_eq!(rec["batch"], "b1");
+    assert!(rec.get("pid").is_none(), "{rec}");
+    for _ in 0..2 {
+        match fx.adv("b1") {
+            Outcome::Waiting(why) => assert!(why.contains("before its pid was recorded") && why.contains("--retry"), "{why}"),
+            o => panic!("a marker without a pid is never 'not happened': {o:?}"),
+        }
+    }
+    assert_eq!(lines_in(&fx, "deploy.txt"), 0, "nothing deployed beside a deploy that may be running");
+    let r = fx.tick();
+    assert!(r.lines[0].starts_with("b1: merged, waits: "), "{:?}", r.lines);
+}
+
+/// MINOR 2: a record that cannot be written before the spawn fails the step with nothing run; one that cannot be written after it
+/// (the pid) ends the plugin and fails the step.
+#[test]
+fn minor2_a_record_that_cannot_be_written_fails_the_step_and_nothing_runs_on() {
+    let mut fx = Fx::new("");
+    merged_with(&mut fx, |t| t.timeout_min = Some(1.0));
+    std::fs::create_dir_all(&fx.state).unwrap();
+    std::fs::write(fx.state.join("running"), "a file where the folder should be").unwrap();
+    match fx.adv("b1") {
+        Outcome::Failed(m) => assert!(m.contains("cannot be written") && m.contains("nothing was run"), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    assert_eq!(lines_in(&fx, "deploy.txt"), 0);
+    // the pid cannot be recorded: the plugin is ended before it does anything (Windows: it never left its suspended start)
+    let mut fx = Fx::new("");
+    let late = fwd(&fx.t.path().join("late.txt"));
+    merged_with(&mut fx, |t| {
+        t.command = vec!["sh".into(), "-c".into(), format!("sleep 2; echo late >> '{late}'")];
+        t.timeout_min = Some(1.0);
+    });
+    crash_seam::set(Some("T8a:record:deploy staging".into()));
+    let o = fx.with(|e| e.advance("b1")).unwrap();
+    crash_seam::set(None);
+    match o {
+        Outcome::Failed(m) => assert!(m.contains("could not be recorded") && m.contains("ended"), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    assert!(!fx.t.path().join("late.txt").exists(), "the plugin whose pid could not be recorded ran on");
+    assert!(!record_path(&fx, "staging").exists(), "no record is left for a plugin that was ended");
 }

@@ -76,7 +76,7 @@ fn minor1_a_grandchild_of_a_plugin_dies_with_its_parent() {
                 std::thread::sleep(std::time::Duration::from_millis(700));
                 Err("the parent died".into())
             };
-            let r = runner::run_isolated_with(c, 60.0, runner::Opts { survives_parent: false, on_spawn: Some(&mut die) });
+            let r = runner::run_isolated_with(c, 60.0, runner::Opts { survives_parent: false, on_spawn: Some(&mut die), ..Default::default() });
             assert!(r.is_err());
         });
     });

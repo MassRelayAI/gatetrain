@@ -191,6 +191,10 @@ pub struct Opts<'a> {
     /// Called once the command runs, with its pid (its process group id on Unix). An `Err` abandons it where it stands, as a dead
     /// parent would (a test's crash), and is returned.
     pub on_spawn: Option<&'a mut dyn FnMut(u32) -> Result<(), String>>,
+    /// Called with the pid once the process exists, before it runs its command: on Windows while it is still suspended, on Unix right
+    /// after the spawn (the command has started). The place to record the pid; an `Err` ends the process (its group or job) and is
+    /// returned, so nothing runs on unrecorded.
+    pub on_start: Option<&'a mut dyn FnMut(u32) -> Result<(), String>>,
 }
 
 /// The leader of a Linux plugin that dies with its parent: `sh -c WATCHDOG gatetrain-watchdog <program> <args>...`. It runs the
@@ -248,6 +252,14 @@ pub fn run_isolated_with(c: Command, secs: f64, mut opts: Opts) -> Result<Isolat
     }
     let mut child = c.spawn().map_err(|e| if e.raw_os_error() == Some(group::ESRCH) { "the parent died before the plugin started".to_string() } else { e.to_string() })?;
     let job = group::Job::adopt(&child, !opts.survives_parent);
+    if let Some(f) = opts.on_start.as_mut() {
+        if let Err(why) = f(child.id()) {
+            job.kill(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(why);
+        }
+    }
     if let Err(why) = group::resume(&child) {
         // a child that cannot be resumed never runs its command: end it (and its job) rather than leave a suspended process behind
         job.kill(&child);
