@@ -306,8 +306,21 @@ fn two_ticks_cannot_overlap_the_ledger_lock() {
     assert!(first.is_some(), "the first tick takes the lock");
     assert!(tick::try_lock(&lp).unwrap().is_none(), "a second tick finds it held");
     drop(first);
-    assert!(tick::try_lock(&lp).unwrap().is_some(), "released when the first tick ends");
+    assert!(free_soon(&lp), "released when the first tick ends");
 }
+
+/// A released lock is free at once, except that on Linux a child forked by a concurrent test in the instant before its exec shares
+/// the open file (flock belongs to the open file description) until it execs. Poll briefly instead of failing on that window.
+fn free_soon(lp: &Path) -> bool {
+    for _ in 0..50 {
+        if gatetrain_core::tick::try_lock(lp).unwrap().is_some() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
 
 #[test]
 fn more_open_batches_than_lines_are_folded_into_one_line() {

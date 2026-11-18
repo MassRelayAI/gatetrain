@@ -120,6 +120,7 @@ fn a_second_tick_while_one_holds_the_ledger_lock_does_nothing_and_exits_0() {
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "tick: another tick holds the lock");
     assert_eq!(fx.rows(), before, "nothing was written");
     drop(held);
+    assert!(free_soon(&gatetrain_core::tick::lock_path(Path::new(&fx.db))));
     assert_eq!(fx.tick(&[]).status.code(), Some(1), "the lock is free again");
 }
 
@@ -189,6 +190,7 @@ fn b1_a_writing_batch_command_refuses_while_a_tick_holds_the_ledger_lock() {
     assert_eq!(fx.rows(), before, "nothing was written");
     assert!(gt(&["batch", "status", "--db", &fx.db]).status.success(), "a read needs no lock");
     drop(held);
+    assert!(free_soon(&lock_of(&fx)));
     let c = fx.cfg();
     assert_eq!(gt(&["batch", "advance", "b1", "--db", &fx.db, "--config", &c]).status.code(), Some(0), "free again");
 }
@@ -276,4 +278,16 @@ fn minor2_hosts_without_a_host_or_a_proof_host_is_exit_2_and_lock_is_accepted() 
     let lock = fwd(&fx.root.join("other.lock"));
     let o = fx.tick(&["--lock", &lock]);
     assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+}
+
+/// A released lock is free at once, except that on Linux a child forked by a concurrent test in the instant before its exec shares
+/// the open file (flock belongs to the open file description) until it execs. Poll briefly instead of failing on that window.
+fn free_soon(lp: &Path) -> bool {
+    for _ in 0..50 {
+        if gatetrain_core::tick::try_lock(lp).unwrap().is_some() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
 }
