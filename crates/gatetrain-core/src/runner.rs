@@ -248,8 +248,11 @@ mod watchdog {
     unsafe fn watch(plugin: pid_t, parent: pid_t, set: &sigset_t) -> ! {
         // the pipes of std's exec handshake and every other descriptor but the plugin's stdio: the parent's `spawn` returns once the
         // plugin has exec'd, not when the watchdog ends
-        if libc::syscall(libc::SYS_close_range, 3 as libc::c_uint, libc::c_uint::MAX, 0 as libc::c_int) != 0 {
-            for fd in 3..4096 {
+        if super::fd_seam::forced() || libc::syscall(libc::SYS_close_range, 3 as libc::c_uint, libc::c_uint::MAX, 0 as libc::c_int) != 0 {
+            // without close_range: one by one up to the soft descriptor limit (getrlimit is a plain syscall), capped for an unlimited one
+            let mut rl: libc::rlimit = std::mem::zeroed();
+            let top = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 && rl.rlim_cur != libc::RLIM_INFINITY { rl.rlim_cur.min(1 << 20) } else { 1 << 20 };
+            for fd in 3..top as c_int {
                 libc::close(fd);
             }
         }
@@ -289,6 +292,28 @@ mod watchdog {
             }
             // every other signal (HUP, USR1, IO, a real-time signal, ... sent to the group) reached the plugin already, and anything
             // unexpected is ignored: the watchdog stays
+        }
+    }
+}
+
+/// Test seam (Linux): the watchdog skips `close_range` and closes its descriptors one by one, as on a kernel without it (round 3, D).
+#[cfg(target_os = "linux")]
+pub mod fd_seam {
+    #[cfg(any(test, feature = "test-fakes"))]
+    static FORCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    #[cfg(any(test, feature = "test-fakes"))]
+    pub fn force_close_loop(on: bool) {
+        FORCE.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// Read in the forked watchdog (an atomic load: async-signal-safe).
+    pub(crate) fn forced() -> bool {
+        #[cfg(any(test, feature = "test-fakes"))]
+        {
+            FORCE.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        #[cfg(not(any(test, feature = "test-fakes")))]
+        {
+            false
         }
     }
 }

@@ -23,6 +23,9 @@ libc = "0.2"                  # the plugin watchdog (runner.rs): signal masks, s
 # The fakes of the batch engine (FakeLock, AllowAll, DenyRole). Off in the binary; on for this crate's own tests below.
 test-fakes = []
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"                  # tests: raise RLIMIT_NOFILE and open a descriptor above the old fallback bound (runner_group.rs)
+
 [dev-dependencies]
 tempfile.workspace = true     # throwaway ledgers
 gatetrain-core = { path = ".", features = ["test-fakes"] }   # the integration tests use the fakes

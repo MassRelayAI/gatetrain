@@ -264,3 +264,56 @@ fn round3_c_a_term_a_member_sends_its_group_runs_the_plugins_trap_once() {
     assert_eq!(rc_out(&r).0, 0, "{r:?}");
     assert_eq!(std::fs::read_to_string(&hits).unwrap_or_default().lines().count(), 1, "the trap ran once");
 }
+
+/// Round 3, D: where `close_range` is missing, the watchdog closes every descriptor up to the soft `RLIMIT_NOFILE`, not up to 4095:
+/// a descriptor above 4095 (std's exec-handshake pipe can be one) is not held by the watchdog while the plugin runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn round3_d_the_close_loop_reaches_the_descriptor_limit() {
+    const HIGH: i32 = 5000;
+    // SAFETY: plain syscalls on this test process; the descriptor is ours and closed at the end
+    unsafe {
+        let mut rl: libc::rlimit = std::mem::zeroed();
+        assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl), 0);
+        if rl.rlim_max != libc::RLIM_INFINITY && rl.rlim_max <= HIGH as libc::rlim_t {
+            eprintln!("skipped: the hard RLIMIT_NOFILE {} is below {HIGH}", rl.rlim_max);
+            return;
+        }
+        if rl.rlim_cur <= HIGH as libc::rlim_t {
+            rl.rlim_cur = (HIGH as libc::rlim_t + 1000).min(rl.rlim_max);
+            assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &rl), 0);
+        }
+        let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        assert!(fd >= 0);
+        assert_eq!(libc::dup3(fd, HIGH, libc::O_CLOEXEC), HIGH);
+        libc::close(fd);
+    }
+    let t = tempfile::tempdir().unwrap();
+    let ready = t.path().join("ready");
+    let line = format!("touch '{}'; sleep 3", ready.display());
+    let leader = std::sync::Mutex::new(0u32);
+    runner::fd_seam::force_close_loop(true);
+    let held = std::thread::scope(|s| {
+        let run = s.spawn(|| {
+            let mut seen = |pid: u32| -> Result<(), String> {
+                *leader.lock().unwrap() = pid;
+                Ok(())
+            };
+            runner::run_isolated_with(bash(&line), 60.0, runner::Opts { survives_parent: false, on_start: Some(&mut seen), ..Default::default() }).unwrap()
+        });
+        let t0 = std::time::Instant::now();
+        while !ready.exists() && t0.elapsed() < std::time::Duration::from_secs(30) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pid = *leader.lock().unwrap();
+        let held = std::path::Path::new(&format!("/proc/{pid}/fd/{HIGH}")).exists();
+        run.join().unwrap();
+        held
+    });
+    runner::fd_seam::force_close_loop(false);
+    // SAFETY: our own descriptor
+    unsafe {
+        libc::close(HIGH);
+    }
+    assert!(!held, "the watchdog still holds descriptor {HIGH}");
+}
