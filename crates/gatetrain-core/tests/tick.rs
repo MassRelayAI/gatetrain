@@ -1773,3 +1773,35 @@ fn minor6_an_unverifiable_record_of_another_batch_needs_a_person_at_once() {
         assert_eq!(fx.state("b2"), "proven", "{what}");
     }
 }
+
+/// MINOR 2 (round 2): the deadlock guard of `another_batch_deploying`. Two batches are `merged`; b1's deploy needs a person, so b2
+/// merges past it; b2's deploy fails within its `[retry] budget`, so b2 is merged, unsettled and not waiting for a person; the
+/// person retries b1. b1 must deploy (only a batch merged BEFORE it holds its T8a), then b2: without the guard each holds the other.
+#[test]
+fn minor2_a_person_retrying_the_older_merge_is_not_deadlocked_by_a_newer_merge_that_failed_within_its_budget() {
+    let mut fx = Fx::new("[retry]\nbudget = { T8a = 1 }\n");
+    let (log, fixed, once) = (fwd(&fx.t.path().join("deploy-log.txt")), fwd(&fx.t.path().join("fixed")), fwd(&fx.t.path().join("b2-failed")));
+    b1_merged_b2_proven(&mut fx, |t| {
+        t.command = vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "if [ $GATETRAIN_BATCH = b1 ] && [ ! -e '{fixed}' ]; then exit 1; fi; if [ $GATETRAIN_BATCH = b2 ] && [ ! -e '{once}' ]; then touch '{once}'; exit 1; fi; echo deployed $GATETRAIN_BATCH >> '{log}'"
+            ),
+        ];
+        t.timeout_min = Some(1.0);
+    });
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)));
+    assert!(matches!(fx.adv("b1"), Outcome::Failed(_)), "the budget allows one more attempt");
+    assert!(matches!(fx.adv("b1"), Outcome::Refused { rule, .. } if rule == "batch.failed-needs-person"));
+    assert!(matches!(fx.adv("b2"), Outcome::Advanced { to, .. } if to == "merged"), "b1 needs a person: it does not hold b2's merge");
+    assert!(matches!(fx.adv("b2"), Outcome::Failed(_)), "b2's deploy fails once, within its budget");
+    assert_eq!(fx.state("b1"), "merged");
+    assert_eq!(fx.state("b2"), "merged");
+    std::fs::write(fx.t.path().join("fixed"), "").unwrap();
+    fx.with(|e| e.retry_failed("b1", "the deploy host was fixed")).unwrap();
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(r.lines[1], "b2: merged -> deploying -> live -> closed", "{:?}", r.lines);
+    assert_eq!(log_lines(&fx, "deploy-log.txt"), ["deployed b1", "deployed b2"], "the older merge deploys first, the newer sha last");
+}
