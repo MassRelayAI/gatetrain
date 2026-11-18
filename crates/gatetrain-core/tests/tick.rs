@@ -1686,3 +1686,60 @@ fn minor3_a_reused_pid_or_a_surviving_service_does_not_hold_the_deploy() {
     assert!(matches!(fx.adv("b1"), Outcome::Advanced { to, .. } if to == "deploying"), "the service of a finished deploy held the next step");
     let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pgid}")]).status();
 }
+
+/// MINOR 1 (round 2): a record left by a batch that was abandoned (or closed, or held) holds every other batch's deploy; `--retry`
+/// cannot reach it there (a parked batch is never retried), so the wait names `batch clear-record`, which clears it under the same
+/// liveness check as a retry, with an override row.
+#[test]
+fn minor1_a_record_of_an_abandoned_batch_is_cleared_by_clear_record_under_the_liveness_check() {
+    let mut fx = Fx::new("");
+    b1_merged_b2_proven(&mut fx, |t| t.timeout_min = Some(1.0));
+    let mut live = std::process::Command::new("sh").args(["-c", "sleep 60"]).spawn().unwrap();
+    let pid = live.id();
+    let token = gatetrain_core::runner::process_token(pid);
+    std::fs::create_dir_all(fx.state.join("running")).unwrap();
+    std::fs::write(record_path(&fx, "staging"), serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": pid, "token": token}).to_string()).unwrap();
+    fx.with(|e| e.abandon("b1", "the deploy host is being rebuilt")).unwrap();
+    let held = fx.adv("b2");
+    let refused_live = fx.with(|e| e.clear_record("b1", "I think it is gone", false)).unwrap();
+    let kept = record_path(&fx, "staging").exists();
+    let _ = live.kill();
+    let _ = live.wait();
+    match held {
+        Outcome::Refused { rule, because, .. } => {
+            assert_eq!(rule, "deploy.another-batch-deploying");
+            assert!(because.contains("gatetrain batch clear-record b1 --reason"), "the wait names the command that works: {because}");
+            assert!(!because.contains("advance b1 --retry"), "a retry of an abandoned batch clears nothing: {because}");
+        }
+        o => panic!("{o:?}"),
+    }
+    assert!(matches!(&refused_live, Outcome::Refused { rule, .. } if rule == "deploy.record-live"), "{refused_live:?}");
+    assert!(kept, "a live record is not cleared");
+    match fx.with(|e| e.clear_record("b1", "the old deploy is gone; I checked the host", false)).unwrap() {
+        Outcome::Idle(m) => assert!(m.contains("cleared") && m.contains(&format!("pid {pid}")), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    assert!(!record_path(&fx, "staging").exists());
+    assert_eq!(fx.count("decisions WHERE kind='override' AND rule='record.clear-person' AND json_extract(evidence,'$.cleared_records') IS NOT NULL"), 1);
+    assert_eq!(fx.state("b1"), "abandoned", "clearing a record moves no batch");
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b2: proven -> merged -> deploying -> live -> closed", "{:?}", r.lines);
+}
+
+/// MINOR 1: `clear-record` takes the same explicit flag for a record that cannot be verified.
+#[test]
+fn minor1_clear_record_of_an_unverifiable_record_needs_the_flag() {
+    let mut fx = Fx::new("");
+    b1_merged_b2_proven(&mut fx, |t| t.timeout_min = Some(1.0));
+    std::fs::create_dir_all(fx.state.join("running")).unwrap();
+    std::fs::write(record_path(&fx, "staging"), serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging"}).to_string()).unwrap();
+    fx.with(|e| e.abandon("b1", "rebuilt")).unwrap();
+    assert!(matches!(fx.with(|e| e.clear_record("b1", "nothing runs", false)).unwrap(), Outcome::Refused { rule, .. } if rule == "deploy.record-unverifiable"));
+    match fx.with(|e| e.clear_record("b1", "nothing runs", true)).unwrap() {
+        Outcome::Idle(m) => assert!(m.contains("a second deploy may start beside an unseen one"), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    assert!(!record_path(&fx, "staging").exists());
+    assert!(fx.with(|e| e.clear_record("b1", "", false)).is_err(), "a reason is required");
+    assert!(matches!(fx.with(|e| e.clear_record("b1", "again", false)).unwrap(), Outcome::Idle(m) if m.contains("no deploy record")));
+}

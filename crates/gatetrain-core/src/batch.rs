@@ -301,6 +301,16 @@ enum Probe {
     Running(String),
 }
 
+/// What clearing a batch's deploy records did.
+enum Cleared {
+    /// the batch has none
+    None,
+    /// a record still runs or cannot be verified: the refusal
+    Refused(Outcome),
+    /// cleared, under the override row `decision`
+    Done { decision: i64, what: Vec<String>, message: String },
+}
+
 /// What a record of a running T8a step (`<state>/running/<target>.json`) says about its process.
 enum Rec {
     /// The process and its group are gone (or a later process holds the pid).
@@ -768,7 +778,10 @@ impl<'a> Engine<'a> {
         let Some(batch) = v["batch"].as_str() else {
             return Rec::Unverifiable(format!("the record {} cannot be read; a person checks that no deploy runs and removes it", path.display()));
         };
-        let unverifiable = format!("A person checks that it is not running and runs `gatetrain batch advance {batch} --retry --clear-unverifiable-record --reason <why>`, which clears the record");
+        // a held, abandoned or closed batch is never retried: its record is cleared by `clear-record`
+        let parked = self.fold(batch).is_ok_and(|f| matches!(f.state.as_str(), "held" | "abandoned" | "closed"));
+        let cmd = |flag: &str| if parked { format!("`gatetrain batch clear-record {batch} --reason <why>{flag}`") } else { format!("`gatetrain batch advance {batch} --retry{flag} --reason <why>`") };
+        let unverifiable = format!("A person checks that it is not running and runs {}, which clears the record", cmd(" --clear-unverifiable-record"));
         let Some(pid) = v["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else {
             return Rec::Unverifiable(format!("{step} of batch {batch} was starting when its gatetrain stopped, before its pid was recorded: it may be running, and nothing can tell; the next step waits. {unverifiable}"));
         };
@@ -776,7 +789,7 @@ impl<'a> Engine<'a> {
         let Some(token) = v["token"].as_u64() else {
             return Rec::Unverifiable(format!("{step} of batch {batch} was recorded as pid {pid}{group} without a start token, so it cannot be told from a later process that reuses the pid; the next step waits. {unverifiable}"));
         };
-        let clear = format!("If it is stuck, a person ends it ({end}) and runs `gatetrain batch advance {batch} --retry --reason <why>`, which clears the record");
+        let clear = format!("If it is stuck, a person ends it ({end}) and runs {}, which clears the record", cmd(""));
         if crate::runner::process_alive(pid, Some(token)) {
             return Rec::Live(format!("{step} of batch {batch} is still running as pid {pid}{group}, started by a gatetrain that is gone; the next step waits for it. {clear}"));
         }
@@ -1142,6 +1155,63 @@ impl<'a> Engine<'a> {
         self.retry_failed_with(id, reason, false)
     }
 
+    /// `batch clear-record <id> --reason`: a person clears the deploy records batch `id` left behind, in any state (a held, abandoned or
+    /// closed batch too, which `--retry` never reaches), under the same liveness check as a retry. An override row
+    /// (`record.clear-person`, `cleared_records`) and nothing else: no batch moves.
+    pub fn clear_record(&mut self, id: &str, reason: &str, clear_unverifiable: bool) -> Result<Outcome> {
+        let f = self.fold(id)?;
+        if reason.trim().is_empty() {
+            return Err(Error::Batch("clearing a record needs a reason (--reason)".into()));
+        }
+        Ok(match self.clear_own_records(id, &f, reason, clear_unverifiable, "record.clear-person")? {
+            Cleared::None => Outcome::Idle(format!("batch {id} has no deploy record to clear")),
+            Cleared::Refused(o) => o,
+            Cleared::Done { message, .. } => Outcome::Idle(message),
+        })
+    }
+
+    /// Clear the records of batch `id` (`<state>/running/*.json` naming it), each judged first: a live one refuses (`deploy.record-live`),
+    /// an unverifiable one refuses unless `clear_unverifiable` (`deploy.record-unverifiable`); otherwise an override row under `rule`.
+    fn clear_own_records(&mut self, id: &str, f: &Folded, reason: &str, clear_unverifiable: bool, rule: &str) -> Result<Cleared> {
+        let mine: Vec<(PathBuf, Value)> = self.running_records().into_iter().filter(|(_, v)| v["batch"].as_str() == Some(id)).collect();
+        if mine.is_empty() {
+            return Ok(Cleared::None);
+        }
+        let (mut live, mut unseen) = (vec![], vec![]);
+        for (p, v) in &mine {
+            match self.record_state(p, v) {
+                Rec::Live(w) => live.push(w),
+                Rec::Unverifiable(w) => unseen.push(w),
+                Rec::Gone => {}
+            }
+        }
+        if !live.is_empty() {
+            return Ok(Cleared::Refused(self.refuse(id, "deploy.record-live", format!("{}; the record is not cleared while it runs", live.join("; ")))?));
+        }
+        if !unseen.is_empty() && !clear_unverifiable {
+            return Ok(Cleared::Refused(self.refuse(id, "deploy.record-unverifiable", format!("{}; without `--clear-unverifiable-record` the record is not cleared", unseen.join("; ")))?));
+        }
+        let what: Vec<String> = mine
+            .iter()
+            .map(|(_, v)| {
+                let step = v["step"].as_str().unwrap_or("a deploy step");
+                match v["pid"].as_u64() {
+                    Some(pid) if cfg!(unix) => format!("{step} (pid {pid}, process group {pid})"),
+                    Some(pid) => format!("{step} (pid {pid})"),
+                    None => format!("{step} (no pid was recorded)"),
+                }
+            })
+            .collect();
+        let blind = !unseen.is_empty();
+        let d = self.decide("override", id, None, rule, "recorded", reason.trim().into(), Some(json!({"transition": "T8a", "from": f.state, "cleared_records": what, "unverifiable": blind})))?;
+        for (p, _) in &mine {
+            std::fs::remove_file(p)?;
+        }
+        let warn = if blind { "; it could not be verified (--clear-unverifiable-record): if it still runs, a second deploy may start beside an unseen one" } else { "" };
+        let message = format!("cleared the record of {}{warn}; the next advance probes the deploy: {}", what.join(", "), reason.trim());
+        Ok(Cleared::Done { decision: d, what, message })
+    }
+
     /// [`Engine::retry_failed`]; `clear_unverifiable` (`--clear-unverifiable-record`) also clears a record that cannot be told from a
     /// live deploy (no pid or no start token was recorded). A record whose process (or, for a step that does not survive its parent,
     /// its process group) still runs is never cleared: the retry is refused (`deploy.record-live`) and names what to end.
@@ -1156,42 +1226,14 @@ impl<'a> Engine<'a> {
         }
         // a record of a T8a step this batch left behind (a deploy a dead gatetrain started) holds every deploy until it ends; a person
         // who checked that it is gone clears it here, with an override row that names what was cleared
-        let mine: Vec<(PathBuf, Value)> = self.running_records().into_iter().filter(|(_, v)| v["batch"].as_str() == Some(id)).collect();
-        if !mine.is_empty() {
-            let (mut live, mut unseen) = (vec![], vec![]);
-            for (p, v) in &mine {
-                match self.record_state(p, v) {
-                    Rec::Live(w) => live.push(w),
-                    Rec::Unverifiable(w) => unseen.push(w),
-                    Rec::Gone => {}
-                }
+        match self.clear_own_records(id, &f, reason, clear_unverifiable, "retry.person")? {
+            Cleared::None => {}
+            Cleared::Refused(o) => return Ok(o),
+            Cleared::Done { decision, what, message } => {
+                let n = f.max_attempt.get("retry").copied().unwrap_or(0) + 1;
+                self.event(id, "retry", "done", n, Some(&f.state), None, None, None, Some(decision), &json!({"transition": "T8a", "reason": reason.trim(), "cleared_records": what}))?;
+                return Ok(Outcome::Idle(message));
             }
-            if !live.is_empty() {
-                return self.refuse(id, "deploy.record-live", format!("{}; the record is not cleared while it runs", live.join("; ")));
-            }
-            if !unseen.is_empty() && !clear_unverifiable {
-                return self.refuse(id, "deploy.record-unverifiable", format!("{}; without `--clear-unverifiable-record` the record is not cleared", unseen.join("; ")));
-            }
-            let what: Vec<String> = mine
-                .iter()
-                .map(|(_, v)| {
-                    let step = v["step"].as_str().unwrap_or("a deploy step");
-                    match v["pid"].as_u64() {
-                        Some(pid) if cfg!(unix) => format!("{step} (pid {pid}, process group {pid})"),
-                        Some(pid) => format!("{step} (pid {pid})"),
-                        None => format!("{step} (no pid was recorded)"),
-                    }
-                })
-                .collect();
-            let blind = !unseen.is_empty();
-            let d = self.decide("override", id, None, "retry.person", "recorded", reason.trim().into(), Some(json!({"transition": "T8a", "from": f.state, "cleared_records": what, "unverifiable": blind})))?;
-            for (p, _) in &mine {
-                std::fs::remove_file(p)?;
-            }
-            let n = f.max_attempt.get("retry").copied().unwrap_or(0) + 1;
-            self.event(id, "retry", "done", n, Some(&f.state), None, None, None, Some(d), &json!({"transition": "T8a", "reason": reason.trim(), "cleared_records": what}))?;
-            let warn = if blind { "; it could not be verified (--clear-unverifiable-record): if it still runs, a second deploy may start beside an unseen one" } else { "" };
-            return Ok(Outcome::Idle(format!("cleared the record of {}{warn}; the next advance probes the deploy: {}", what.join(", "), reason.trim())));
         }
         let Some(tr) = next_effect(&f.state) else { return Ok(Outcome::Idle(format!("batch {id} is {}: no transition with an effect to retry", f.state))) };
         let (crashes, stopped) = self.repeats(id, tr)?;

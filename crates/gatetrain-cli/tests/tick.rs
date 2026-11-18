@@ -391,3 +391,37 @@ fn s6_a_holder_beating_for_longer_than_max_hold_minutes_makes_the_tick_exit_1() 
     assert_eq!(o.status.code(), Some(1), "{}", out(&o));
     assert!(out(&o).contains("[tick] max_hold_minutes = 720"), "{}", out(&o));
 }
+
+/// B1 and MINOR 1 (round 2), as commands: a retry or a `clear-record` against a live deploy record is refused with exit 3 and clears
+/// nothing; an unverifiable record needs `--clear-unverifiable-record`; `clear-record` works on an abandoned batch.
+#[test]
+fn b1_minor1_a_live_record_refuses_retry_and_clear_record_with_exit_3() {
+    let fx = Fx::new(true);
+    let running = fx.root.join(".gatetrain").join("running");
+    std::fs::create_dir_all(&running).unwrap();
+    let rec = running.join("staging.json");
+    let mut live = Command::new("sh").args(["-c", "sleep 60"]).spawn().unwrap();
+    let pid = live.id();
+    let token = gatetrain_core::runner::process_token(pid);
+    std::fs::write(&rec, serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging", "pid": pid, "token": token}).to_string()).unwrap();
+    let c = fx.cfg();
+    let retry = gt(&["batch", "advance", "b1", "--retry", "--reason", "gone?", "--db", &fx.db, "--config", &c]);
+    let clear = gt(&["batch", "clear-record", "b1", "--reason", "gone?", "--db", &fx.db, "--config", &c]);
+    let kept = rec.exists();
+    let _ = live.kill();
+    let _ = live.wait();
+    assert_eq!(retry.status.code(), Some(3), "{}", out(&retry));
+    assert!(out(&retry).contains("deploy.record-live"), "{}", out(&retry));
+    assert_eq!(clear.status.code(), Some(3), "{}", out(&clear));
+    assert!(kept, "nothing cleared while it ran");
+    // unverifiable: only with the flag (the flag needs --retry on advance)
+    std::fs::write(&rec, serde_json::json!({"batch": "b1", "step": "deploy staging", "target": "staging"}).to_string()).unwrap();
+    assert!(!gt(&["batch", "advance", "b1", "--clear-unverifiable-record", "--db", &fx.db, "--config", &c]).status.success(), "the flag needs --retry");
+    assert!(gt(&["batch", "abandon", "b1", "--db", &fx.db, "--config", &c]).status.success());
+    let o = gt(&["batch", "clear-record", "b1", "--reason", "checked", "--db", &fx.db, "--config", &c]);
+    assert_eq!(o.status.code(), Some(3), "{}", out(&o));
+    let o = gt(&["batch", "clear-record", "b1", "--reason", "checked", "--clear-unverifiable-record", "--db", &fx.db, "--config", &c]);
+    assert!(o.status.success(), "{}", out(&o));
+    assert!(out(&o).contains("a second deploy may start beside an unseen one"), "{}", out(&o));
+    assert!(!rec.exists());
+}

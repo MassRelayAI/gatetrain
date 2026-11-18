@@ -424,6 +424,17 @@ enum BatchCmd {
         self_test: bool,
         lanes: Vec<String>,
     },
+    /// Clear the deploy record (`<state>/running/<target>.json`) a dead gatetrain left for this batch, in any state (a held,
+    /// abandoned or closed batch too). Refused while its process or process group still runs; a record without a pid or start
+    /// token needs --clear-unverifiable-record. Exit 3 when refused
+    ClearRecord {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        /// Also clear a record that cannot be verified. If that deploy still runs, a second deploy may start beside it
+        #[arg(long)]
+        clear_unverifiable_record: bool,
+    },
     /// Close without a merge; no branch is deleted
     Abandon {
         id: String,
@@ -698,6 +709,7 @@ fn run_batch(db: &Path, config: &Path, lock: Option<PathBuf>, hosts: Option<(Pat
                 report(e.close_batch(&id)?)
             }
         }
+        BatchCmd::ClearRecord { id, reason, clear_unverifiable_record } => report(e.clear_record(&id, &reason, clear_unverifiable_record)?),
         BatchCmd::Abandon { id, reason } => report(e.abandon(&id, &reason)?),
         BatchCmd::Precheck { .. } => unreachable!("handled before the ledger is opened"),
     })

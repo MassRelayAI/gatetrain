@@ -498,7 +498,7 @@ batch merges only because `advance` found its proof accepted by every guard; the
 neither the tick exits 2), and `--lock` overrides its host lock file as for `batch`. `--json` prints the same report as one JSON object.
 
 The ledger lock is shared with people: every `batch` command that writes (`new`, `advance`, `hold`, `release`, `restack`, `retry`,
-`note-cause`, `close`, `abandon`) takes it too, and while it is held refuses with `a tick is running (pid, started)` (or names the
+`note-cause`, `close`, `clear-record`, `abandon`) takes it too, and while it is held refuses with `a tick is running (pid, started)` (or names the
 `batch` command that holds it) and **exit 73** (75 stays the busy host lock of `hold`), or waits with `--wait <secs>`. The lock file is
 `<canonical db path>.tick.lock`; the holder writes `<lock>.info` (pid, start time, who) whole, through a rename, and removes it when it
 lets go. A sidecar whose pid is dead is ignored. A tick that finds the lock held longer than `[tick] stuck_minutes` (default 60), by the
@@ -529,7 +529,9 @@ records with an override row naming them (`retry.person`, `cleared_records`); th
 The retry checks first: while a recorded process (or, for a step that does not survive its parent, a member of its process group)
 still runs, it is refused `deploy.record-live`, names the pid and the command that ends it, and clears nothing. A record without a pid
 or a start token is cleared only with `--retry --clear-unverifiable-record`, which says that a second deploy may start beside one
-nobody can see if it still runs.
+nobody can see if it still runs. A held, abandoned or closed batch is never retried, so the record it left is cleared with
+`gatetrain batch clear-record <batch> --reason <why>` (the same check and flag; an override row `record.clear-person`; no batch
+moves), and the wait names that command for such a batch.
 Before it advances anything the tick verifies the decision log; a
 log that does not verify stops every automatic transition (`floor.log-append-only`, exit 1). One log that does not parse is named
 `not ingested` and one batch that cannot be advanced is `FAILED` (exit 1); the other batches and the tidy still run.
