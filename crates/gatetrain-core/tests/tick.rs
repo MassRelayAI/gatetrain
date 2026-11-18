@@ -1022,9 +1022,9 @@ fn s8_a_deploy_target_must_be_idempotent_or_probed_and_its_limit_finite() {
     }
     assert!(t("idempotent = true\ntimeout_min = 1440\n").is_ok());
     // with the tick on, every automatic target says how long it may take
-    let e = t("idempotent = true\n[tick]\nenabled = true\n").unwrap_err().to_string();
+    let e = t("idempotent = true\ntier = \"staging\"\n[tick]\nenabled = true\n").unwrap_err().to_string();
     assert!(e.contains("timeout_min") && e.contains("[tick] enabled"), "{e}");
-    assert!(t("idempotent = true\ntimeout_min = 10\n[tick]\nenabled = true\n").is_ok());
+    assert!(t("idempotent = true\ntimeout_min = 10\ntier = \"staging\"\n[tick]\nenabled = true\n").is_ok());
 }
 
 #[test]
@@ -1083,6 +1083,23 @@ fn m4_a_tier_is_one_of_a_known_set_spelled_exactly() {
     assert_eq!(c.targets.len(), 1, "auto_tiers is not a target");
     assert_eq!(c.targets["web"].tier, "qa");
     assert!(BatchConfig::parse("[deploy]\nauto_tiers = [\"production\"]\n").is_err(), "production is never automatic");
+}
+
+/// Enable-readiness MINOR 5: with the tick on, every target names its tier (no silent `staging` default), and `[deploy] auto_tiers`
+/// refuses any spelling of production or prod, whatever its case.
+#[test]
+fn minor5_tick_targets_name_their_tier_and_auto_tiers_never_names_production() {
+    let on = "[tick]\nenabled = true\n";
+    let web = |tier: &str| format!("[deploy.web]\nidempotent = true\ncommand = [\"x\"]\ntimeout_min = 5\n{tier}");
+    let e = BatchConfig::parse(&format!("{on}{}", web(""))).unwrap_err().to_string();
+    assert!(e.contains("[deploy.web]") && e.contains("tier") && e.contains("[tick] enabled"), "{e}");
+    assert!(BatchConfig::parse(&format!("{on}{}", web("tier = \"staging\"\n"))).is_ok());
+    assert!(BatchConfig::parse(&web("")).is_ok(), "without the tick a person deploys, and the default tier stays staging");
+    for bad in ["Production", "PRODUCTION", "prod", "Prod", "PROD"] {
+        let e = BatchConfig::parse(&format!("[deploy]\nauto_tiers = [\"{bad}\"]\n")).unwrap_err().to_string();
+        assert!(e.contains("auto_tiers") && e.contains(bad), "{bad}: {e}");
+    }
+    assert!(BatchConfig::parse("[deploy]\nauto_tiers = [\"qa\", \"preprod-eu\"]\n").is_ok(), "only the word itself, not a tier that contains it");
 }
 
 fn hook(fx: &Fx, name: &str, body: &str) {
@@ -1276,7 +1293,7 @@ fn minor1_a_t8a_plugin_that_fails_or_times_out_leaves_the_attempt_dirty() {
 
 #[test]
 fn minor2_the_postmerge_command_says_it_is_idempotent_when_the_tick_is_on() {
-    let base = "[deploy.web]\nidempotent = true\ncommand = [\"x\"]\ntimeout_min = 5\n[tick]\nenabled = true\n";
+    let base = "[deploy.web]\nidempotent = true\ncommand = [\"x\"]\ntimeout_min = 5\ntier = \"staging\"\n[tick]\nenabled = true\n";
     let e = BatchConfig::parse(&format!("{base}[postmerge]\ncommand = [\"npm\", \"ci\"]\n")).unwrap_err().to_string();
     assert!(e.contains("[postmerge] idempotent = true"), "{e}");
     assert!(BatchConfig::parse(&format!("{base}[postmerge]\ncommand = [\"npm\", \"ci\"]\nidempotent = true\n")).is_ok());

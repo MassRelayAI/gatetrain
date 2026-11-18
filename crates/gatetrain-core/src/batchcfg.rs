@@ -10,6 +10,8 @@ pub struct Target {
     pub health: Vec<String>,
     /// `production` is never deployed automatically (floor.production-human).
     pub tier: String,
+    /// The target named its `tier` (without one it is `staging`); with `[tick] enabled` every target must.
+    pub tier_named: bool,
     /// How long `deploying` may wait for a healthy answer before it refuses (`deploy.health-timeout`); 0 = `[tick] max_wait_minutes`.
     /// It is the only health timer: the tick's wait age does not judge `deploying`.
     pub health_timeout_min: f64,
@@ -415,8 +417,9 @@ impl BatchConfig {
                 if extra.is_empty() && a.as_array().is_none_or(|x| !x.is_empty()) {
                     return Err(Error::Batch(format!("gatetrain.toml: [deploy] auto_tiers is a list of tier names, not {a}")));
                 }
-                if extra.iter().any(|t| t == "production") {
-                    return Err(Error::Batch("gatetrain.toml: [deploy] auto_tiers names production; production is never deployed automatically".into()));
+                // any case of `production` or `prod`: a tier that reads as production is never made automatic by a spelling
+                if let Some(t) = extra.iter().find(|t| matches!(t.trim().to_lowercase().as_str(), "production" | "prod")) {
+                    return Err(Error::Batch(format!("gatetrain.toml: [deploy] auto_tiers names {t:?}; production (in any spelling, prod included) is never deployed automatically")));
                 }
                 tiers.extend(extra);
             }
@@ -445,6 +448,7 @@ impl BatchConfig {
                             Some(x) => x.as_bool().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [deploy.{name}] idempotent is true or false, not {x}")))?,
                         },
                         tier: t.get("tier").and_then(|x| x.as_str()).unwrap_or("staging").to_string(),
+                        tier_named: t.get("tier").is_some(),
                         health_timeout_min: t.get("health_timeout_min").and_then(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).unwrap_or(0.0),
                         timeout_min: match t.get("timeout_min") {
                             None => None,
@@ -465,6 +469,12 @@ impl BatchConfig {
         if self.tick_enabled && !self.postmerge_command.is_empty() && !self.postmerge_idempotent {
             // a resume runs the post-merge command again when a crash left it in doubt
             return Err(Error::Batch("gatetrain.toml: [postmerge] idempotent = true is required while [tick] enabled = true (a crash during the post-merge command means it runs again)".into()));
+        }
+        if self.tick_enabled {
+            // an unattended deploy never rests on the default tier: a target that forgot `tier = "production"` would be deployed
+            if let Some(name) = self.targets.iter().find(|(_, t)| !t.tier_named).map(|(n, _)| n) {
+                return Err(Error::Batch(format!("gatetrain.toml: [deploy.{name}] needs an explicit tier while [tick] enabled = true (staging, production or one of [deploy] auto_tiers); the default staging is not assumed for an unattended deploy")));
+            }
         }
         for (name, t) in self.targets.iter().filter(|(_, t)| t.tier != "production") {
             if t.probe.is_empty() && !t.idempotent {

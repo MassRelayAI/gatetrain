@@ -455,7 +455,8 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 only when every deploy target has `timeout_min` and a deploy command that is safe to run twice (a tick that dies mid-deploy may leave a
 target for a person or a probe to settle, and a target the tick deploys again must not break by being deployed twice).
 A target's `tier` is `staging`, `production` (never deployed by the engine) or a tier listed in `[deploy] auto_tiers`, spelled
-exactly; any other spelling (`Production`, `prod`) is refused at load. With `[tick] enabled`, a `[postmerge] command` needs `[postmerge] idempotent = true` too: a crash during it means it runs again.
+exactly; any other spelling (`Production`, `prod`) is refused at load. With `[tick] enabled` every target names its `tier` (the
+default `staging` is not assumed for an unattended deploy), and `[deploy] auto_tiers` refuses `production` or `prod` in any case. With `[tick] enabled`, a `[postmerge] command` needs `[postmerge] idempotent = true` too: a crash during it means it runs again.
 `gatetrain.toml` is refused at load when an automatic deploy target (any tier but `production`) has neither `idempotent = true` nor a
 `probe = [...]` that exits 0 when the target already serves `{sha}`, and, with `[tick] enabled`, when it has no `timeout_min` (a
 finite number of minutes, at most 1440). Each target that deployed is a `deploy.checkpoint` row of the decision log, so a later
