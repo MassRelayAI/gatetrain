@@ -183,7 +183,7 @@ pub fn run_isolated_raw(c: Command, secs: f64) -> Result<IsolatedRaw, String> {
 #[derive(Default)]
 pub struct Opts<'a> {
     /// The command may outlive this process (a deploy that starts a long-lived service). Otherwise it dies with its parent, and so
-    /// does every process it started that stayed in its process group (job): on Linux its leader is a watchdog shell ([`WATCHDOG`])
+    /// does every process it started that stayed in its process group (job): on Linux its leader is a watchdog (see `mod watchdog`)
     /// that gets `SIGTERM` by `PR_SET_PDEATHSIG` when the spawning thread ends and then kills its whole process group; on Windows a
     /// job object kills its processes when the last handle to it closes, which is set only while the command runs (one that ended
     /// keeps what it started on purpose). Elsewhere (macOS, BSD) nothing ties it to its parent.
@@ -197,37 +197,132 @@ pub struct Opts<'a> {
     pub on_start: Option<&'a mut dyn FnMut(u32) -> Result<(), String>>,
 }
 
-/// The leader of a Linux plugin that dies with its parent: `sh -c WATCHDOG gatetrain-watchdog <program> <args>...`. It runs the
-/// command as its child in the same process group and exits with its status; when `PR_SET_PDEATHSIG` sends it `SIGTERM` (the
-/// gatetrain thread that spawned it ended), the trap kills the whole process group, the command's grandchildren included. A
-/// grandchild that left the group (`setsid`, its own process group) or that runs as another user (a setuid program such as
-/// `sudo`, which the kernel also clears the parent-death signal for) is beyond it; `group_alive` and the start token are the second
-/// line. The command runs as an asynchronous list of a non-interactive shell, so it starts with SIGINT and SIGQUIT ignored.
+/// The watchdog that leads a Linux plugin that dies with its parent (enable-readiness round 2, MINORS 4 and 5). It is a fork of the
+/// spawned child, made between fork and exec, so it needs no program of its own: gatetrain spawns the child as the leader of a new
+/// process group with `PR_SET_PDEATHSIG` = SIGTERM; in the child, [`watchdog::split`] forks once more. The new process execs the plugin
+/// with every signal at its default disposition and nothing blocked (a shell background job, the earlier watchdog, started it with
+/// SIGINT and SIGQUIT ignored, which bash cannot trap). The child it forked from becomes the watchdog (named `gt-watchdog`): it holds
+/// every catchable signal blocked and reads them with `sigtimedwait`, so a signal the plugin sends its own group (`kill -HUP 0`) never
+/// kills it; it forwards an INT or TERM that comes from outside the group to the group; it kills the whole group with SIGKILL when the
+/// SIGTERM comes from gatetrain (the parent-death signal: the spawning thread ended) or its parent changed; and it exits with the
+/// plugin's exit code (128 + the signal for a plugin a signal ended). Not covered, as before: a process that left the group, a setuid
+/// program (the kernel clears the parent-death signal), and a watchdog killed with SIGKILL.
 #[cfg(target_os = "linux")]
-pub const WATCHDOG: &str = "trap 'kill -KILL 0' TERM; \"$@\" & wait $!";
+mod watchdog {
+    use libc::{c_int, pid_t, sigset_t};
 
-/// `c` as the argument list of the [`WATCHDOG`] shell, with its directory and environment.
-#[cfg(target_os = "linux")]
-fn watchdog(c: &Command) -> Command {
-    let mut w = Command::new("/bin/sh");
-    w.arg("-c").arg(WATCHDOG).arg("gatetrain-watchdog").arg(c.get_program()).args(c.get_args());
-    if let Some(d) = c.get_current_dir() {
-        w.current_dir(d);
+    /// The signals the watchdog takes itself (blocked, read by `sigtimedwait`); SIGKILL and SIGSTOP cannot be.
+    const TAKEN: [c_int; 13] = [
+        libc::SIGTERM,
+        libc::SIGINT,
+        libc::SIGQUIT,
+        libc::SIGHUP,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+        libc::SIGALRM,
+        libc::SIGPIPE,
+        libc::SIGCHLD,
+        libc::SIGTSTP,
+        libc::SIGTTIN,
+        libc::SIGTTOU,
+        libc::SIGVTALRM,
+    ];
+
+    /// Between fork and exec (async-signal-safe calls only, nothing allocated): fork the plugin, which returns `Ok` and goes on to exec;
+    /// this process becomes the watchdog and never returns. `parent` is gatetrain's pid.
+    pub fn split(parent: u32) -> std::io::Result<()> {
+        // SAFETY: raw syscalls on our own process, on zeroed POD signal sets; no allocation, no lock
+        unsafe {
+            let mut set: sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            for sig in TAKEN {
+                libc::sigaddset(&mut set, sig);
+            }
+            // a SIGCHLD set to "ignore" would let the kernel reap the plugin before the watchdog reads its status
+            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+            if libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // a raw fork: glibc's `fork` runs its atfork handlers, which take locks another thread of gatetrain may have held
+            let pid = libc::syscall(libc::SYS_clone, libc::SIGCHLD as libc::c_long, 0 as libc::c_long, 0 as libc::c_long, 0 as libc::c_long, 0 as libc::c_long) as pid_t;
+            if pid < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if pid == 0 {
+                super::reset_signals_unix();
+                return Ok(());
+            }
+            watch(pid, parent as pid_t, &set)
+        }
     }
-    for (k, v) in c.get_envs() {
-        match v {
-            Some(v) => w.env(k, v),
-            None => w.env_remove(k),
-        };
+
+    /// The watchdog's life: until the plugin ends, then its exit code.
+    unsafe fn watch(plugin: pid_t, parent: pid_t, set: &sigset_t) -> ! {
+        // the pipes of std's exec handshake and every other descriptor but the plugin's stdio: the parent's `spawn` returns once the
+        // plugin has exec'd, not when the watchdog ends
+        if libc::syscall(libc::SYS_close_range, 3 as libc::c_uint, libc::c_uint::MAX, 0 as libc::c_int) != 0 {
+            for fd in 3..4096 {
+                libc::close(fd);
+            }
+        }
+        libc::prctl(libc::PR_SET_NAME, c"gt-watchdog".as_ptr() as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong);
+        let me = libc::getpid();
+        let group = libc::getpgrp();
+        let second = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+        loop {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let sig = libc::sigtimedwait(set, &mut info, &second);
+            let mut status: c_int = 0;
+            let r = libc::waitpid(plugin, &mut status, libc::WNOHANG);
+            if r == plugin {
+                let code = if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else if libc::WIFSIGNALED(status) {
+                    128 + libc::WTERMSIG(status)
+                } else {
+                    1
+                };
+                libc::_exit(code);
+            }
+            if r < 0 {
+                libc::_exit(1); // no plugin to wait for (it cannot happen: it is our child)
+            }
+            // gatetrain is gone: its parent-death SIGTERM (sent with gatetrain as the sender), or a parent that changed (a backstop for
+            // a signal that never came): the whole group goes, the watchdog with it
+            let from = if sig > 0 { info.si_pid() } else { 0 };
+            if libc::getppid() != parent || (sig == libc::SIGTERM && from == parent) {
+                libc::kill(0, libc::SIGKILL);
+                libc::_exit(137);
+            }
+            // an INT or TERM from outside the group (a person, `timeout -s INT`) goes to the group; one a member sent its group
+            // reached the plugin already, and one the watchdog forwarded comes back to it from itself
+            if (sig == libc::SIGINT || sig == libc::SIGTERM) && from != me && (from <= 0 || libc::getpgid(from) != group) {
+                libc::kill(0, sig);
+            }
+            // every other signal (HUP, USR1, ... sent to the group) reached the plugin already: the watchdog stays
+        }
     }
-    w
+}
+
+/// A plugin's start on Unix (the one a watchdog forks, one that survives its parent, any plugin off Linux): every catchable signal at
+/// its default disposition, nothing blocked, whatever gatetrain inherited (a `nohup` or a cron that ignores HUP).
+#[cfg(unix)]
+fn reset_signals_unix() {
+    // SAFETY: async-signal-safe calls on our own process, between fork and exec
+    unsafe {
+        for sig in 1..32 {
+            if sig != libc::SIGKILL && sig != libc::SIGSTOP {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+        }
+        let mut none: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+    }
 }
 
 pub fn run_isolated_with(c: Command, secs: f64, mut opts: Opts) -> Result<IsolatedRaw, String> {
     let limit = Duration::try_from_secs_f64(secs).ok().filter(|d| !d.is_zero()).ok_or_else(|| format!("{secs} s is not a usable time limit"))?;
-    #[cfg(target_os = "linux")]
-    let mut c = if opts.survives_parent { c } else { watchdog(&c) };
-    #[cfg(not(target_os = "linux"))]
     let mut c = c;
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
@@ -237,10 +332,26 @@ pub fn run_isolated_with(c: Command, secs: f64, mut opts: Opts) -> Result<Isolat
         #[cfg(target_os = "linux")]
         if !opts.survives_parent {
             let parent = std::process::id();
-            // SAFETY: prctl and getppid are async-signal-safe, allocate nothing and touch no memory of the parent; they run in the
-            // child between fork and exec
+            // SAFETY: prctl, getppid and the watchdog's calls are async-signal-safe, allocate nothing and touch no memory of the parent;
+            // they run in the child between fork and exec
             unsafe {
-                c.pre_exec(move || group::set_pdeathsig(parent));
+                c.pre_exec(move || {
+                    group::set_pdeathsig(parent)?;
+                    watchdog::split(parent)
+                });
+            }
+        }
+        #[cfg(target_os = "linux")]
+        let plain = opts.survives_parent;
+        #[cfg(not(target_os = "linux"))]
+        let plain = true;
+        if plain {
+            // SAFETY: signal and sigprocmask are async-signal-safe; they run in the child between fork and exec
+            unsafe {
+                c.pre_exec(|| {
+                    reset_signals_unix();
+                    Ok(())
+                });
             }
         }
     }
@@ -442,10 +553,10 @@ mod group {
     /// "No such process": the parent died between the fork and `PR_SET_PDEATHSIG`.
     pub const ESRCH: i32 = 3;
 
-    /// Signal this child (the watchdog shell) with SIGTERM when the thread that spawned it ends (Linux; called between fork and
+    /// Signal this child (the watchdog) with SIGTERM when the thread that spawned it ends (Linux; called between fork and
     /// exec, so it allocates nothing). A parent that died before the call would never send it: `getppid()` is read again after it, and
     /// a parent other than `parent` fails the spawn. The kernel clears the setting when the child execs a setuid or setgid program
-    /// (the watchdog, `/bin/sh`, is neither).
+    /// (the watchdog is a fork of gatetrain and never execs; the plugin it forks has no parent-death signal).
     #[cfg(target_os = "linux")]
     pub fn set_pdeathsig(parent: u32) -> std::io::Result<()> {
         extern "C" {
