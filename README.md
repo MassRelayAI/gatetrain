@@ -442,11 +442,6 @@ The agents' side of each step is a skill, see [the basic workflow](#the-basic-wo
 
 ### What a tick looks like (example)
 
-> **Not ready to enable yet (2026-11-18).** The final review of this release found open items. Leave `[tick] enabled` off
-> until a release says they are closed:
->
-> Until then, `batch advance` by hand is the supported path.
-
 `gatetrain tick` is off until `gatetrain.toml` says `[tick] enabled = true`; without it the tick exits 2 and writes nothing. Turn it on
 only when every deploy target has `timeout_min` and a deploy command that is safe to run twice (a tick that dies mid-deploy may leave a
 target for a person or a probe to settle, and a target the tick deploys again must not break by being deployed twice).

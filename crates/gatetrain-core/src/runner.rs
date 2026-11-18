@@ -271,7 +271,18 @@ pub fn process_alive(pid: u32, token: Option<u64>) -> bool {
 
 /// Unix: does any process of process group `pgid` live (a grandchild of a plugin whose leader died)? Elsewhere `false`.
 pub fn group_alive(pgid: u32) -> bool {
-    #[cfg(unix)]
+    // Linux: a member that is not a zombie (a leader that exited but was not reaped yet still counts for `kill -0`)
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(dir) = std::fs::read_dir("/proc") else { return false };
+        dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok()).any(|pid| {
+            let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+            let Some(rest) = s.rfind(')').and_then(|i| s.get(i + 2..)) else { return false };
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            f.get(2).and_then(|g| g.parse::<u32>().ok()) == Some(pgid) && !matches!(f.first(), Some(&"Z") | Some(&"X"))
+        })
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         Command::new("kill").args(["-0", "--", &format!("-{pgid}")]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
     }
