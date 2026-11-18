@@ -21,6 +21,8 @@ pub struct RealLock {
     pub db: PathBuf,
     pub hosts: Option<(PathBuf, String)>,
     pub holder: Vec<String>,
+    /// The holders this value spawned, by run id, so a launch whose holder never named its run can be stopped ([`HostLock::abort`]).
+    pub children: std::sync::Mutex<std::collections::HashMap<String, std::process::Child>>,
 }
 
 impl HostLock for RealLock {
@@ -41,7 +43,16 @@ impl HostLock for RealLock {
         }
         // The holder prints HOLDS / RELEASED and the chain's own output goes to the same log, which is what `parse` reads.
         c.arg("--").args(&r.command).current_dir(&r.workdir).envs(r.env.iter().map(|(k, v)| (k, v)));
-        c.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out).spawn()?;
+        let child = c.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out).spawn()?;
+        self.children.lock().map_err(|_| Error::Batch("the holder table is poisoned".into()))?.insert(r.run_id.clone(), child);
+        Ok(())
+    }
+
+    fn abort(&self, run_id: &str) -> Result<()> {
+        if let Some(mut child) = self.children.lock().map_err(|_| Error::Batch("the holder table is poisoned".into()))?.remove(run_id) {
+            crate::runner::kill_tree(&mut child);
+            let _ = child.wait();
+        }
         Ok(())
     }
 }

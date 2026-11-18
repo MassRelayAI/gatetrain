@@ -2598,3 +2598,35 @@ fn s3_a_launch_whose_log_was_opened_but_whose_run_no_lock_names_is_interrupted_n
     assert_eq!(outcome_of(&fx, "T4"), "interrupted");
     assert_eq!(fx.state("b1"), "preflighted");
 }
+
+#[test]
+fn s5_a_launched_preflight_whose_holder_names_the_run_late_is_waited_for() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    *fx.lock.late_polls.lock().unwrap() = 3;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    fx.step("b1", "preflighting");
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Waiting(_)), "the holder named the run: still running, not stopped");
+    assert_eq!(fx.lock.launches.lock().unwrap().len(), 1);
+    assert_eq!(fx.state("b1"), "preflighting");
+}
+
+#[test]
+fn s5_a_launched_preflight_whose_holder_never_names_the_run_fails_clean_once() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.cfg.launch_ack_secs = 0.3;
+    *fx.lock.late_polls.lock().unwrap() = usize::MAX;
+    fx.open("b1");
+    fx.step("b1", "stacked");
+    fx.step("b1", "settled");
+    match fx.adv("b1").unwrap() {
+        Outcome::Failed(m) => assert!(m.contains("did not name run b1-f1 within 0.3 s"), "{m}"),
+        o => panic!("{o:?}"),
+    }
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "batch.failed-needs-person"));
+    assert_eq!(fx.lock.launches.lock().unwrap().len(), 1);
+    assert_eq!(outcome_of(&fx, "T3"), "failed-clean");
+}

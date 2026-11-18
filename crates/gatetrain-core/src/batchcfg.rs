@@ -120,6 +120,9 @@ pub struct BatchConfig {
     /// `[retry] budget = { T4 = 1 }`: failed attempts of a transition the engine may start again without a person, per transition;
     /// a transition not named has 0 (T7 and T8a included), so its failure waits for `batch advance --retry --reason`.
     pub retry_budgets: BTreeMap<String, usize>,
+    /// `[chain] launch_ack_secs` (default 60): how long a launch waits for the holder to name its run (the host lock, or `HOLDS <run>`
+    /// in the log) before the launch fails clean and the holder is stopped.
+    pub launch_ack_secs: f64,
     pub protected: String,
     pub targets: BTreeMap<String, Target>,
 }
@@ -175,6 +178,7 @@ impl Default for BatchConfig {
             max_wait_minutes: 120.0,
             max_run_minutes: 360.0,
             retry_budgets: BTreeMap::new(),
+            launch_ack_secs: 60.0,
             protected: "main".into(),
             targets: BTreeMap::new(),
         }
@@ -314,6 +318,12 @@ impl BatchConfig {
                 c.max_ahead = n.max(0) as usize;
             }
             c.prove_ahead = p.get("prove_ahead").and_then(|b| b.as_bool()).unwrap_or(false);
+        }
+        if let Some(n) = v.get("chain").and_then(|c| c.get("launch_ack_secs")) {
+            match n.as_float().or_else(|| n.as_integer().map(|i| i as f64)) {
+                Some(x) if x > 0.0 && x <= 3600.0 => c.launch_ack_secs = x,
+                _ => return Err(Error::Batch(format!("gatetrain.toml: [chain] launch_ack_secs is a number of seconds above 0 and at most 3600, not {n}"))),
+            }
         }
         if let Some(b) = v.get("retry").and_then(|r| r.get("budget")) {
             let t = b.as_table().ok_or_else(|| Error::Batch(format!("gatetrain.toml: [retry] budget is a table of transition = count, not {b}")))?;

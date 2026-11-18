@@ -840,3 +840,54 @@ fn s4_a_target_that_deployed_is_not_deployed_again_after_a_later_target_fails() 
     let outcome: String = fx.ledger.conn.query_row("SELECT json_extract(detail,'$.outcome') FROM batch_events WHERE transition='T8a' AND phase='failed'", [], |r| r.get(0)).unwrap();
     assert_eq!(outcome, "failed-dirty", "a-first was deployed when b-flaky failed");
 }
+
+/// review round 4: a holder that was spawned but has not taken the host lock yet. Without a handshake the same tick took T5s
+/// ("stopped") and launched again, eight times.
+struct LateLock {
+    launches: std::sync::Mutex<Vec<gatetrain_core::batch::LaunchRequest>>,
+}
+impl gatetrain_core::batch::HostLock for LateLock {
+    fn names_run(&self, _run_id: &str) -> gatetrain_core::Result<bool> {
+        Ok(false)
+    }
+    fn launch(&self, req: &gatetrain_core::batch::LaunchRequest) -> gatetrain_core::Result<()> {
+        self.launches.lock().unwrap().push(req.clone());
+        Ok(())
+    }
+}
+
+#[test]
+fn s5_rev4_a_holder_that_never_names_its_run_is_launched_once_and_fails_clean() {
+    let mut fx = Fx::new("");
+    fx.cfg.launch_ack_secs = 0.3;
+    fx.open("b1", "lane1");
+    for want in ["stacked", "settled", "preflighted"] {
+        let o = fx.adv("b1");
+        assert!(matches!(&o, Outcome::Advanced { to, .. } if to == want), "{o:?}");
+    }
+    let late = LateLock { launches: Default::default() };
+    let rules: Vec<diagnose::Rule> = diagnose::builtin_rules().to_vec();
+    let hosts = fx.hosts.clone();
+    let r = {
+        let mut e = Engine { ledger: &mut fx.ledger, cfg: &fx.cfg, lock: &late, adm: &AllowAll, now: &now_at(0), state_dir: fx.state.clone(), actor: "engine".into() };
+        let o = TickOpts { hosts: &hosts, seams: &FakeHosts, rules: &rules, storm_reds: fx.cfg.storm_reds, now_us: NOW_US, max_steps: tick::MAX_STEPS, max_wait_minutes: fx.cfg.max_wait_minutes, max_run_minutes: fx.cfg.max_run_minutes };
+        tick::tick(&mut e, &o).unwrap()
+    };
+    let n = late.launches.lock().unwrap().len();
+    assert_eq!(n, 1, "one tick launched the proof {n} times: {:?}", r.lines);
+    assert!(r.lines[0].starts_with("b1: preflighted, FAILED T4: the holder did not name run b1-p1 within 0.3 s"), "{:?}", r.lines);
+    assert_eq!(fx.count("batch_events WHERE transition='T5s'"), 0, "never a stopped run for a launch that was not acknowledged");
+    let outcome: String = fx.ledger.conn.query_row("SELECT json_extract(detail,'$.outcome') FROM batch_events WHERE transition='T4' AND phase='failed'", [], |r| r.get(0)).unwrap();
+    assert_eq!(outcome, "failed-clean");
+}
+
+#[test]
+fn s5_a_holder_that_names_its_run_late_is_waited_for_not_stopped_and_launched_again() {
+    let mut fx = Fx::new("");
+    *fx.lock.late_polls.lock().unwrap() = 3;
+    fx.open("b1", "lane1");
+    let r = fx.tick();
+    assert_eq!(r.lines[0], "b1: open -> stacked -> settled -> preflighted -> proving, waits: run b1-p1 is still proving", "{:?}", r.lines);
+    assert_eq!(fx.lock.launches.lock().unwrap().len(), 1);
+    assert_eq!(fx.count("batch_events WHERE transition='T5s'"), 0);
+}

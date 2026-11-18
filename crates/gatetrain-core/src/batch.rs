@@ -43,8 +43,12 @@ pub struct LaunchRequest {
 pub trait HostLock {
     /// Does a live lock name this run id? (the probe of T4 and the "still running" test of T5)
     fn names_run(&self, run_id: &str) -> Result<bool>;
-    /// Start the chain under the holder. Must not block until the chain ends.
+    /// Start the chain under the holder. Must not block until the chain ends; the engine waits for the holder to name the run.
     fn launch(&self, req: &LaunchRequest) -> Result<()>;
+    /// Stop a launched holder that did not name its run in time, so a launch that failed leaves nothing running. Default: nothing.
+    fn abort(&self, _run_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// "A host has a free slot and passes doctor for this role" (T3 role `light`, T4 role `proof`). rs2 implements it.
@@ -81,21 +85,50 @@ impl Admission for AllowAll {
     }
 }
 
-/// A fake lock for tests: records launches; `named` is the set of run ids a live lock names.
+/// A fake lock for tests: records launches; `named` is the set of run ids a live lock names. `late_polls` = n > 0 models a holder that
+/// was spawned but takes the host lock late: a launched run is named only after n `names_run` questions (`usize::MAX`: never).
 #[cfg(any(test, feature = "test-fakes"))]
 #[derive(Default)]
 pub struct FakeLock {
     pub named: Mutex<HashSet<String>>,
     pub launches: Mutex<Vec<LaunchRequest>>,
+    pub late_polls: Mutex<usize>,
+    pub starting: Mutex<HashMap<String, usize>>,
+    pub aborted: Mutex<Vec<String>>,
 }
 #[cfg(any(test, feature = "test-fakes"))]
 impl HostLock for FakeLock {
     fn names_run(&self, run_id: &str) -> Result<bool> {
-        Ok(self.named.lock().unwrap().contains(run_id))
+        if self.named.lock().unwrap().contains(run_id) {
+            return Ok(true);
+        }
+        let mut st = self.starting.lock().unwrap();
+        if let Some(n) = st.get_mut(run_id) {
+            if *n == usize::MAX {
+                return Ok(false);
+            }
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                st.remove(run_id);
+                self.named.lock().unwrap().insert(run_id.to_string());
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     fn launch(&self, req: &LaunchRequest) -> Result<()> {
         self.launches.lock().unwrap().push(req.clone());
-        self.named.lock().unwrap().insert(req.run_id.clone());
+        let late = *self.late_polls.lock().unwrap();
+        if late == 0 {
+            self.named.lock().unwrap().insert(req.run_id.clone());
+        } else {
+            self.starting.lock().unwrap().insert(req.run_id.clone(), late);
+        }
+        Ok(())
+    }
+    fn abort(&self, run_id: &str) -> Result<()> {
+        self.starting.lock().unwrap().remove(run_id);
+        self.aborted.lock().unwrap().push(run_id.to_string());
         Ok(())
     }
 }
@@ -489,6 +522,12 @@ fn run_plugin_within(cmd: &[String], dir: &Path, env: &[(String, String)], secs:
         crate::runner::RunOut::Done { rc, out } => Some((rc as i32, out.trim().to_string())),
         crate::runner::RunOut::TimedOut => None,
     })
+}
+
+/// Does the holder's log say it holds `run` (`HOLDS <run>`, written once the holder took the host lock)?
+fn holder_named(log: &Path, run: &str) -> bool {
+    let want = format!("HOLDS {run}");
+    std::fs::read(log).map(|b| String::from_utf8_lossy(&b).lines().any(|l| l.trim() == want)).unwrap_or(false)
 }
 
 fn substitute(cmd: &[String], sha: &str) -> Vec<String> {
@@ -1118,20 +1157,40 @@ impl<'a> Engine<'a> {
         })
     }
 
-    /// The probe of a launch (T4, T6a, a launched T3): a live lock that names the run means it was launched; a log the holder wrote
-    /// into means it ran (T5 reads how it ended); no log means the holder never started; an empty log means it was spawned and may
-    /// still take the lock, which no probe can settle.
+    /// The probe of a launch (T4, T6a, a launched T3): a live lock that names the run, or the holder's `HOLDS <run>` line in the log,
+    /// means it was launched (T5 reads how it ended); no log means the holder never started; a log without that line means it was
+    /// spawned and may still take the lock, which no probe can settle.
     fn launch_probe(&self, plan: &Plan, log_key: &str) -> Result<Probe> {
         let run = plan.run_id.as_deref().unwrap_or_default();
-        if self.lock.names_run(run)? {
+        let log = PathBuf::from(plan.detail[log_key].as_str().unwrap_or_default());
+        if self.lock.names_run(run)? || holder_named(&log, run) {
             return Ok(Probe::Happened(None));
         }
-        let log = PathBuf::from(plan.detail[log_key].as_str().unwrap_or_default());
         Ok(match std::fs::metadata(&log) {
             Err(_) => Probe::NotHappened,
-            Ok(m) if m.len() > 0 => Probe::Happened(None),
-            Ok(_) => Probe::Unknown(format!("the holder of run {run} opened its log {} but no lock names the run; it may still start", log.display())),
+            Ok(_) => Probe::Unknown(format!("the holder of run {run} opened its log {} but has not named the run; it may still start", log.display())),
         })
+    }
+
+    /// The launch handshake (engine-v2 4.3): a launch returns only once the holder names its run, by the host lock or by the
+    /// `HOLDS <run>` line it writes to the log (a chain that ends before the next look still leaves that line). A holder that does not
+    /// within `[chain] launch_ack_secs` is stopped and the launch fails clean, so the same tick never takes the run for stopped (T5s)
+    /// and launches it again. The wait is measured on the monotonic clock of this process.
+    fn await_ack(&self, run: &str, log: &Path) -> Result<std::result::Result<(), String>> {
+        let secs = self.cfg.launch_ack_secs;
+        let limit = std::time::Duration::try_from_secs_f64(secs).unwrap_or(std::time::Duration::from_secs(60));
+        let t0 = std::time::Instant::now();
+        loop {
+            if self.lock.names_run(run)? || holder_named(log, run) {
+                return Ok(Ok(()));
+            }
+            let spent = t0.elapsed();
+            if spent >= limit {
+                self.lock.abort(run)?;
+                return Ok(Err(format!("the holder did not name run {run} within {secs} s ([chain] launch_ack_secs); it was stopped, so nothing runs under that id")));
+            }
+            std::thread::sleep((limit - spent).min(std::time::Duration::from_millis(50)));
+        }
     }
 
     // ------------------------------------------------------------ plans (the guards)
@@ -1609,7 +1668,10 @@ impl<'a> Engine<'a> {
                 let sha = plan.input_sha.clone().unwrap_or_default();
                 let command: Vec<String> = self.cfg.preflight_chain_command.iter().map(|a| a.replace("{sha}", &sha).replace("{run}", &run).replace("{log}", &log.to_string_lossy())).collect();
                 let env = self.env(id, f, &sha, &run, &log.to_string_lossy());
-                self.lock.launch(&LaunchRequest { run_id: run, batch: id.into(), sha, base: f.s("base_sha").unwrap_or_default(), command, log, workdir: wd, env, role: "light".into() })?;
+                self.lock.launch(&LaunchRequest { run_id: run.clone(), batch: id.into(), sha, base: f.s("base_sha").unwrap_or_default(), command, log: log.clone(), workdir: wd, env, role: "light".into() })?;
+                if let Err(why) = self.await_ack(&run, &log)? {
+                    return Ok(Err(why));
+                }
                 Ok(Ok(Done { output: None, extra: json!({}) }))
             }
             "T3" => {
@@ -1639,6 +1701,9 @@ impl<'a> Engine<'a> {
                 }
                 let req = LaunchRequest { run_id: run.clone(), batch: id.into(), sha: sha.clone(), base: f.s("base_sha").unwrap_or_default(), command, log: log.clone(), workdir: wd, env, role: "proof".into() };
                 self.lock.launch(&req)?;
+                if let Err(why) = self.await_ack(&run, &log)? {
+                    return Ok(Err(why));
+                }
                 Ok(Ok(Done { output: None, extra: json!({}) }))
             }
             "T7" => {

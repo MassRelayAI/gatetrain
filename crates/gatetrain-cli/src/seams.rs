@@ -23,7 +23,7 @@ pub fn engine_seams(db: &Path, cfg: &BatchConfig, lock: Option<PathBuf>, hosts: 
         (None, None) => state_dir.join("host.lock"),
     };
     let exe = std::env::current_exe().context("locating the gatetrain binary")?.to_string_lossy().into_owned();
-    let real = RealLock { lock: lock_path.clone(), db: db.to_path_buf(), hosts: hosts.clone(), holder: vec![exe, "hold".into()] };
+    let real = RealLock { lock: lock_path.clone(), db: db.to_path_buf(), hosts: hosts.clone(), holder: vec![exe, "hold".into()], children: Default::default() };
     let mut adm = MemoryAdmission::new(lock_path, db.to_path_buf(), hosts.clone(), cfg.chain_steps.clone());
     adm.target_dirs = cfg.chain_target_dirs.iter().map(PathBuf::from).collect();
     adm.repo_root = cfg.chain_repo_root.as_ref().map(PathBuf::from);
