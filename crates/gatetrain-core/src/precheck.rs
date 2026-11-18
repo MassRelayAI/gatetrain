@@ -331,8 +331,11 @@ pub fn self_test() -> std::result::Result<String, String> {
     self_test_with(&merge_conflicts)
 }
 
+/// A conflict check: (repository, ref a, ref b) -> the conflicting file names.
+pub type ConflictCheck = dyn Fn(&Path, &str, &str) -> std::result::Result<Vec<String>, String>;
+
 /// The self-test with the conflict check injected, so a test can prove it fails when the check finds nothing.
-pub fn self_test_with(check: &dyn Fn(&Path, &str, &str) -> std::result::Result<Vec<String>, String>) -> std::result::Result<String, String> {
+pub fn self_test_with(check: &ConflictCheck) -> std::result::Result<String, String> {
     let dir = std::env::temp_dir().join(format!("gatetrain-precheck-selftest-{}-{}", std::process::id(), SELF_TEST_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
