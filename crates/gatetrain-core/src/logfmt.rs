@@ -272,7 +272,9 @@ impl ParsedLog {
     pub fn retries_by_test(&self) -> Vec<(String, usize)> {
         let mut m: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
         for r in &self.retries {
-            *m.entry(r.test.as_str()).or_default() += 1;
+            for t in r.test.split(" ;; ") {
+                *m.entry(t).or_default() += 1;
+            }
         }
         let mut v: Vec<(String, usize)> = m.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -329,6 +331,11 @@ impl ParsedLog {
         if !self.skipped.is_empty() {
             // only when present, so every log without the marker prints exactly what it printed before
             m.insert("skipped".into(), Value::Array(self.skipped.iter().map(|(n, w)| json!({"step": n, "reason": w})).collect()));
+        }
+        if !self.retries.is_empty() {
+            // only when present: a log without retries prints exactly what it printed before
+            m.insert("retries".into(), Value::Array(self.retries.iter().map(|r| json!({"step": r.step, "attempt": r.attempt, "rc": r.rc, "class": r.class, "via": r.via, "test": r.test})).collect()));
+            m.insert("retry_summary".into(), json!(self.retry_summary));
         }
         Value::Object(m)
     }
@@ -455,7 +462,9 @@ pub fn parse_log(text: &str) -> Result<ParsedLog> {
                 p.red_now.push((m[1].to_string(), parse_int(&m[2])?, at));
             }
         } else if line.starts_with("RED_SUMMARY") {
-            p.red_summary = Some(r.summary.captures(line).map(|m| m[1].trim().to_string()).unwrap_or_default());
+            // `RED_SUMMARY: none; retried: a(infra-port)`: the reds stay what they were; the suffix names a retried green and is read by `retries`
+            let s = r.summary.captures(line).map(|m| m[1].trim().to_string()).unwrap_or_default();
+            p.red_summary = Some(s.split_once("; retried:").map_or(s.clone(), |(head, _)| head.trim().to_string()));
         } else if line.starts_with("GATES_DONE") {
             p.gates_done = true;
         } else if line.starts_with("CHAIN_PARALLEL") {

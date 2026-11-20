@@ -80,11 +80,11 @@ pub struct Opts {
     pub expected: Option<std::collections::HashMap<String, f64>>,
     /// the core budget (at least 1). It gates steps only when some selected step declares `cores`
     pub cores: usize,
-    /// D446: re-run a red step ONCE on the same sha when `diagnose` classes it `flake-*`/`infra-*` or a live quarantine row names its test.
+    /// D446: re-run a red step ONCE on the same sha under the strict rule of `retry.rs` (a live quarantine row naming the exact failing test, or a pure infra failure).
     /// Off by default: with it off the run is byte for byte what it was before.
     pub retry_flakes: bool,
-    /// the tracked quarantine file (`test,step,finding,added,expires`); read only with `retry_flakes`
-    pub quarantine: Option<PathBuf>,
+    /// `<ref>:<path>` of the tracked quarantine file, read with `git show` from a trusted ref (never the working tree); read only with `retry_flakes`
+    pub quarantine_ref: Option<String>,
 }
 
 /// At most this many steps of one run are re-run; a further flaky step stays red.
@@ -535,23 +535,19 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         })
         .collect();
     let par = o.par.max(1);
-    // D446: the quarantine rows live today, read once; a missing file is a config error, a lapsed or malformed row is dropped and named
-    let quarantine = if o.retry_flakes {
-        match &o.quarantine {
-            Some(p) => {
-                let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read the quarantine file {}: {e}", p.display()))?;
-                let (live, dropped) = crate::diagnose::live_quarantine(&text, &Ts::now_utc().iso()[..10]);
-                for (n, why) in dropped {
-                    eprintln!("chain: quarantine {} line {n}: not honoured: {why}", p.display());
-                }
-                live
+    // D446: the quarantine rows live today, read ONCE from a trusted ref (`git show <ref>:<path>`), never from the working tree under test.
+    // No ref = no quarantine rows (infra retries only). An unreadable ref or a file without its header row is a config error.
+    let quarantine = match (o.retry_flakes, &o.quarantine_ref) {
+        (true, Some(r)) => {
+            let text = git_out(&cwd, &["show", r]).ok_or_else(|| format!("cannot read the quarantine file {r:?} with `git show` (pass --quarantine-ref <ref>:<path>)"))?;
+            let (live, dropped) = crate::retry::parse_quarantine(&text, &Ts::now_utc().iso()[..10]).map_err(|e| format!("quarantine {r}: {e}"))?;
+            for (n, why) in dropped {
+                eprintln!("chain: quarantine {r} line {n}: not honoured: {why}");
             }
-            None => Vec::new(),
+            live
         }
-    } else {
-        Vec::new()
+        _ => Vec::new(),
     };
-    let history: crate::diagnose::History = o.expected.iter().flatten().map(|(k, v)| (k.clone(), vec![*v])).collect();
     let host = o.host.as_deref().and_then(clean_host).unwrap_or_else(host_name);
 
     // every emitted line also feeds the log digest the ledger keeps
@@ -827,16 +823,16 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 }
             };
             let Some((rc, secs)) = fin else { continue };
-            // D446: a red whole step may be re-run ONCE on the same sha, only when its own output says flake/infra or a live quarantine row names it
+            // D446: a red whole step may be re-run ONCE on the same sha, only under the strict rule of retry.rs (never the advisory diagnose classes)
             if rc != 0 && o.retry_flakes && matches!(d.part, Part::Whole) && retrying[d.idx].is_none() && !is_sharded(step) {
                 let full = o.out.join(format!("{name}.full"));
-                let text = std::fs::read(&full).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-                let lines: Vec<String> = text.lines().map(|l| l.trim_end_matches('\r').to_string()).collect();
-                if let Some(c) = crate::diagnose::retry_cause(name, rc, secs, &lines, &history, crate::diagnose::builtin_rules(), &quarantine) {
+                let fits = std::fs::metadata(&full).is_ok_and(|m| m.len() <= crate::retry::MAX_OUTPUT_BYTES);
+                let text = if fits { std::fs::read(&full).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default() } else { String::new() };
+                if let Some(c) = fits.then(|| crate::retry::retry_cause(name, rc, &text, &quarantine)).flatten() {
                     if retry_started >= MAX_RETRIED_STEPS {
                         say(&format!("STEP_RETRY_REFUSED {name} at most {MAX_RETRIED_STEPS} steps are retried per run"));
                     } else {
-                        let test = c.test.replace(['\r', '\n'], " ");
+                        let test = c.tests.join(" ;; ").replace(['\r', '\n'], " ");
                         let _ = std::fs::copy(&full, o.out.join(format!("{name}.attempt1.full")));
                         say(&format!("STEP_RETRY {name} attempt=1 rc={rc} class={} via={} test={test}", c.cls, c.via));
                         retry_started += 1;
@@ -869,7 +865,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 cached_from: None,
                 key: keys[d.idx].clone(),
                 shards: i64::from(nshards(step)),
-                log_ref: format!("{name}.full"),
+                log_ref: if retrying[d.idx].is_some() { format!("{name}.full#retried") } else { format!("{name}.full") },
             });
             let was_retried = retrying[d.idx].take().map(|mut r| {
                 r.final_rc = rc;
@@ -897,7 +893,8 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     if !retries.is_empty() {
         say(&format!("CHAIN_RETRIES {}", retries.iter().map(|r| format!("{}={}", r.name, if r.final_rc == 0 { "green" } else { "red" })).collect::<Vec<_>>().join(" ")));
     }
-    say(&format!("RED_SUMMARY: {}", if reds.is_empty() { "none".to_string() } else { summary_in_file_order(plan, &reds) }));
+    let retried_note = if retries.is_empty() { String::new() } else { format!("; retried: {}", retries.iter().map(|r| format!("{}({})", r.name, r.class)).collect::<Vec<_>>().join(" ")) };
+    say(&format!("RED_SUMMARY: {}{retried_note}", if reds.is_empty() { "none".to_string() } else { summary_in_file_order(plan, &reds) }));
     say("GATES_DONE");
     let log_sha256: String = log_hash.clone().finalize().iter().map(|b| format!("{b:02x}")).collect();
 

@@ -24,6 +24,7 @@ pub mod precheck;
 pub mod predict;
 pub mod privacy;
 pub mod pycompat;
+pub mod retry;
 pub mod runner;
 pub mod runs;
 pub mod stackcheck;

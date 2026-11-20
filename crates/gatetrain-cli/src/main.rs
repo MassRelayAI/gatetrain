@@ -495,6 +495,12 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
                 println!("{}", serde_json::to_string(&p.to_json())?);
             } else {
                 println!("{} steps, {} red_now, gates_done={}", p.steps.len(), p.red_now.len(), p.gates_done);
+                if !p.retries.is_empty() {
+                    println!("retried (never a first-try green): {}", p.retry_summary.as_deref().unwrap_or(""));
+                    for (test, n) in p.retries_by_test() {
+                        println!("  {n}x {test}");
+                    }
+                }
             }
             Ok(ExitCode::SUCCESS)
         }

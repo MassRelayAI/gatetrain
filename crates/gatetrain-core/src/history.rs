@@ -25,7 +25,7 @@ pub fn history_from(c: &rusqlite::Connection, exclude_run: &str) -> Option<Histo
         .prepare(
             "SELECT s.name, s.duration_sec FROM steps s JOIN runs r ON r.id=s.run_id \
              WHERE r.kind='chain' AND r.outcome IN ('green','red') AND s.exit_code=0 AND s.cached=0 \
-             AND s.duration_sec IS NOT NULL AND r.id<>?",
+             AND s.duration_sec IS NOT NULL AND s.log_ref NOT LIKE '%#retried' AND r.id<>?",
         )
         .ok()?;
     let rows = st.query_map([exclude_run], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))).ok()?;

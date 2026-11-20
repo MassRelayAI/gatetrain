@@ -32,6 +32,7 @@ struct Run {
     code: i32,
     stdout: String,
     out: PathBuf,
+    _dir: Option<tempfile::TempDir>,
 }
 
 /// A committed repo holding the steps file and, when given, `quarantine.csv`, so the tree is clean and a green run writes a stamp.
@@ -59,12 +60,14 @@ fn run_in(d: &Path, extra: &[&str]) -> Run {
         .current_dir(d)
         .output()
         .unwrap();
-    Run { code: o.status.code().unwrap(), stdout: String::from_utf8_lossy(&o.stdout).into_owned(), out }
+    Run { code: o.status.code().unwrap(), stdout: String::from_utf8_lossy(&o.stdout).into_owned(), out, _dir: None }
 }
 
 fn chain(steps: &str, quarantine: Option<&str>, extra: &[&str]) -> Run {
     let dir = repo(steps, quarantine);
-    run_in(dir.path(), extra)
+    let mut r = run_in(dir.path(), extra);
+    r._dir = Some(dir);
+    r
 }
 
 const DOCKER: &str = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?";
@@ -158,12 +161,12 @@ fn a_retry_that_is_red_again_stays_red() {
 
 #[test]
 fn an_infra_signature_beside_anything_real_is_never_retried() {
-    let mut g = vec!["error TS2345: Argument of type 'x' is not assignable".to_string()];
+    let mut g = vec!["error TS2345: Argument of type x is not assignable".to_string()];
     g.extend((0..60).map(|i| format!("line {i} of a long build log")));
     g.push("bind: address already in use".into());
     let cases: Vec<(&str, Vec<String>)> = vec![
-        ("A: a panic on ConnectionRefused", vec!["thread 'x' panicked at src/a.rs:1:1:".into(), "ConnectionRefused".into(), "bind: address already in use".into()]),
-        ("C: a compile error outside any block", vec!["error[E0432]: unresolved import `x`".into(), "bind: address already in use".into()]),
+        ("A: a panic on ConnectionRefused", vec!["thread x panicked at src/a.rs:1:1:".into(), "ConnectionRefused".into(), "bind: address already in use".into()]),
+        ("C: a compile error outside any block", vec!["error[E0432]: unresolved import x".into(), "bind: address already in use".into()]),
         ("D: an assertion mentioning EADDRINUSE", vec!["AssertionError: expected EADDRINUSE to be undefined".into()]),
         ("D2: a Rust assertion and connection refused", vec!["assertion `left == right` failed".into(), "connection refused".into(), "bind: address already in use".into()]),
         ("G: the real error above the tail", g),

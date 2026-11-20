@@ -246,7 +246,7 @@ directory that is not a git repository; the last line says why. The stamp is wha
 
 ## Flake retry (`--retry-flakes`)
 
-Off by default. With `--retry-flakes` a red step is re-run once, on the same sha, that step only, when every failure block of its output is classed `flake-*` or `infra-*` by `rules/red-classes.toml` (the `diagnose` classifier), or names the test of a live row of `--quarantine <file>` (CSV `test,step,finding,added,expires`, header required, expiry at most 14 days after `added`; a lapsed or malformed row is not honoured). An unclassified red is never re-run; a second red is final; at most 2 steps per run are retried; sharded steps are not. The log gets `STEP_RETRY` and `CHAIN_RETRIES` ([log format](log-format.md)), the first attempt's output stays in `<step>.attempt1.full`, and the stamp lists `retried` so a green retry is never read as a first-try green. Design: [ADR 003](design/adr-003-flake-retry.md).
+Off by default. With `--retry-flakes` a red step is re-run once, on the same sha, that step only, under a strict rule of its own (never the `diagnose` classes): every failing test id is the exact `test` of a live row of the file named by `--quarantine-ref <ref>:<path>` (read with `git show` from a trusted ref, never the working tree; CSV `test,step,finding,added,expires`, header required, `added <= today <= expires`, at most 14 days), or the red is a pure infra failure (docker daemon, port in use, DNS) with no assertion, panic, failing test, compile error or timeout anywhere in its output. An unclassified red, a timeout and a sharded step are never re-run; a second red is final; at most 2 steps per run. The log gets `STEP_RETRY`, `CHAIN_RETRIES` and `RED_SUMMARY: none; retried: ...` ([log format](log-format.md)), the first attempt's output stays in `<step>.attempt1.full`, the stamp lists `retried`, and the ledger keeps a retried green out of its medians. Do not enable it in a consumer until its merger reads `CHAIN_RETRIES`. Design and limits: [ADR 003](design/adr-003-flake-retry.md).
 
 ## Exit codes
 
@@ -261,7 +261,7 @@ Inside `.full` and `STEP_EXIT`, a timeout is 124 and a step that could not be st
 ## Options
 
 `gatetrain chain --help` is the source of truth: `--steps` and `--out` (required), `--par`, `--keep-going`, `--only`, `--skip`, `--cache`,
-`--no-cache-for`, `--mode`, `--host`, `--db`, `--run-id`, `--retry-flakes`, `--quarantine`.
+`--no-cache-for`, `--mode`, `--host`, `--db`, `--run-id`, `--retry-flakes`, `--quarantine-ref`.
 
 ## Read the result
 
