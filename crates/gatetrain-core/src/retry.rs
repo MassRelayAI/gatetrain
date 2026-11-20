@@ -143,10 +143,13 @@ fn csv_fields(line: &str) -> Vec<String> {
     out.into_iter().map(|f| f.trim().to_string()).collect()
 }
 
+/// The live rows and the dropped ones as `(line number, why)`.
+pub type Parsed = (Vec<QuarantineRow>, Vec<(usize, String)>);
+
 /// The live rows of a quarantine file on `today` (`YYYY-MM-DD`), and the rows not honoured as `(line number, why)`.
 /// Err when the file has no header row [`QUARANTINE_HEADER`] or `today` is not a date. A row is honoured only when it has five fields,
 /// a finding id without spaces, real dates, `added <= today <= expires` and `expires - added <= 14` days.
-pub fn parse_quarantine(text: &str, today: &str) -> Result<(Vec<QuarantineRow>, Vec<(usize, String)>), String> {
+pub fn parse_quarantine(text: &str, today: &str) -> Result<Parsed, String> {
     let now = days_of(today).ok_or_else(|| format!("today is not a date: {today:?}"))?;
     let mut lines = text.lines().enumerate();
     match lines.next() {
@@ -226,7 +229,7 @@ mod tests {
     use super::*;
 
     const HDR: &str = "test,step,finding,added,expires\n";
-    fn rows(body: &str, today: &str) -> (Vec<QuarantineRow>, Vec<(usize, String)>) {
+    fn rows(body: &str, today: &str) -> Parsed {
         parse_quarantine(&format!("{HDR}{body}"), today).unwrap()
     }
     fn q(test: &str) -> Vec<QuarantineRow> {
