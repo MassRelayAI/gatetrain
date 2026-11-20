@@ -833,3 +833,107 @@ mod tests {
         assert!(t.starts_with("s0: real (rc=101, 1 block(s))"), "{t}");
     }
 }
+
+// ---- retry qualification (GT-1, D446) ----
+
+/// One live row of a quarantine file: a test of a step that may be re-run once, with who decided (a finding id) and when it lapses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuarantineRow {
+    pub test: String,
+    pub step: String,
+    pub finding: String,
+    pub added: String,
+    pub expires: String,
+}
+
+/// Days since 1970-01-01 of a `YYYY-MM-DD` date (None when it is not a real calendar date).
+fn days_of(date: &str) -> Option<i64> {
+    let mut it = date.trim().split('-');
+    let (y, m, d): (i64, i64, i64) = (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+    if it.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) || date.trim().len() != 10 {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146097 + doe - 719468)
+}
+
+/// Split one CSV line (double quotes may hold commas; `""` is a quote).
+fn csv_fields(line: &str) -> Vec<String> {
+    let (mut out, mut cur, mut quoted) = (Vec::new(), String::new(), false);
+    let mut it = line.chars().peekable();
+    while let Some(c) = it.next() {
+        match (c, quoted) {
+            ('"', true) if it.peek() == Some(&'"') => {
+                cur.push('"');
+                it.next();
+            }
+            ('"', _) => quoted = !quoted,
+            (',', false) => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur);
+    out.into_iter().map(|f| f.trim().to_string()).collect()
+}
+
+/// The rows of a quarantine file (`test,step,finding,added,expires`; the header line is required) that are live on `today` (`YYYY-MM-DD`).
+/// A row is dropped, never honoured, when it is malformed, lacks a finding id, has an expiry before `today`, or lives more than 14 days
+/// (`expires` minus `added`). The dropped rows are returned as `(line number, why)` so the caller can say so.
+pub fn live_quarantine(text: &str, today: &str) -> (Vec<QuarantineRow>, Vec<(usize, String)>) {
+    let (mut live, mut dropped) = (Vec::new(), Vec::new());
+    let now = days_of(today);
+    for (n, line) in text.lines().enumerate() {
+        if n == 0 || line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let f = csv_fields(line);
+        if f.len() != 5 || f[..3].iter().any(String::is_empty) {
+            dropped.push((n + 1, "expected test,step,finding,added,expires with the first three filled".into()));
+            continue;
+        }
+        let (Some(a), Some(e)) = (days_of(&f[3]), days_of(&f[4])) else {
+            dropped.push((n + 1, "added and expires must be YYYY-MM-DD".into()));
+            continue;
+        };
+        if e - a > 14 || e < a {
+            dropped.push((n + 1, "expires must be 0 to 14 days after added".into()));
+        } else if now.is_some_and(|t| e < t) {
+            dropped.push((n + 1, format!("expired on {}", f[4])));
+        } else {
+            live.push(QuarantineRow { test: f[0].clone(), step: f[1].clone(), finding: f[2].clone(), added: f[3].clone(), expires: f[4].clone() });
+        }
+    }
+    (live, dropped)
+}
+
+/// Why a red step may be re-run once: the finding class (or `quarantine`), the rule or finding id behind it, and the test it names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetryCause {
+    pub cls: String,
+    /// `diagnose:<rule id>` or `quarantine:<finding id>`
+    pub via: String,
+    pub test: String,
+}
+
+/// D446: a red step is a flake candidate ONLY when every failure block of its output is classed `flake-*` or `infra-*` by the rule table,
+/// or names the test of a live quarantine row for this step. Anything else (an unmatched block is `real`, an advisory, a baseline
+/// class) disqualifies the whole step: a mixed red is not retried. `secs` and `history` feed the `slow` rule exactly as `diagnose` does.
+pub fn retry_cause(step: &str, rc: i64, secs: f64, output: &[String], history: &History, rules: &[Rule], quarantine: &[QuarantineRow]) -> Option<RetryCause> {
+    let steps = vec![Step { name: step.to_string(), duration: Some(secs), exit_code: Some(rc), ..Default::default() }];
+    let findings = classify(0, output, &steps, history, rules);
+    let mut first: Option<RetryCause> = None;
+    for f in &findings {
+        let hit = if f.cls.starts_with("flake-") || f.cls.starts_with("infra-") {
+            RetryCause { cls: f.cls.clone(), via: format!("diagnose:{}", f.rule), test: f.block.clone() }
+        } else {
+            let q = quarantine.iter().find(|q| q.step == step && (f.block.contains(&q.test) || f.evidence.contains(&q.test)))?;
+            RetryCause { cls: "quarantine".into(), via: format!("quarantine:{}", q.finding), test: q.test.clone() }
+        };
+        first.get_or_insert(hit);
+    }
+    first
+}

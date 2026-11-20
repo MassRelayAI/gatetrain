@@ -236,9 +236,49 @@ pub struct ParsedLog {
     pub parallel: Option<i64>,
     /// `STEP_SKIPPED <step> <reason>`: a step that never ran (its need went red, or a fast step was red). Kept apart from `steps`, which ran.
     pub skipped: Vec<(String, String)>,
+    /// `STEP_RETRY` lines, in log order. Empty unless the run used `--retry-flakes`. Not part of `to_json`.
+    pub retries: Vec<Retry>,
+    /// `CHAIN_RETRIES <step>=green|red ...`: how each retried step ended; None when nothing was retried.
+    pub retry_summary: Option<String>,
+}
+
+/// `STEP_RETRY <step> attempt=<n> rc=<rc> class=<cls> via=<diagnose:RULE or quarantine:FINDING> test=<text>`: attempt `n` of a step was red and
+/// the step was re-run once on the same sha (D446). The step's own `STEP_EXIT` is the last attempt's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Retry {
+    pub step: String,
+    pub attempt: i64,
+    pub rc: i64,
+    pub class: String,
+    pub via: String,
+    pub test: String,
+}
+
+/// The part of a `STEP_RETRY` line after the keyword; None when it lacks the step or one of the four `key=value` words.
+fn parse_retry(rest: &str) -> Option<Retry> {
+    let (head, test) = rest.split_once(" test=").unwrap_or((rest, ""));
+    let mut w = head.split_whitespace();
+    let step = w.next()?.to_string();
+    let get = |w: &mut std::str::SplitWhitespace, key: &str| w.next()?.strip_prefix(key).map(str::to_string);
+    let attempt = get(&mut w, "attempt=")?.parse().ok()?;
+    let rc = get(&mut w, "rc=")?.parse().ok()?;
+    let class = get(&mut w, "class=")?;
+    let via = get(&mut w, "via=")?;
+    Some(Retry { step, attempt, rc, class, via, test: test.trim().to_string() })
 }
 
 impl ParsedLog {
+    /// Retries per test text (the `test=` field), most retried first, then by text: the count a flake rate is built from.
+    pub fn retries_by_test(&self) -> Vec<(String, usize)> {
+        let mut m: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for r in &self.retries {
+            *m.entry(r.test.as_str()).or_default() += 1;
+        }
+        let mut v: Vec<(String, usize)> = m.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    }
+
     fn timestamps(&self) -> Vec<Ts> {
         let mut ts = Vec::new();
         for s in &self.steps {
@@ -403,6 +443,12 @@ pub fn parse_log(text: &str) -> Result<ParsedLog> {
             if !name.is_empty() {
                 p.skipped.push((name.to_string(), why.trim().to_string()));
             }
+        } else if let Some(rest) = line.strip_prefix("STEP_RETRY ") {
+            if let Some(r) = parse_retry(rest) {
+                p.retries.push(r);
+            }
+        } else if let Some(rest) = line.strip_prefix("CHAIN_RETRIES ") {
+            p.retry_summary = Some(rest.trim().to_string());
         } else if line.starts_with("RED_NOW") {
             if let Some(m) = r.red.captures(line) {
                 let at = m.get(3).map(|a| parse_iso(a.as_str())).transpose()?;

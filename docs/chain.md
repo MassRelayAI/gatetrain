@@ -244,6 +244,10 @@ that came from the cache. The `<out>` folder itself is not counted as part of th
 directory that is not a git repository; the last line says why. The stamp is what the batch engine's lane-stamp rule reads
 (`[lanes] require_stamp`, see [ADR 002](design/adr-002-lane-stamp-and-cause-gated-rerun.md)).
 
+## Flake retry (`--retry-flakes`)
+
+Off by default. With `--retry-flakes` a red step is re-run once, on the same sha, that step only, when every failure block of its output is classed `flake-*` or `infra-*` by `rules/red-classes.toml` (the `diagnose` classifier), or names the test of a live row of `--quarantine <file>` (CSV `test,step,finding,added,expires`, header required, expiry at most 14 days after `added`; a lapsed or malformed row is not honoured). An unclassified red is never re-run; a second red is final; at most 2 steps per run are retried; sharded steps are not. The log gets `STEP_RETRY` and `CHAIN_RETRIES` ([log format](log-format.md)), the first attempt's output stays in `<step>.attempt1.full`, and the stamp lists `retried` so a green retry is never read as a first-try green. Design: [ADR 003](design/adr-003-flake-retry.md).
+
 ## Exit codes
 
 | code | meaning |
@@ -257,7 +261,7 @@ Inside `.full` and `STEP_EXIT`, a timeout is 124 and a step that could not be st
 ## Options
 
 `gatetrain chain --help` is the source of truth: `--steps` and `--out` (required), `--par`, `--keep-going`, `--only`, `--skip`, `--cache`,
-`--no-cache-for`, `--mode`, `--host`, `--db`, `--run-id`.
+`--no-cache-for`, `--mode`, `--host`, `--db`, `--run-id`, `--retry-flakes`, `--quarantine`.
 
 ## Read the result
 

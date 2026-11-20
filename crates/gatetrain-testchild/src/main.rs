@@ -12,8 +12,8 @@ fn main() {
         "print" => println!("{}", arg(1)),
         "exit" => std::process::exit(arg(1).parse().unwrap_or(1)),
         "pass" => {}
-        // `failprint TEXT`: print TEXT, exit 1 (a step that is red every time, with output a classifier can read)
-        "failprint" => {
+        // `redprint TEXT`: print TEXT, exit 1 (a step that is red every time, with output a classifier can read)
+        "redprint" => {
             println!("{}", arg(1));
             std::process::exit(1);
         }

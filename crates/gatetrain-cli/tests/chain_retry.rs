@@ -97,7 +97,7 @@ fn an_unclassified_red_is_not_retried() {
 
 #[test]
 fn a_retry_that_is_red_again_stays_red() {
-    let r = chain(&step("a", &["failprint", PORT]), None, &["--retry-flakes"]);
+    let r = chain(&step("a", &["redprint", PORT]), None, &["--retry-flakes"]);
     assert_eq!(r.code, 1, "{}", r.stdout);
     assert_eq!(r.stdout.lines().filter(|l| l.starts_with("STEP_RETRY ")).count(), 1, "re-run once, never twice: {}", r.stdout);
     assert!(r.stdout.contains("CHAIN_RETRIES a=red"), "{}", r.stdout);

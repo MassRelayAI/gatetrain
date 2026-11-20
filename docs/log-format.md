@@ -13,6 +13,9 @@ Steps may run in parallel and their lines may interleave: lines are matched to a
 | `STEP_TIME <step> <N>s` | the step's wall time in seconds; end time = `STEP_START` + `STEP_TIME` |
 | `STEP_EXIT <step> <rc>` | the step's exit code; `0` is green |
 | `STEP_CACHED <step>` | optional: the result came from the step cache, nothing ran |
+| `STEP_RETRY <step> attempt=<n> rc=<rc> class=<cls> via=<diagnose:RULE or quarantine:FINDING> test=<text>` | optional, only with `chain --retry-flakes`: the step was red with a flake or infra class (or a live quarantine row) and is re-run once on the same sha; the step's own `STEP_EXIT` is the second attempt's and its `STEP_TIME` covers both. Readers that do not know the line skip it |
+| `STEP_RETRY_REFUSED <step> <reason>` | optional: a third flaky step in one run is not retried (at most 2) |
+| `CHAIN_RETRIES <step>=green or red, ...` | optional, once, before `RED_SUMMARY`: how each retried step ended. A green here is a retry green, never a first-try green |
 | `STEP_SKIPPED <step> <reason>` | optional: the step never ran (a step it needs is not green, or a fast step was red); it is listed apart and counts in no step total |
 | `STEP_SHARD <step> <i>/<n> START <ISO time>` | optional: shard i of n of a sharded step began; the step itself still has one `STEP_START`, one `STEP_TIME` (first shard start to last shard end) and one `STEP_EXIT` (0 only when every shard and the `shard_check` are 0, else the exit code of the lowest-numbered red shard). Readers that do not know the line skip it |
 | `STEP_SHARD <step> <i>/<n> EXIT <rc> <N>s` | optional: shard i ended with this exit code after N seconds; each shard's output is in `<step>.<i>of<n>.full`; `RED_NOW` is printed once per logical step, at its first red shard |

@@ -54,6 +54,12 @@ pub struct ChainArgs {
     /// the core budget: a step with `cores = N` starts only when N of these are free (a step without `cores` counts as 1). Default: this host's core count
     #[arg(long)]
     cores: Option<usize>,
+    /// re-run a red step ONCE on the same sha when `diagnose` classes it flake-* or infra-*, or a live row of --quarantine names its test (logged as STEP_RETRY, listed in the stamp and CHAIN_RETRIES; an unclassified red is never re-run; at most 2 steps per run; sharded steps are not retried). Off by default
+    #[arg(long)]
+    retry_flakes: bool,
+    /// the tracked quarantine file for --retry-flakes: CSV `test,step,finding,added,expires`, one row per test, expiry at most 14 days after added; a lapsed row is not honoured
+    #[arg(long, requires = "retry_flakes")]
+    quarantine: Option<PathBuf>,
 }
 
 /// Median seconds per step of the ledger's history; a step with none gets the median of the known ones. None = no history.
@@ -108,7 +114,7 @@ pub fn run(a: ChainArgs) -> ExitCode {
     };
     let (db, run_id) = (a.db, a.run_id);
     let out_dir = a.out.clone();
-    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores };
+    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores, retry_flakes: a.retry_flakes, quarantine: a.quarantine };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();
         let _ = writeln!(so, "{l}");

@@ -80,6 +80,25 @@ pub struct Opts {
     pub expected: Option<std::collections::HashMap<String, f64>>,
     /// the core budget (at least 1). It gates steps only when some selected step declares `cores`
     pub cores: usize,
+    /// D446: re-run a red step ONCE on the same sha when `diagnose` classes it `flake-*`/`infra-*` or a live quarantine row names its test.
+    /// Off by default: with it off the run is byte for byte what it was before.
+    pub retry_flakes: bool,
+    /// the tracked quarantine file (`test,step,finding,added,expires`); read only with `retry_flakes`
+    pub quarantine: Option<PathBuf>,
+}
+
+/// At most this many steps of one run are re-run; a further flaky step stays red.
+pub const MAX_RETRIED_STEPS: usize = 2;
+
+/// A step that was red, re-run once, and what the second attempt gave (the stamp's `retried` list).
+#[derive(Debug, Clone)]
+pub struct RetryRec {
+    pub name: String,
+    pub first_rc: i64,
+    pub final_rc: i64,
+    pub class: String,
+    pub via: String,
+    pub test: String,
 }
 
 /// The first `n` contiguous free CPUs (`busy[i]` = CPU i is reserved), or None when no run of `n` is free.
@@ -202,6 +221,8 @@ pub struct RunRec {
     pub skips: Vec<(String, String)>,
     /// (digest = sha-256 of the stamp file's bytes, the file's text); None when no stamp was written
     pub stamp: Option<(String, String)>,
+    /// steps that were re-run once (`--retry-flakes`), in the order they finished; empty otherwise
+    pub retries: Vec<RetryRec>,
 }
 
 pub struct Outcome {
@@ -514,6 +535,23 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         })
         .collect();
     let par = o.par.max(1);
+    // D446: the quarantine rows live today, read once; a missing file is a config error, a lapsed or malformed row is dropped and named
+    let quarantine = if o.retry_flakes {
+        match &o.quarantine {
+            Some(p) => {
+                let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read the quarantine file {}: {e}", p.display()))?;
+                let (live, dropped) = crate::diagnose::live_quarantine(&text, &Ts::now_utc().iso()[..10]);
+                for (n, why) in dropped {
+                    eprintln!("chain: quarantine {} line {n}: not honoured: {why}", p.display());
+                }
+                live
+            }
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let history: crate::diagnose::History = o.expected.iter().flatten().map(|(k, v)| (k.clone(), vec![*v])).collect();
     let host = o.host.as_deref().and_then(clean_host).unwrap_or_else(host_name);
 
     // every emitted line also feeds the log digest the ledger keeps
@@ -566,6 +604,11 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let mut recs: Vec<StepRec> = Vec::new();
     let mut shard_recs: Vec<ShardRec> = Vec::new();
     let mut skips: Vec<(String, String)> = Vec::new();
+    // retry state: the wall seconds of a step's first attempt, its pending retry record, and the finished ones
+    let mut prior_secs: Vec<f64> = vec![0.0; n_steps];
+    let mut retrying: Vec<Option<RetryRec>> = vec![None; n_steps];
+    let mut retries: Vec<RetryRec> = Vec::new();
+    let mut retry_started = 0usize;
     let t_run = Instant::now();
     // the core budget: which CPUs pinned steps hold, which each step holds, and the `taskset` list each running step was started with
     let mut busy = vec![false; budget];
@@ -784,6 +827,28 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 }
             };
             let Some((rc, secs)) = fin else { continue };
+            // D446: a red whole step may be re-run ONCE on the same sha, only when its own output says flake/infra or a live quarantine row names it
+            if rc != 0 && o.retry_flakes && matches!(d.part, Part::Whole) && retrying[d.idx].is_none() && !is_sharded(step) {
+                let full = o.out.join(format!("{name}.full"));
+                let text = std::fs::read(&full).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+                let lines: Vec<String> = text.lines().map(|l| l.trim_end_matches('\r').to_string()).collect();
+                if let Some(c) = crate::diagnose::retry_cause(name, rc, secs, &lines, &history, crate::diagnose::builtin_rules(), &quarantine) {
+                    if retry_started >= MAX_RETRIED_STEPS {
+                        say(&format!("STEP_RETRY_REFUSED {name} at most {MAX_RETRIED_STEPS} steps are retried per run"));
+                    } else {
+                        let test = c.test.replace(['\r', '\n'], " ");
+                        let _ = std::fs::copy(&full, o.out.join(format!("{name}.attempt1.full")));
+                        say(&format!("STEP_RETRY {name} attempt=1 rc={rc} class={} via={} test={test}", c.cls, c.via));
+                        retry_started += 1;
+                        prior_secs[d.idx] = secs;
+                        retrying[d.idx] = Some(RetryRec { name: name.clone(), first_rc: rc, final_rc: rc, class: c.cls, via: c.via, test });
+                        running += 1;
+                        spawn_part(step, d.idx, Part::Whole, &cwd, &o.out, &tx, pin[d.idx].as_deref());
+                        continue;
+                    }
+                }
+            }
+            let secs = secs + prior_secs[d.idx];
             for k in held[d.idx].drain(..) {
                 busy[k] = false;
             }
@@ -806,8 +871,12 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 shards: i64::from(nshards(step)),
                 log_ref: format!("{name}.full"),
             });
+            let was_retried = retrying[d.idx].take().map(|mut r| {
+                r.final_rc = rc;
+                retries.push(r);
+            }).is_some();
             if rc == 0 {
-                if let (Some(cdir), Some(k), Some(sha)) = (&o.cache, &keys[d.idx], &sha) {
+                if let (Some(cdir), Some(k), Some(sha), false) = (&o.cache, &keys[d.idx], &sha, was_retried) {
                     if let Err(e) = write_entry(cdir, name, k, sha, secs, &host) {
                         eprintln!("chain: cannot write the cache entry for {name}: {e}");
                     }
@@ -824,6 +893,9 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 }
             }
         }
+    }
+    if !retries.is_empty() {
+        say(&format!("CHAIN_RETRIES {}", retries.iter().map(|r| format!("{}={}", r.name, if r.final_rc == 0 { "green" } else { "red" })).collect::<Vec<_>>().join(" ")));
     }
     say(&format!("RED_SUMMARY: {}", if reds.is_empty() { "none".to_string() } else { summary_in_file_order(plan, &reds) }));
     say("GATES_DONE");
@@ -848,13 +920,16 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     })
                 })
                 .collect();
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "v": 1, "kind": o.mode, "sha": sha, "host": host, "at": Ts::now_utc().iso(), "mode": o.mode, "par": par,
                 "total_seconds": round1(t_run.elapsed().as_secs_f64()),
                 "digest": digest, "steps": steps,
                 "cached": cached.iter().map(|&i| plan.steps[i].name.clone()).collect::<Vec<_>>(),
                 "prev": Vec::<String>::new(),
             });
+            if !retries.is_empty() {
+                body["retried"] = retries.iter().map(|r| serde_json::json!({"name": r.name, "first_rc": r.first_rc, "final_rc": r.final_rc, "class": r.class, "via": r.via, "test": r.test})).collect();
+            }
             let text = serde_json::to_string_pretty(&body).unwrap_or_default() + "\n";
             let p = o.out.join(format!("stamp-{sha}.json"));
             std::fs::write(&p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
@@ -880,6 +955,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         shards: shard_recs,
         skips,
         stamp: stamp_text,
+        retries,
     };
     Ok(Outcome { reds, stamp, record })
 }
