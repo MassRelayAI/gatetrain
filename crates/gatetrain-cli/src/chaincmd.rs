@@ -57,7 +57,7 @@ pub struct ChainArgs {
     /// re-run a red step ONCE on the same sha, ONLY when a live row of --quarantine-ref names every test that failed: the step declares its `runner`, ANSI is stripped, the runner's own failed count equals the failing ids parsed, every id is the exact `test` of a live row, and the exit code is the runner's test-failure code (1; cargo 101). No row, no retry; there is no infra retry. Logged as STEP_RETRY, CHAIN_RETRIES and `RED_SUMMARY: none; retried: ...`; listed in the stamp. At most 2 steps per run; sharded steps never. Off by default; needs --quarantine-ref
     #[arg(long, requires = "quarantine_ref")]
     retry_flakes: bool,
-    /// the quarantine file for --retry-flakes as `<ref>:<path>` (for example `origin/main:ci/flake-quarantine.csv`), read with `git show`. Refused: the index form `:path` and any ref that resolves to the commit under test (HEAD). Pass a remote-tracking ref pinned to the trusted main. CSV `test,step,finding,added,expires`, header required, `added <= today <= expires`, at most 14 days
+    /// the quarantine file for --retry-flakes as `<ref>:<path>` (for example `origin/main:ci/flake-quarantine.csv`), read with `git show`. Must be a remote-tracking ref (refs/remotes/...); refused: a local branch, a sha, HEAD~1, the index form `:path` and any ref that resolves to the commit under test (HEAD). Pass a remote-tracking ref pinned to the trusted main. CSV `test,step,finding,added,expires`, header required, `added <= today <= expires`, at most 14 days
     #[arg(long, requires = "retry_flakes")]
     quarantine_ref: Option<String>,
 }

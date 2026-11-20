@@ -83,6 +83,9 @@ pub fn parse(runner: &str, out: &str) -> Option<Outcome> {
     static YFINAL: OnceLock<Regex> = OnceLock::new();
     static YERR: OnceLock<Regex> = OnceLock::new();
     static YX: OnceLock<Regex> = OnceLock::new();
+    static CX: OnceLock<Regex> = OnceLock::new();
+    static CRES: OnceLock<Regex> = OnceLock::new();
+    static PXE: OnceLock<Regex> = OnceLock::new();
     Some(match runner {
         "vitest" => {
             let ids = ids_of(rx(&VID, r"(?m)^\s*FAIL\s+(\S.*?)\s*$"), out);
@@ -96,14 +99,22 @@ pub fn parse(runner: &str, out: &str) -> Option<Outcome> {
         }
         "cargo" => {
             let ids = ids_of(rx(&CID, r"(?m)^test (\S.*?) \.\.\. FAILED\s*$"), out);
-            Outcome { failed: sum_failed(rx(&CCOUNT, r"(?m)^test result: FAILED\. \d+ passed; (\d+) failed;"), out), ids, extra: false }
+            // a test binary that dies (SIGSEGV, abort) prints no `test result:` line: it shows as `process didn't exit successfully`, or as an
+            // `error: test failed` line with no matching `test result: FAILED` (real `cargo test --no-fail-fast` output has one per failing binary)
+            let died = out.contains("process didn't exit successfully");
+            let failed_runs = rx(&CX, r"(?m)^error: test failed").find_iter(out).count();
+            let result_lines = rx(&CRES, r"(?m)^test result: FAILED\.").find_iter(out).count();
+            Outcome { failed: sum_failed(rx(&CCOUNT, r"(?m)^test result: FAILED\. \d+ passed; (\d+) failed;"), out), ids, extra: died || failed_runs != result_lines }
         }
         "playwright" => {
             let ids = ids_of(rx(&PID, r"(?m)^\s*\d+\)\s+(.+?)(?:\s+─+)?\s*$"), out);
-            Outcome { failed: sum_failed(rx(&PCOUNT, r"(?m)^\s*(\d+) failed\s*$"), out), ids, extra: rx(&PX, r"(?m)^\s*\d+ (?:interrupted|did not run)\s*$").is_match(out) }
+            // `N error(s) was/were not a part of any test` is playwright's own wording for a failure outside every test (setup, teardown, a worker crash)
+            let extra = rx(&PX, r"(?m)^\s*\d+ (?:interrupted|did not run)\s*$").is_match(out) || rx(&PXE, r"\d+ errors? (?:was|were) not a part of any test").is_match(out);
+            Outcome { failed: sum_failed(rx(&PCOUNT, r"(?m)^\s*(\d+) failed\s*$"), out), ids, extra }
         }
         "pytest" => {
-            let ids = ids_of(rx(&YID, r"(?m)^FAILED (\S+)"), out);
+            // `FAILED <nodeid> - <message>`: the id runs to ` - ` or the end of the line (a parametrized id may hold spaces)
+            let ids = ids_of(rx(&YID, r"(?m)^FAILED (.+?)(?: - .*)?\s*$"), out);
             let fin = rx(&YFINAL, r"(?m)^=+ (.* in [\d.]+s.*?) =+\s*$").captures_iter(out).last().map(|c| c[1].to_string());
             let num = |what: &str| fin.as_deref().and_then(|f| Regex::new(&format!(r"(\d+) {what}")).ok()?.captures(f)?[1].parse::<usize>().ok());
             let errors = num("errors?").unwrap_or(0);
@@ -112,6 +123,32 @@ pub fn parse(runner: &str, out: &str) -> Option<Outcome> {
         }
         _ => return None,
     })
+}
+
+/// The runner's own final summary line must be the LAST non-blank line of the (ANSI-stripped) output. Anything after it (another command's
+/// output, a drift check, a second tool) means the runner was not the step's whole outcome: no retry. `runner` may therefore only be declared
+/// on a step whose command is a single runner invocation.
+pub fn final_line_ok(runner: &str, out: &str) -> bool {
+    static V: OnceLock<Regex> = OnceLock::new();
+    static N: OnceLock<Regex> = OnceLock::new();
+    static C: OnceLock<Regex> = OnceLock::new();
+    static P: OnceLock<Regex> = OnceLock::new();
+    static Y: OnceLock<Regex> = OnceLock::new();
+    let Some(last) = out.lines().rev().find(|l| !l.trim().is_empty()) else { return false };
+    let re = match runner {
+        // vitest ends with `Duration  1.2s (...)` after the `Tests` line
+        "vitest" => rx(&V, r"^\s*Duration\s+\S"),
+        // node: TAP `# duration_ms 12` or the spec reporter's `ℹ duration_ms 12`
+        "node" => rx(&N, r"^(?:#|ℹ) duration_ms \d"),
+        // cargo: `error: test failed, to rerun pass ...`, or the indented target list of `error: N targets failed:`
+        "cargo" => rx(&C, r"^error: test failed, to rerun pass |^\s+`.+`\s*$"),
+        // playwright's summary ends with a count line (`N passed (2s)`, `N failed`, ...) or a failed-test header under one
+        "playwright" => rx(&P, r"^\s*\d+ (?:passed|failed|flaky|skipped|interrupted|did not run)\b|^\s+\S.* › .*$"),
+        // pytest: the `=== 1 failed, 3 passed in 0.12s ===` line
+        "pytest" => rx(&Y, r"^=+ .* in [\d.]+s.*=+\s*$"),
+        _ => return false,
+    };
+    re.is_match(last)
 }
 
 /// One live row of a quarantine file.
@@ -244,6 +281,9 @@ pub fn retry_cause(runner: Option<&str>, step: &str, rc: i64, output: &str, quar
     if rx(&BELT_RE, BELT).is_match(&out) {
         return None;
     }
+    if !final_line_ok(runner, &out) {
+        return None;
+    }
     let p = parse(runner, &out)?;
     if p.extra || p.ids.is_empty() || p.failed != Some(p.ids.len()) {
         return None;
@@ -305,11 +345,63 @@ mod tests {
         assert_eq!(strip_ansi("\u{1b}[31m FAIL \u{1b}[39m  a > b"), " FAIL   a > b");
     }
 
-    const VITEST: &str = "\u{1b}[31m FAIL \u{1b}[39m  a.test.ts > pays\nAssertionError: x\n\u{1b}[2m      Tests \u{1b}[22m \u{1b}[1m\u{1b}[31m1 failed\u{1b}[39m | 3 passed (4)\n";
-    const NODE: &str = "not ok 1 - pays\n# tests 4\n# pass 3\n# fail 1\n";
-    const CARGO: &str = "test m::pays ... FAILED\ntest result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+    const VITEST: &str = "\u{1b}[31m FAIL \u{1b}[39m  a.test.ts > pays\nAssertionError: x\n\u{1b}[2m      Tests \u{1b}[22m \u{1b}[1m\u{1b}[31m1 failed\u{1b}[39m | 3 passed (4)\n   Duration  1.2s (transform 1ms)\n";
+    const NODE: &str = "not ok 1 - pays\n# tests 4\n# pass 3\n# fail 1\n# duration_ms 12.3\n";
+    const CARGO: &str = "test m::pays ... FAILED\ntest result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `--test a`\n";
     const PLAY: &str = "  1) [chromium] › a.spec.ts:3:1 › pays ──────────\n  1 failed\n    [chromium] › a.spec.ts:3:1 › pays\n  3 passed (2s)\n";
     const PYTEST: &str = "=== short test summary info ===\nFAILED tests/a.py::test_pays - assert 1 == 2\n=== 1 failed, 3 passed in 0.12s ===\n";
+    const DUR: &str = "   Duration  1s\n";
+
+    /// Real `cargo test --no-fail-fast` output (cargo 1.98, paths shortened): binary `a` has a failing test, binary `b` dies with SIGSEGV
+    /// and prints no `test result:` line.
+    const CARGO_X1: &str = r#"   Compiling cap v0.1.0 (/tmp/cap)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.97s
+     Running unittests src/lib.rs (target/debug/deps/cap-a4e771e757e5195c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/a.rs (target/debug/deps/a-1016cff4e1fb7a79)
+
+running 2 tests
+test ok ... ok
+test pays ... FAILED
+
+failures:
+
+---- pays stdout ----
+
+thread 'pays' (3851872) panicked at tests/a.rs:2:13:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pays
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test a`
+     Running tests/b.rs (target/debug/deps/b-8e92244dbb1a6189)
+
+running 1 test
+error: test failed, to rerun pass `--test b`
+
+Caused by:
+  process didn't exit successfully: `target/debug/deps/b-8e92244dbb1a6189` (signal: 11, SIGSEGV: invalid memory reference)
+   Doc-tests cap
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 2 targets failed:
+    `--test a`
+    `--test b`
+"#;
 
     #[test]
     fn a_quarantined_failure_with_a_matching_count_is_retried_for_every_runner() {
@@ -342,20 +434,20 @@ mod tests {
 
     #[test]
     fn a_count_that_is_missing_or_differs_is_never_retried() {
-        let two = "FAIL  a.test.ts > pays\nFAIL  a.test.ts > refunds\n      Tests  1 failed | 3 passed (4)\n";
-        assert!(go("vitest", 1, two, "a.test.ts > pays").is_none(), "two ids, one failed");
-        assert!(go("vitest", 1, "FAIL  a.test.ts > pays\n", "a.test.ts > pays").is_none(), "no count at all");
-        let more = "FAIL  a.test.ts > pays\n      Tests  2 failed | 3 passed (5)\n";
-        assert!(go("vitest", 1, more, "a.test.ts > pays").is_none(), "a failure with no id");
-        assert!(go("vitest", 1, "      Tests  1 failed (1)\nTypeError: x is not a function\n", "a > b").is_none(), "no id parsed");
+        let two = format!("FAIL  a.test.ts > pays\nFAIL  a.test.ts > refunds\n      Tests  1 failed | 3 passed (4)\n{DUR}");
+        assert!(go("vitest", 1, &two, "a.test.ts > pays").is_none(), "two ids, one failed");
+        assert!(go("vitest", 1, &format!("FAIL  a.test.ts > pays\n{DUR}"), "a.test.ts > pays").is_none(), "no count at all");
+        let more = format!("FAIL  a.test.ts > pays\n      Tests  2 failed | 3 passed (5)\n{DUR}");
+        assert!(go("vitest", 1, &more, "a.test.ts > pays").is_none(), "a failure with no id");
+        assert!(go("vitest", 1, &format!("      Tests  1 failed (1)\nTypeError: x is not a function\n{DUR}"), "a > b").is_none(), "no id parsed");
     }
 
     #[test]
     fn a_setup_or_collection_error_beside_a_quarantined_failure_is_never_retried() {
-        let q1 = format!("{VITEST}\n Unhandled Errors \nError: boom\n");
+        let q1 = format!("{VITEST}\n Unhandled Errors \nError: boom\n{DUR}");
         assert!(go("vitest", 1, &q1, "a.test.ts > pays").is_none(), "Q1");
-        let collect = "FAIL  a.test.ts [ a.test.ts ]\n      Tests  1 failed (1)\n";
-        assert!(go("vitest", 1, collect, "a.test.ts [ a.test.ts ]").is_none(), "a suite failure is not a test id");
+        let collect = format!("FAIL  a.test.ts [ a.test.ts ]\n      Tests  1 failed (1)\n{DUR}");
+        assert!(go("vitest", 1, &collect, "a.test.ts [ a.test.ts ]").is_none(), "a suite failure is not a test id");
         let py = format!("{PYTEST}ERROR tests/b.py - ImportError\n=== 1 failed, 1 error in 0.1s ===\n");
         assert!(go("pytest", 1, &py, "tests/a.py::test_pays").is_none());
         let pw = PLAY.replace("1 failed", "1 failed\n  1 interrupted");
@@ -374,6 +466,51 @@ mod tests {
     #[test]
     fn a_compile_error_or_a_timeout_note_beside_a_quarantined_failure_is_never_retried() {
         assert!(go("cargo", 101, &format!("error[E0599]: no method\n{CARGO}"), "m::pays").is_none());
-        assert!(go("vitest", 1, &format!("{VITEST}chain: timed out after 5 s\n"), "a.test.ts > pays").is_none());
+        assert!(go("vitest", 1, &format!("chain: timed out after 5 s\n{VITEST}"), "a.test.ts > pays").is_none());
+    }
+
+    #[test]
+    fn x1_a_cargo_binary_that_dies_beside_a_quarantined_failure_is_never_retried() {
+        // the real output parses to one quarantined id and a count of 1, rc 101: only the dead binary tells it apart
+        let p = parse("cargo", CARGO_X1).unwrap();
+        assert_eq!((p.ids.as_slice(), p.failed), (["pays".to_string()].as_slice(), Some(1)));
+        assert!(p.extra, "a SIGSEGV binary is an error with no id");
+        assert!(go("cargo", 101, CARGO_X1, "pays").is_none());
+        // without the `process didn't exit successfully` line, the unmatched `error: test failed` still gives it away
+        let no_cause = CARGO_X1.replace("process didn't exit successfully", "process ended");
+        assert!(go("cargo", 101, &no_cause, "pays").is_none(), "2 `error: test failed` lines against 1 `test result: FAILED`");
+    }
+
+    #[test]
+    fn x2_a_playwright_error_outside_every_test_is_never_retried() {
+        // playwright's own wording (lib/runner/index.js generateSummaryMessage): `1 error was not a part of any test, see above for details`
+        let one = format!("{PLAY}  1 error was not a part of any test, see above for details\n");
+        assert!(go("playwright", 1, &one, "[chromium] › a.spec.ts:3:1 › pays").is_none());
+        assert!(parse("playwright", &one).unwrap().extra);
+        let two = PLAY.replace("  3 passed (2s)", "  3 passed (2s)\n  2 errors were not a part of any test, see above for details");
+        assert!(parse("playwright", &two).unwrap().extra);
+    }
+
+    #[test]
+    fn x3_the_runner_must_be_the_whole_outcome_the_last_line_is_its_own_summary() {
+        let drift = format!("{VITEST}ledger drift: 1000 != 999\n");
+        assert!(go("vitest", 1, &drift, "a.test.ts > pays").is_none(), "something ran after the runner");
+        assert!(go("vitest", 1, &format!("{VITEST}\n\n"), "a.test.ts > pays").is_some(), "trailing blank lines are not output");
+        for (runner, out) in [("vitest", VITEST), ("node", NODE), ("cargo", CARGO), ("playwright", PLAY), ("pytest", PYTEST)] {
+            assert!(final_line_ok(runner, out), "{runner}");
+            assert!(!final_line_ok(runner, &format!("{out}extra line\n")), "{runner}: a line after the summary");
+        }
+        assert!(final_line_ok("cargo", CARGO_X1), "the target list is cargo's own last line");
+        assert!(!final_line_ok("vitest", ""));
+    }
+
+    #[test]
+    fn x8_a_pytest_id_runs_to_the_dash_separator_or_the_end_of_line() {
+        let out = "FAILED tests/a.py::test_total[eur 1000] - assert 1 == 2\n=== 1 failed in 0.1s ===\n";
+        assert_eq!(parse("pytest", out).unwrap().ids, vec!["tests/a.py::test_total[eur 1000]"]);
+        assert!(go("pytest", 1, out, "tests/a.py::test_total[eur").is_none(), "a prefix row does not cover it");
+        assert!(go("pytest", 1, out, "tests/a.py::test_total[eur 1000]").is_some());
+        let bare = "FAILED tests/a.py::test_total[eur 1000]\n=== 1 failed in 0.1s ===\n";
+        assert_eq!(parse("pytest", bare).unwrap().ids, vec!["tests/a.py::test_total[eur 1000]"]);
     }
 }

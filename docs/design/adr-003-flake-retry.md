@@ -33,6 +33,7 @@ infrastructure outage is the consumer's driver's job (it waits for a fix or reru
    kill, abort) and the timeout codes 124, 125, 127 never retry.
 6. As an extra belt (no longer the main gate): no compile error (`error[E`, `could not compile`, `error TS`, `SyntaxError`) and no gatetrain
    timeout note in the output.
+7. **The runner is the step's whole outcome.** The runner's own final summary line (vitest `Duration`, node `duration_ms`, cargo's `error: test failed` or its target list, playwright's count lines, pytest's `=== ... in 0.12s ===`) must be the LAST non-blank line of the output; anything after it (another command, a drift check) means no retry. So `runner` may only be declared on a step whose command is a single runner invocation.8. Cargo: a test binary that dies (SIGSEGV, abort) is an error with no id: `process didn't exit successfully`, or more `error: test failed` lines than `test result: FAILED` lines, means no retry. Playwright: `N error(s) was/were not a part of any test` (its own wording for a failure outside every test) means no retry. A pytest id runs to ` - ` or the end of the line (a parametrized id may hold spaces).
 
 Also never retried: a sharded step, an output over 4 MiB, a third retried step in one run (`STEP_RETRY_REFUSED`; at most 2), and a second red
 (final). Without `--retry-flakes` the run is byte for byte what it was.
@@ -44,7 +45,7 @@ only when it has five fields, a finding id without spaces, real calendar dates (
 `expires - added <= 14` days. Dropped rows are named on stderr with their line number.
 
 **Ownership and hygiene.** The file is read ONLY from a trusted ref the caller passes, `--quarantine-ref <ref>:<path>`, with `git show`: never
-from the working tree under test. The ref must name a commit **other than the checkout's own HEAD**, and the index form `:path` is refused,
+from the working tree under test. The ref must be a **remote-tracking ref** (it resolves as `refs/remotes/...`; a local branch, a sha, `HEAD~1` and the index form `:path` are refused) and name a commit **other than the checkout's own HEAD**,
 each with a clear error; otherwise the change under test could quarantine its own failure. **The consumer must pass a remote-tracking ref pinned
 to its trusted main** (for example `origin/main:<path>`). `--retry-flakes` and `--quarantine-ref` require each other.
 

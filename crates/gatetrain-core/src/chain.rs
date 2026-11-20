@@ -549,6 +549,10 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 Some((rev, path)) if !rev.is_empty() && !path.is_empty() => rev,
                 _ => return Err(format!("--quarantine-ref {r:?} must be <ref>:<path> with a ref; the index form :path is refused")),
             };
+            // a remote-tracking ref only: a local branch, a sha or HEAD~1 is something the change under test could have moved or written
+            if !git_out(&cwd, &["rev-parse", "--symbolic-full-name", rev]).is_some_and(|full| full.starts_with("refs/remotes/")) {
+                return Err(format!("--quarantine-ref {r:?}: {rev:?} must be a remote-tracking ref (refs/remotes/...), for example origin/main"));
+            }
             let tip = git_out(&cwd, &["rev-parse", &format!("{rev}^{{commit}}")]).ok_or_else(|| format!("--quarantine-ref: {rev:?} is not a commit"))?;
             if git_out(&cwd, &["rev-parse", "HEAD"]).is_some_and(|head| head == tip) {
                 return Err(format!("--quarantine-ref {r:?} resolves to the commit under test: pass a remote-tracking ref pinned to the trusted main, never HEAD"));
