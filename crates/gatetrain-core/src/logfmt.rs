@@ -462,7 +462,7 @@ pub fn parse_log(text: &str) -> Result<ParsedLog> {
                 p.red_now.push((m[1].to_string(), parse_int(&m[2])?, at));
             }
         } else if line.starts_with("RED_SUMMARY") {
-            // `RED_SUMMARY: none; retried: a(infra-port)`: the reds stay what they were; the suffix names a retried green and is read by `retries`
+            // `RED_SUMMARY: none; retried: a(quarantine)`: the reds stay what they were; the suffix names a retried green and is read by `retries`
             let s = r.summary.captures(line).map(|m| m[1].trim().to_string()).unwrap_or_default();
             p.red_summary = Some(s.split_once("; retried:").map_or(s.clone(), |(head, _)| head.trim().to_string()));
         } else if line.starts_with("GATES_DONE") {

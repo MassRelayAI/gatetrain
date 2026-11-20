@@ -50,6 +50,8 @@ pub struct Step {
     pub shard_env: bool,
     /// CPU cores this step needs (1 or more; no `cores` counts as 1). With a core budget the scheduler never starts it unless that many are free; on Linux it runs under `taskset`
     pub cores: Option<u32>,
+    /// the step's test runner (`vitest`, `node`, `cargo`, `playwright`, `pytest`); only with it can `--retry-flakes` read the step's result lines. No runner = never retried
+    pub runner: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,7 +82,7 @@ pub struct Opts {
     pub expected: Option<std::collections::HashMap<String, f64>>,
     /// the core budget (at least 1). It gates steps only when some selected step declares `cores`
     pub cores: usize,
-    /// D446: re-run a red step ONCE on the same sha under the strict rule of `retry.rs` (a live quarantine row naming the exact failing test, or a pure infra failure).
+    /// D446: re-run a red step ONCE on the same sha under the strict rule of `retry.rs` (a live quarantine row naming every failing test, proved by the runner's own failed count).
     /// Off by default: with it off the run is byte for byte what it was before.
     pub retry_flakes: bool,
     /// `<ref>:<path>` of the tracked quarantine file, read with `git show` from a trusted ref (never the working tree); read only with `retry_flakes`
@@ -258,6 +260,9 @@ pub fn load(text: &str) -> Result<Plan, String> {
             return Err(format!("step {:?}: timeout_s must be positive", s.name));
         }
         check_shards(s)?;
+        if let Some(r) = s.runner.as_deref().filter(|r| !crate::retry::RUNNERS.contains(r)) {
+            return Err(format!("step {:?}: runner {r:?} is not one of {}", s.name, crate::retry::RUNNERS.join(", ")));
+        }
         if s.cores == Some(0) {
             return Err(format!("step {:?}: cores must be at least 1", s.name));
         }
@@ -536,10 +541,19 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         .collect();
     let par = o.par.max(1);
     // D446: the quarantine rows live today, read ONCE from a trusted ref (`git show <ref>:<path>`), never from the working tree under test.
-    // No ref = no quarantine rows (infra retries only). An unreadable ref or a file without its header row is a config error.
+    // The ref must name a commit other than the checkout's own HEAD (the change under test must not be able to quarantine its own failure),
+    // and the index form `:path` is refused. Without rows nothing is ever retried.
     let quarantine = match (o.retry_flakes, &o.quarantine_ref) {
         (true, Some(r)) => {
-            let text = git_out(&cwd, &["show", r]).ok_or_else(|| format!("cannot read the quarantine file {r:?} with `git show` (pass --quarantine-ref <ref>:<path>)"))?;
+            let rev = match r.split_once(':') {
+                Some((rev, path)) if !rev.is_empty() && !path.is_empty() => rev,
+                _ => return Err(format!("--quarantine-ref {r:?} must be <ref>:<path> with a ref; the index form :path is refused")),
+            };
+            let tip = git_out(&cwd, &["rev-parse", &format!("{rev}^{{commit}}")]).ok_or_else(|| format!("--quarantine-ref: {rev:?} is not a commit"))?;
+            if git_out(&cwd, &["rev-parse", "HEAD"]).is_some_and(|head| head == tip) {
+                return Err(format!("--quarantine-ref {r:?} resolves to the commit under test: pass a remote-tracking ref pinned to the trusted main, never HEAD"));
+            }
+            let text = git_out(&cwd, &["show", r]).ok_or_else(|| format!("cannot read the quarantine file {r:?} with `git show`"))?;
             let (live, dropped) = crate::retry::parse_quarantine(&text, &Ts::now_utc().iso()[..10]).map_err(|e| format!("quarantine {r}: {e}"))?;
             for (n, why) in dropped {
                 eprintln!("chain: quarantine {r} line {n}: not honoured: {why}");
@@ -828,7 +842,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 let full = o.out.join(format!("{name}.full"));
                 let fits = std::fs::metadata(&full).is_ok_and(|m| m.len() <= crate::retry::MAX_OUTPUT_BYTES);
                 let text = if fits { std::fs::read(&full).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default() } else { String::new() };
-                if let Some(c) = fits.then(|| crate::retry::retry_cause(name, rc, &text, &quarantine)).flatten() {
+                if let Some(c) = fits.then(|| crate::retry::retry_cause(step.runner.as_deref(), name, rc, &text, &quarantine)).flatten() {
                     if retry_started >= MAX_RETRIED_STEPS {
                         say(&format!("STEP_RETRY_REFUSED {name} at most {MAX_RETRIED_STEPS} steps are retried per run"));
                     } else {

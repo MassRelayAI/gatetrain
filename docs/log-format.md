@@ -13,7 +13,7 @@ Steps may run in parallel and their lines may interleave: lines are matched to a
 | `STEP_TIME <step> <N>s` | the step's wall time in seconds; end time = `STEP_START` + `STEP_TIME` |
 | `STEP_EXIT <step> <rc>` | the step's exit code; `0` is green |
 | `STEP_CACHED <step>` | optional: the result came from the step cache, nothing ran |
-| `STEP_RETRY <step> attempt=<n> rc=<rc> class=<cls> via=<infra:CLASS or quarantine:FINDING> test=<ids joined by " ;; ">` | optional, only with `chain --retry-flakes`: the step was red under the strict rule of [ADR 003](design/adr-003-flake-retry.md) and is re-run once on the same sha; the step's own `STEP_EXIT` is the second attempt's and its `STEP_TIME` covers both. Readers that do not know the line skip it |
+| `STEP_RETRY <step> attempt=<n> rc=<rc> class=quarantine via=quarantine:<finding> test=<ids joined by " ;; ">` | optional, only with `chain --retry-flakes`: the step was red and every failing test is a live quarantine row ([ADR 003](design/adr-003-flake-retry.md)), so it is re-run once on the same sha; the step's own `STEP_EXIT` is the second attempt's and its `STEP_TIME` covers both. Readers that do not know the line skip it |
 | `STEP_RETRY_REFUSED <step> <reason>` | optional: a third flaky step in one run is not retried (at most 2) |
 | `CHAIN_RETRIES <step>=green or red, ...` | optional, once, before `RED_SUMMARY`: how each retried step ended. A green here is a retry green, never a first-try green |
 | `STEP_SKIPPED <step> <reason>` | optional: the step never ran (a step it needs is not green, or a fast step was red); it is listed apart and counts in no step total |
@@ -22,7 +22,7 @@ Steps may run in parallel and their lines may interleave: lines are matched to a
 | `CHAIN_OUT <folder>` | optional, once, after `CHAIN_PARALLEL`: the absolute `--out` folder holding the run's `<step>.full` files, so `diagnose` can read a red step's output from the log alone (a log copied to another machine names a folder that is not there, and `--out` names the right one) |
 | `CHAIN_ORDER longest\|file` | optional, once: which rule started ready steps first (`longest` = by the ledger's median duration). `CHAIN_CORES <k>` follows when a step declared `cores`: the run's core budget |
 | `RED_NOW <step> rc=<n> at <ISO time> (<note>)` | printed the moment a step fails, so a watcher can react before the run ends |
-| `RED_SUMMARY: <step>(rc=<n>) ... | none` | once, at the end: every red, or `none`. After a retry the line ends `; retried: <step>(<class>) ...` (for example `none; retried: a(infra-port)`): the retried steps were NOT first-try greens, and a reader that compares the whole line with `none` must read the suffix |\| none` | once, at the end: every red, or `none` |
+| `RED_SUMMARY: <step>(rc=<n>) ...` or `RED_SUMMARY: none` | once, at the end: every red, or `none`. After a retry the line ends `; retried: <step>(<class>) ...` (for example `none; retried: a(quarantine)`): the retried steps were NOT first-try greens, and a reader that compares the whole line with `none` must read the suffix |
 | `GATES_DONE` | once, last: the run finished (green or red) |
 
 Rules gatetrain applies:

@@ -1,92 +1,117 @@
-//! Retry eligibility (D446, ADR 003). This is its OWN strict rule: it never reads the `diagnose` rule table, whose classes advise a
-//! person and were not written to decide a re-run. When in doubt, never retry.
+//! Retry eligibility (D446, ADR 003). **The only path is the quarantine**: a red step is re-run once only when a live, tracked
+//! quarantine row names every test that failed. There is no infra auto-retry and no list of "real failure" wording to keep up to date:
+//! a rule that must recognise every way a run can go wrong loses to the next runner. This rule instead needs the run to *prove* that it
+//! failed only in quarantined tests, by construction:
 //!
-//! A red step may be re-run once only when ONE of these holds:
-//! 1. **Quarantine.** Every failing test id in its output (vitest `FAIL <file> > <name>`, cargo `test <name> ... FAILED`, node
-//!    `not ok N - <name>`) is the EXACT `test` of a live quarantine row for this step, and there is at least one id.
-//! 2. **Infra.** The output shows an infra signature ([`INFRA`]) and nothing of the deny set ([`DENY`]): no assertion, panic, failing
-//!    test line, compile error or timeout anywhere in it, in or outside a block.
-//!
-//! Never retried: a step killed by its timeout (rc 124), whose worker died (125) or that could not start (127), and any output over
-//! [`MAX_OUTPUT_BYTES`] (it cannot be read whole, so it cannot be judged).
+//! 1. the step declares its test runner (`runner = "vitest"|"node"|"cargo"|"playwright"|"pytest"`); an undeclared runner is never retried;
+//! 2. ANSI colour is stripped, then the runner's own result lines are parsed;
+//! 3. the runner's own failed count equals the number of failing test ids parsed (a missing or different count, an unhandled error, a
+//!    setup or collection error, a worker crash: no retry);
+//! 4. every parsed id is the EXACT `test` of a live quarantine row for this step;
+//! 5. the exit code is the runner's documented test-failure code (1; cargo 101). 0, other codes, anything 128 or above (a signal: segfault,
+//!    OOM kill, abort) and the timeout codes 124, 125, 127 never retry;
+//! 6. as an extra belt, no compile error and no gatetrain timeout note in the output.
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// A step's output larger than this is never judged: the deny set must see all of it.
+/// A step's output larger than this is never judged.
 pub const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 /// The first line a quarantine file must carry.
 pub const QUARANTINE_HEADER: &str = "test,step,finding,added,expires";
 /// Longest life of a quarantine row, in days (`expires` minus `added`).
 pub const MAX_QUARANTINE_DAYS: i64 = 14;
+/// The runners a step may declare.
+pub const RUNNERS: &[&str] = &["vitest", "node", "cargo", "playwright", "pytest"];
 
-/// What an infra red looks like: (class, pattern). The class is what the log and the stamp print.
-pub const INFRA: &[(&str, &str)] = &[
-    ("infra-docker", r"(?i)Cannot connect to the Docker daemon|docker daemon is not running|error during connect: .*docker"),
-    ("infra-port", r"(?i)address already in use|\bEADDRINUSE\b|port is already allocated|failed to bind host port"),
-    ("infra-dns", r"(?i)Temporary failure in name resolution|\bEAI_AGAIN\b"),
-];
+/// Extra belt: a compile error anywhere, or gatetrain's own timeout note, is never a flake.
+const BELT: &str = r"error\[E\d+\]|could not compile|error TS\d+|\bSyntaxError\b|chain: timed out";
 
-/// Anything here, anywhere in a step's output, means the red may be a real defect: no infra retry. (name, pattern)
-pub const DENY: &[(&str, &str)] = &[
-    ("assertion", r"(?i)AssertionError|ERR_ASSERTION|\bassertion\b|\bexpected\b[^\n]*\bto\b"),
-    ("panic", r"panicked at|(?m)^\s*panic:"),
-    ("failing-test", r"(?m)^\s*(?:FAIL|FAILED)\b|\bFAILED\b|(?m)^\s*not ok\b|[✖×]"),
-    ("compile", r"error\[E\d+\]|could not compile|error TS\d+|\bSyntaxError\b"),
-    ("timeout", r"(?i)\btime[d ]?-? ?out\b|chain: timed out"),
-];
-
-/// Always fatal to a retry, quarantine or not: a compile error or a timeout is never a flake.
-const NEVER: &[&str] = &["compile", "timeout"];
-
-type Table = &'static [(&'static str, &'static str)];
-type Cell = OnceLock<Vec<(&'static str, Regex)>>;
-
-fn compiled(table: Table, cell: &'static Cell) -> &'static [(&'static str, Regex)] {
-    cell.get_or_init(|| table.iter().map(|(n, p)| (*n, Regex::new(p).expect("retry table regex"))).collect())
+fn rx(cell: &'static OnceLock<Regex>, p: &str) -> &'static Regex {
+    cell.get_or_init(|| Regex::new(p).expect("retry regex"))
 }
 
-fn infra() -> &'static [(&'static str, Regex)] {
-    static C: Cell = OnceLock::new();
-    compiled(INFRA, &C)
-}
-
-fn deny() -> &'static [(&'static str, Regex)] {
-    static C: Cell = OnceLock::new();
-    compiled(DENY, &C)
-}
-
-/// The names of the deny rows an output trips (empty = none).
-pub fn deny_hits(output: &str) -> Vec<&'static str> {
-    deny().iter().filter(|(_, r)| r.is_match(output)).map(|(n, _)| *n).collect()
-}
-
-fn id_res() -> &'static [Regex] {
-    static C: OnceLock<Vec<Regex>> = OnceLock::new();
-    C.get_or_init(|| {
-        [r"(?m)^\s*FAIL\s+(\S.*?)\s*$", r"(?m)^test (\S.*?) \.\.\. FAILED\s*$", r"(?m)^\s*not ok \d+ - (.+?)\s*$"].iter().map(|p| Regex::new(p).unwrap()).collect()
-    })
+/// Remove ANSI escape sequences (colours, cursor moves).
+pub fn strip_ansi(s: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    rx(&R, r"\x1b\[[0-9;?]*[ -/]*[@-~]").replace_all(s, "").into_owned()
 }
 
 fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The failing test ids of an output, in order of first appearance, whitespace-normalised, without repeats.
-pub fn failing_ids(output: &str) -> Vec<String> {
-    let mut hits: Vec<(usize, String)> = Vec::new();
-    for r in id_res() {
-        for c in r.captures_iter(output) {
-            hits.push((c.get(0).unwrap().start(), norm(&c[1])));
+/// What a runner's output proves: the failing ids it names, the failed count it states, and whether anything else went wrong.
+#[derive(Debug, Default, PartialEq)]
+pub struct Outcome {
+    pub ids: Vec<String>,
+    /// the runner's own number of failed tests; None when it printed none
+    pub failed: Option<usize>,
+    /// a setup, collection, unhandled or crash signal the ids do not cover
+    pub extra: bool,
+}
+
+fn ids_of(re: &Regex, out: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for c in re.captures_iter(out) {
+        let id = norm(&c[1]);
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
-    hits.sort();
-    let mut out: Vec<String> = Vec::new();
-    for (_, id) in hits {
-        if !out.contains(&id) {
-            out.push(id);
+    ids
+}
+
+fn sum_failed(re: &Regex, out: &str) -> Option<usize> {
+    let all: Vec<usize> = re.captures_iter(out).filter_map(|c| c[1].parse().ok()).collect();
+    (!all.is_empty()).then(|| all.iter().sum())
+}
+
+/// Parse an ANSI-stripped output with one runner's rules. None = not a known runner.
+pub fn parse(runner: &str, out: &str) -> Option<Outcome> {
+    static VID: OnceLock<Regex> = OnceLock::new();
+    static VCOUNT: OnceLock<Regex> = OnceLock::new();
+    static VX: OnceLock<Regex> = OnceLock::new();
+    static NID: OnceLock<Regex> = OnceLock::new();
+    static NCOUNT: OnceLock<Regex> = OnceLock::new();
+    static NX: OnceLock<Regex> = OnceLock::new();
+    static CID: OnceLock<Regex> = OnceLock::new();
+    static CCOUNT: OnceLock<Regex> = OnceLock::new();
+    static PID: OnceLock<Regex> = OnceLock::new();
+    static PCOUNT: OnceLock<Regex> = OnceLock::new();
+    static PX: OnceLock<Regex> = OnceLock::new();
+    static YID: OnceLock<Regex> = OnceLock::new();
+    static YFINAL: OnceLock<Regex> = OnceLock::new();
+    static YERR: OnceLock<Regex> = OnceLock::new();
+    static YX: OnceLock<Regex> = OnceLock::new();
+    Some(match runner {
+        "vitest" => {
+            let ids = ids_of(rx(&VID, r"(?m)^\s*FAIL\s+(\S.*?)\s*$"), out);
+            // a suite-level failure (`FAIL file [ file ]`) names no test: it counts as an error with no id
+            let extra = rx(&VX, r"Unhandled (?:Errors|Rejection)|Vitest caught \d+ unhandled").is_match(out) || ids.iter().any(|i| !i.contains(" > "));
+            Outcome { failed: sum_failed(rx(&VCOUNT, r"(?m)^\s*Tests\s+(\d+) failed"), out), ids, extra }
         }
-    }
-    out
+        "node" => {
+            let ids = ids_of(rx(&NID, r"(?m)^\s*not ok \d+ - (.+?)\s*$"), out);
+            Outcome { failed: sum_failed(rx(&NCOUNT, r"(?m)^(?:#|ℹ) fail (\d+)\s*$"), out), ids, extra: rx(&NX, r"(?m)^(?:#|ℹ) cancelled [1-9]").is_match(out) }
+        }
+        "cargo" => {
+            let ids = ids_of(rx(&CID, r"(?m)^test (\S.*?) \.\.\. FAILED\s*$"), out);
+            Outcome { failed: sum_failed(rx(&CCOUNT, r"(?m)^test result: FAILED\. \d+ passed; (\d+) failed;"), out), ids, extra: false }
+        }
+        "playwright" => {
+            let ids = ids_of(rx(&PID, r"(?m)^\s*\d+\)\s+(.+?)(?:\s+─+)?\s*$"), out);
+            Outcome { failed: sum_failed(rx(&PCOUNT, r"(?m)^\s*(\d+) failed\s*$"), out), ids, extra: rx(&PX, r"(?m)^\s*\d+ (?:interrupted|did not run)\s*$").is_match(out) }
+        }
+        "pytest" => {
+            let ids = ids_of(rx(&YID, r"(?m)^FAILED (\S+)"), out);
+            let fin = rx(&YFINAL, r"(?m)^=+ (.* in [\d.]+s.*?) =+\s*$").captures_iter(out).last().map(|c| c[1].to_string());
+            let num = |what: &str| fin.as_deref().and_then(|f| Regex::new(&format!(r"(\d+) {what}")).ok()?.captures(f)?[1].parse::<usize>().ok());
+            let errors = num("errors?").unwrap_or(0);
+            let extra = errors > 0 || rx(&YX, r"(?m)^ERROR ").is_match(out) || rx(&YERR, r"(?m)^=+ ERRORS =+").is_match(out);
+            Outcome { failed: num("failed"), ids, extra }
+        }
+        _ => return None,
+    })
 }
 
 /// One live row of a quarantine file.
@@ -191,37 +216,44 @@ pub fn parse_quarantine(text: &str, today: &str) -> Result<Parsed, String> {
 /// Why a red step may be re-run once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetryCause {
-    /// `quarantine` or an [`INFRA`] class
+    /// always `quarantine`
     pub cls: String,
-    /// `quarantine:<finding>` or `infra:<class>`
+    /// `quarantine:<finding>`
     pub via: String,
-    /// every cause named: all failing test ids (quarantine) or the infra class (infra)
+    /// every failing test id, all of them quarantined
     pub tests: Vec<String>,
 }
 
+/// The documented test-failure exit code of a runner.
+fn failure_code(runner: &str) -> i64 {
+    if runner == "cargo" {
+        101
+    } else {
+        1
+    }
+}
+
 /// The strict rule. `output` is the step's whole output; None = the step may not be re-run.
-pub fn retry_cause(step: &str, rc: i64, output: &str, quarantine: &[QuarantineRow]) -> Option<RetryCause> {
-    if rc == 0 || matches!(rc, 124 | 125 | 127) {
+pub fn retry_cause(runner: Option<&str>, step: &str, rc: i64, output: &str, quarantine: &[QuarantineRow]) -> Option<RetryCause> {
+    let runner = runner.filter(|r| RUNNERS.contains(r))?;
+    if rc != failure_code(runner) {
         return None;
     }
-    let hits = deny_hits(output);
-    if hits.iter().any(|h| NEVER.contains(h)) {
+    let out = strip_ansi(output);
+    static BELT_RE: OnceLock<Regex> = OnceLock::new();
+    if rx(&BELT_RE, BELT).is_match(&out) {
         return None;
     }
-    let ids = failing_ids(output);
-    if !ids.is_empty() {
-        let mut finding = None;
-        for id in &ids {
-            let row = quarantine.iter().find(|q| q.step == step && q.test == *id)?;
-            finding.get_or_insert(row.finding.clone());
-        }
-        return Some(RetryCause { cls: "quarantine".into(), via: format!("quarantine:{}", finding?), tests: ids });
-    }
-    if !hits.is_empty() {
+    let p = parse(runner, &out)?;
+    if p.extra || p.ids.is_empty() || p.failed != Some(p.ids.len()) {
         return None;
     }
-    let (cls, _) = infra().iter().find(|(_, r)| r.is_match(output))?;
-    Some(RetryCause { cls: (*cls).into(), via: format!("infra:{cls}"), tests: vec![(*cls).into()] })
+    let mut finding = None;
+    for id in &p.ids {
+        let row = quarantine.iter().find(|q| q.step == step && q.test == *id)?;
+        finding.get_or_insert(row.finding.clone());
+    }
+    Some(RetryCause { cls: "quarantine".into(), via: format!("quarantine:{}", finding?), tests: p.ids })
 }
 
 #[cfg(test)]
@@ -234,6 +266,9 @@ mod tests {
     }
     fn q(test: &str) -> Vec<QuarantineRow> {
         vec![QuarantineRow { test: test.into(), step: "s".into(), finding: "M1".into(), added: "2026-11-01".into(), expires: "2026-11-10".into() }]
+    }
+    fn go(runner: &str, rc: i64, out: &str, test: &str) -> Option<RetryCause> {
+        retry_cause(Some(runner), "s", rc, out, &q(test))
     }
 
     #[test]
@@ -250,13 +285,12 @@ mod tests {
         assert_eq!(rows(row, "2026-11-10").0.len(), 1);
         assert!(rows(row, "2026-10-31").0.is_empty(), "not yet live");
         assert!(rows(row, "2026-11-11").0.is_empty(), "expired");
-        assert!(rows("a > b,s,M1,2090-01-01,2090-01-10\n", "2026-11-20").0.is_empty(), "a row dated in 2090 is not honoured today");
+        assert!(rows("a > b,s,M1,2090-01-01,2090-01-10\n", "2026-11-20").0.is_empty());
         assert!(rows("a > b,s,M1,2026-11-01,2026-11-16\n", "2026-11-02").0.is_empty(), "15 days is too long");
         assert_eq!(rows("a > b,s,M1,2026-11-01,2026-11-15\n", "2026-11-02").0.len(), 1, "14 days is the limit");
-        assert!(rows("a > b,s,M1,2026-02-31,2026-03-02\n", "2026-03-01").0.is_empty(), "an impossible date");
+        assert!(rows("a > b,s,M1,2026-02-31,2026-03-02\n", "2026-03-01").0.is_empty());
         assert!(rows("a > b,s,M 1,2026-11-01,2026-11-10\n", "2026-11-02").0.is_empty(), "a finding id with a space");
-        let (_, dropped) = rows("a > b,s,M1,2026-11-01,2026-11-16\n", "2026-11-02");
-        assert_eq!(dropped[0].0, 2, "the dropped row is named by its line");
+        assert_eq!(rows("a > b,s,M1,2026-11-01,2026-11-16\n", "2026-11-02").1[0].0, 2, "a dropped row is named by its line");
     }
 
     #[test]
@@ -267,52 +301,79 @@ mod tests {
     }
 
     #[test]
-    fn failing_ids_come_from_vitest_cargo_and_node() {
-        let out = "FAIL  a.test.ts > pays\ntest m::t ... FAILED\nnot ok 3 - the thing\nFAIL  a.test.ts > pays\n";
-        assert_eq!(failing_ids(out), vec!["a.test.ts > pays", "m::t", "the thing"]);
+    fn ansi_is_stripped_before_parsing() {
+        assert_eq!(strip_ansi("\u{1b}[31m FAIL \u{1b}[39m  a > b"), " FAIL   a > b");
     }
 
-    #[test]
-    fn the_quarantine_match_is_the_exact_id_never_a_substring() {
-        assert!(retry_cause("s", 1, "FAIL  a.test.ts > pays\n", &q("a.test.ts > pays")).is_some());
-        assert!(retry_cause("s", 1, "FAIL  a.test.ts > pays twice\n", &q("a.test.ts > pays")).is_none(), "a longer id is another test");
-        assert!(retry_cause("s", 1, "FAIL  a.test.ts > pays\n", &q("e")).is_none(), "a one-letter row covers nothing");
-        assert!(retry_cause("other", 1, "FAIL  a.test.ts > pays\n", &q("a.test.ts > pays")).is_none(), "another step's row");
-    }
+    const VITEST: &str = "\u{1b}[31m FAIL \u{1b}[39m  a.test.ts > pays\nAssertionError: x\n\u{1b}[2m      Tests \u{1b}[22m \u{1b}[1m\u{1b}[31m1 failed\u{1b}[39m | 3 passed (4)\n";
+    const NODE: &str = "not ok 1 - pays\n# tests 4\n# pass 3\n# fail 1\n";
+    const CARGO: &str = "test m::pays ... FAILED\ntest result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+    const PLAY: &str = "  1) [chromium] › a.spec.ts:3:1 › pays ──────────\n  1 failed\n    [chromium] › a.spec.ts:3:1 › pays\n  3 passed (2s)\n";
+    const PYTEST: &str = "=== short test summary info ===\nFAILED tests/a.py::test_pays - assert 1 == 2\n=== 1 failed, 3 passed in 0.12s ===\n";
 
     #[test]
-    fn a_mixed_red_is_not_retried_and_every_cause_is_recorded() {
-        let out = "FAIL  a > one\nFAIL  a > two\n";
-        let both = vec![q("a > one")[0].clone(), q("a > two")[0].clone()];
-        let c = retry_cause("s", 1, out, &both).unwrap();
-        assert_eq!(c.tests, vec!["a > one", "a > two"]);
-        assert!(retry_cause("s", 1, out, &both[..1]).is_none());
-    }
-
-    #[test]
-    fn infra_is_retried_only_when_nothing_in_the_deny_set_appears() {
-        let docker = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n";
-        assert_eq!(retry_cause("s", 1, docker, &[]).unwrap().cls, "infra-docker");
-        assert_eq!(retry_cause("s", 1, "bind: address already in use\n", &[]).unwrap().via, "infra:infra-port");
-        for bad in [
-            "thread 'x' panicked at src/a.rs:1:1:\nConnectionRefused\naddress already in use\n",
-            "error[E0432]: unresolved import\naddress already in use\n",
-            "AssertionError: expected EADDRINUSE to be undefined\n",
-            "assertion `left == right` failed\nconnection refused\naddress already in use\n",
-            "address already in use\nFAIL  a > b\n",
-            "address already in use\nchain: timed out after 5 s\n",
-            "error TS2345: bad\naddress already in use\n",
+    fn a_quarantined_failure_with_a_matching_count_is_retried_for_every_runner() {
+        for (runner, rc, out, id) in [
+            ("vitest", 1, VITEST, "a.test.ts > pays"),
+            ("node", 1, NODE, "pays"),
+            ("cargo", 101, CARGO, "m::pays"),
+            ("playwright", 1, PLAY, "[chromium] › a.spec.ts:3:1 › pays"),
+            ("pytest", 1, PYTEST, "tests/a.py::test_pays"),
         ] {
-            assert!(retry_cause("s", 1, bad, &[]).is_none(), "{bad}");
+            let c = go(runner, rc, out, id).unwrap_or_else(|| panic!("{runner} was not retried"));
+            assert_eq!((c.cls.as_str(), c.via.as_str(), c.tests), ("quarantine", "quarantine:M1", vec![id.to_string()]), "{runner}");
         }
-        assert!(retry_cause("s", 1, "no signature at all\n", &[]).is_none(), "an unclassified red");
     }
 
     #[test]
-    fn a_timeout_or_a_dead_worker_is_never_retried() {
-        for rc in [124, 125, 127, 0] {
-            assert!(retry_cause("s", rc, "address already in use\n", &[]).is_none(), "rc {rc}");
+    fn nothing_is_retried_without_a_declared_runner_or_a_row() {
+        assert!(retry_cause(None, "s", 1, VITEST, &q("a.test.ts > pays")).is_none(), "an undeclared runner");
+        assert!(retry_cause(Some("go"), "s", 1, VITEST, &q("a.test.ts > pays")).is_none(), "an unknown runner");
+        assert!(retry_cause(Some("vitest"), "s", 1, VITEST, &[]).is_none(), "no row, no retry");
+        assert!(retry_cause(Some("vitest"), "other", 1, VITEST, &q("a.test.ts > pays")).is_none(), "another step's row");
+    }
+
+    #[test]
+    fn the_row_is_the_exact_id_never_a_substring() {
+        assert!(go("vitest", 1, VITEST, "a.test.ts > pays twice").is_none());
+        assert!(go("vitest", 1, VITEST, "e").is_none());
+        assert!(go("vitest", 1, &VITEST.replace("> pays", "> pays twice"), "a.test.ts > pays").is_none());
+    }
+
+    #[test]
+    fn a_count_that_is_missing_or_differs_is_never_retried() {
+        let two = "FAIL  a.test.ts > pays\nFAIL  a.test.ts > refunds\n      Tests  1 failed | 3 passed (4)\n";
+        assert!(go("vitest", 1, two, "a.test.ts > pays").is_none(), "two ids, one failed");
+        assert!(go("vitest", 1, "FAIL  a.test.ts > pays\n", "a.test.ts > pays").is_none(), "no count at all");
+        let more = "FAIL  a.test.ts > pays\n      Tests  2 failed | 3 passed (5)\n";
+        assert!(go("vitest", 1, more, "a.test.ts > pays").is_none(), "a failure with no id");
+        assert!(go("vitest", 1, "      Tests  1 failed (1)\nTypeError: x is not a function\n", "a > b").is_none(), "no id parsed");
+    }
+
+    #[test]
+    fn a_setup_or_collection_error_beside_a_quarantined_failure_is_never_retried() {
+        let q1 = format!("{VITEST}\n Unhandled Errors \nError: boom\n");
+        assert!(go("vitest", 1, &q1, "a.test.ts > pays").is_none(), "Q1");
+        let collect = "FAIL  a.test.ts [ a.test.ts ]\n      Tests  1 failed (1)\n";
+        assert!(go("vitest", 1, collect, "a.test.ts [ a.test.ts ]").is_none(), "a suite failure is not a test id");
+        let py = format!("{PYTEST}ERROR tests/b.py - ImportError\n=== 1 failed, 1 error in 0.1s ===\n");
+        assert!(go("pytest", 1, &py, "tests/a.py::test_pays").is_none());
+        let pw = PLAY.replace("1 failed", "1 failed\n  1 interrupted");
+        assert!(go("playwright", 1, &pw, "[chromium] › a.spec.ts:3:1 › pays").is_none());
+    }
+
+    #[test]
+    fn only_the_runners_failure_code_retries_never_a_signal_or_a_timeout() {
+        for rc in [0, 2, 124, 125, 127, 128, 134, 137, 139, 255] {
+            assert!(go("vitest", rc, VITEST, "a.test.ts > pays").is_none(), "rc {rc}");
         }
-        assert!(retry_cause("s", 1, "FAIL  a > b\nerror[E0599]: x\n", &q("a > b")).is_none(), "a compile error beats a quarantine row");
+        assert!(go("cargo", 1, CARGO, "m::pays").is_none(), "cargo's code is 101");
+        assert!(go("vitest", 101, VITEST, "a.test.ts > pays").is_none());
+    }
+
+    #[test]
+    fn a_compile_error_or_a_timeout_note_beside_a_quarantined_failure_is_never_retried() {
+        assert!(go("cargo", 101, &format!("error[E0599]: no method\n{CARGO}"), "m::pays").is_none());
+        assert!(go("vitest", 1, &format!("{VITEST}chain: timed out after 5 s\n"), "a.test.ts > pays").is_none());
     }
 }
