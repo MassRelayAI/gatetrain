@@ -191,7 +191,8 @@ fn the_probes_that_were_once_green_are_never_retried_by_construction() {
     let none = HDR.to_string();
     let pw = ["  1) [chromium] › a.spec.ts:3:1 › pays", "  2) [chromium] › a.spec.ts:4:1 › refunds", "  2 failed"];
     // (name, runner, rc, lines, quarantine file)
-    let cases: Vec<(&str, Option<&str>, i64, Vec<&str>, String)> = vec![
+    type Case<'a> = (&'a str, Option<&'a str>, i64, Vec<&'a str>, String);
+    let cases: Vec<Case> = vec![
         ("G: the real error above the tail", Some("vitest"), 1, g, none.clone()),
         ("N1 playwright failure marks", Some("playwright"), 1, vec!["  ✘  1 [chromium] › a.spec.ts:3:1 › pays (1s)", "  1 failed", "  1) [chromium] › a.spec.ts:3:1 › pays"], none.clone()),
         ("N2 pytest ERROR and E lines", Some("pytest"), 1, vec!["ERROR tests/a.py::test_x - fixture", "E   AssertionError", "=== 1 error in 0.1s ==="], live(&[("tests/a.py::test_x", "a")])),
