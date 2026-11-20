@@ -41,7 +41,7 @@ struct Run {
 const HDR: &str = "test,step,finding,added,expires\n";
 
 /// A committed repo holding the steps file and `quarantine.csv`; the branch `trusted` is that commit, and HEAD is one empty commit
-/// later (the change under test), so `trusted:quarantine.csv` is a trusted ref that is not the commit under test.
+/// later (the change under test), so `origin/trusted:quarantine.csv` is a trusted ref that is not the commit under test.
 fn repo(steps: &str, quarantine: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
@@ -51,7 +51,8 @@ fn repo(steps: &str, quarantine: &str) -> tempfile::TempDir {
     std::fs::write(d.join("quarantine.csv"), quarantine).unwrap();
     git(d, &["add", "steps.toml", ".gitignore", "quarantine.csv"]);
     git(d, &["commit", "-q", "-m", "init"]);
-    git(d, &["branch", "trusted"]);
+    git(d, &["update-ref", "refs/remotes/origin/trusted", "HEAD"]);
+    git(d, &["branch", "localtrusted"]);
     git(d, &["commit", "-q", "--allow-empty", "-m", "under-test"]);
     dir
 }
@@ -74,7 +75,7 @@ fn chain(steps: &str, quarantine: &str, extra: &[&str]) -> Run {
     r
 }
 
-const QREF: &[&str] = &["--retry-flakes", "--quarantine-ref", "trusted:quarantine.csv"];
+const QREF: &[&str] = &["--retry-flakes", "--quarantine-ref", "origin/trusted:quarantine.csv"];
 
 /// One step `a` of `runner` that is red the first time (printing `lines`, exiting `rc`) and green after. The marker lives outside the repo.
 fn flaky(runner: Option<&str>, rc: i64, lines: &[&str], quarantine: &str, extra: &[&str]) -> Run {
@@ -123,7 +124,7 @@ fn csv_row(test: &str, added: &str, expires: &str) -> String {
 }
 
 // the runners' own outputs, ANSI colour included where a real run has it
-const VITEST: &[&str] = &["\\e[31m FAIL \\e[39m  a.test.ts > pays", "AssertionError: boom", "\\e[2m      Tests \\e[22m \\e[1m\\e[31m1 failed\\e[39m | 3 passed (4)"];
+const VITEST: &[&str] = &["\\e[31m FAIL \\e[39m  a.test.ts > pays", "AssertionError: boom", "\\e[2m      Tests \\e[22m \\e[1m\\e[31m1 failed\\e[39m | 3 passed (4)", "   Duration  1.2s (transform 1ms)"];
 const VID: &str = "a.test.ts > pays";
 
 #[test]
@@ -149,8 +150,8 @@ fn a_quarantined_failure_is_retried_once_then_green_and_never_reads_as_a_first_t
 fn every_supported_runner_has_a_positive_control() {
     let cases: Vec<(&str, i64, Vec<&str>, &str)> = vec![
         ("vitest", 1, VITEST.to_vec(), VID),
-        ("node", 1, vec!["not ok 1 - pays", "# tests 4", "# pass 3", "# fail 1"], "pays"),
-        ("cargo", 101, vec!["test m::pays ... FAILED", "test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"], "m::pays"),
+        ("node", 1, vec!["not ok 1 - pays", "# tests 4", "# pass 3", "# fail 1", "# duration_ms 12"], "pays"),
+        ("cargo", 101, vec!["test m::pays ... FAILED", "test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s", "", "error: test failed, to rerun pass `--test a`"], "m::pays"),
         ("playwright", 1, vec!["  1) [chromium] › a.spec.ts:3:1 › pays ──────", "  1 failed", "  3 passed (2s)"], "[chromium] › a.spec.ts:3:1 › pays"),
         ("pytest", 1, vec!["=== short test summary info ===", "FAILED tests/a.py::test_pays - assert 1 == 2", "=== 1 failed, 3 passed in 0.12s ==="], "tests/a.py::test_pays"),
     ];
@@ -256,7 +257,7 @@ fn a_mixed_red_is_not_retried() {
 
 #[test]
 fn the_quarantine_is_read_from_the_trusted_ref_never_the_working_tree() {
-    let dir = repo(&step("a", Some("vitest"), &["flaky", &marker(), "1", VITEST[0], VITEST[2]]), &csv_row(VID, &day(-30), &day(-20)));
+    let dir = repo(&step("a", Some("vitest"), &["flaky", &marker(), "1", VITEST[0], VITEST[2], VITEST[3]]), &csv_row(VID, &day(-30), &day(-20)));
     // the working tree under test carries a live row; the trusted ref does not
     std::fs::write(dir.path().join("quarantine.csv"), live(&[(VID, "a")])).unwrap();
     let r = run_in(dir.path(), QREF);
@@ -264,13 +265,13 @@ fn the_quarantine_is_read_from_the_trusted_ref_never_the_working_tree() {
 }
 
 #[test]
-fn the_head_ref_and_the_index_form_are_refused() {
-    for bad in ["HEAD:quarantine.csv", ":quarantine.csv"] {
+fn the_head_ref_the_index_form_and_every_non_remote_ref_are_refused() {
+    // the head, the index form, a parent commit and a local branch: only a remote-tracking ref is trusted
+    for bad in ["HEAD:quarantine.csv", ":quarantine.csv", "HEAD~1:quarantine.csv", "localtrusted:quarantine.csv"] {
         let r = flaky(Some("vitest"), 1, VITEST, &live(&[(VID, "a")]), &["--retry-flakes", "--quarantine-ref", bad]);
         assert_eq!((r.code, retries(&r)), (2, 0), "{bad}: {}", r.stdout);
     }
 }
-
 #[test]
 fn a_quarantine_file_without_its_header_row_is_a_config_error() {
     let r = flaky(Some("vitest"), 1, VITEST, &format!("{VID},a,M1,{},{}\n", day(0), day(5)), QREF);
@@ -282,9 +283,9 @@ fn a_third_flaky_step_is_not_retried() {
     let d = tempfile::tempdir().unwrap();
     let mut steps = String::new();
     for n in ["a", "b", "c"] {
-        steps += &step(n, Some("vitest"), &["flaky", &d.path().join(format!("{n}.marker")).to_string_lossy(), "1", VITEST[0], VITEST[2]]);
+        steps += &step(n, Some("vitest"), &["flaky", &d.path().join(format!("{n}.marker")).to_string_lossy(), "1", VITEST[0], VITEST[2], VITEST[3]]);
     }
-    let r = chain(&steps, &live(&[(VID, "a"), (VID, "b"), (VID, "c")]), &["--retry-flakes", "--quarantine-ref", "trusted:quarantine.csv", "--par", "1"]);
+    let r = chain(&steps, &live(&[(VID, "a"), (VID, "b"), (VID, "c")]), &["--retry-flakes", "--quarantine-ref", "origin/trusted:quarantine.csv", "--par", "1"]);
     assert_eq!((r.code, retries(&r)), (1, 2), "{}", r.stdout);
     assert!(r.stdout.contains("RED_SUMMARY: c"), "{}", r.stdout);
 }
@@ -300,24 +301,51 @@ fn without_the_flag_nothing_changes() {
 #[test]
 fn a_retried_green_writes_no_cache_entry() {
     let extra = "runner = 'vitest'\ninputs = ['steps.toml']\n";
-    let dir = repo(&step_with("a", extra, &["flaky", &marker(), "1", VITEST[0], VITEST[2]]), &live(&[(VID, "a")]));
+    let dir = repo(&step_with("a", extra, &["flaky", &marker(), "1", VITEST[0], VITEST[2], VITEST[3]]), &live(&[(VID, "a")]));
     let cache = tempfile::tempdir().unwrap();
     let c = cache.path().to_str().unwrap();
-    let first = run_in(dir.path(), &["--retry-flakes", "--quarantine-ref", "trusted:quarantine.csv", "--cache", c]);
+    let first = run_in(dir.path(), &["--retry-flakes", "--quarantine-ref", "origin/trusted:quarantine.csv", "--cache", c]);
     assert_eq!((first.code, retries(&first)), (0, 1), "{}", first.stdout);
-    let second = run_in(dir.path(), &["--retry-flakes", "--quarantine-ref", "trusted:quarantine.csv", "--cache", c]);
+    let second = run_in(dir.path(), &["--retry-flakes", "--quarantine-ref", "origin/trusted:quarantine.csv", "--cache", c]);
     assert_eq!(second.code, 0, "{}", second.stdout);
     assert!(!second.stdout.contains("STEP_CACHED"), "a retried green must not be served as a cached first-try green: {}", second.stdout);
 }
 
 #[test]
 fn a_retried_green_does_not_feed_the_ledger_medians() {
-    let steps = step("b", None, &["pass"]) + &step("a", Some("vitest"), &["flaky", &marker(), "1", VITEST[0], VITEST[2]]);
+    let steps = step("b", None, &["pass"]) + &step("a", Some("vitest"), &["flaky", &marker(), "1", VITEST[0], VITEST[2], VITEST[3]]);
     let dir = repo(&steps, &live(&[(VID, "a")]));
     let db = tempfile::tempdir().unwrap().keep().join("g.db");
-    let r = run_in(dir.path(), &["--retry-flakes", "--quarantine-ref", "trusted:quarantine.csv", "--db", db.to_str().unwrap()]);
+    let r = run_in(dir.path(), &["--retry-flakes", "--quarantine-ref", "origin/trusted:quarantine.csv", "--db", db.to_str().unwrap()]);
     assert_eq!(r.code, 0, "{}", r.stdout);
     let h = gatetrain_core::history::history_durations(&db, "").expect("history");
     assert!(h.iter().any(|(n, _)| n == "b"), "an ordinary green is a median input: {h:?}");
     assert!(!h.iter().any(|(n, _)| n == "a"), "the summed-duration retried green is not: {h:?}");
+}
+
+#[test]
+fn x1_x2_x3_x8_round_three_probes_are_never_retried() {
+    // X1: binary a has a quarantined failure with `1 failed`, binary b dies (no `test result:` line, only `error: test failed`); rc 101
+    let x1 = ["test pays ... FAILED", "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s", "error: test failed, to rerun pass `--test a`", "error: test failed, to rerun pass `--test b`", "error: 2 targets failed:", "    `--test a`", "    `--test b`"];
+    // X2: playwright's own wording for a failure outside every test
+    let x2 = ["  1) [chromium] › a.spec.ts:3:1 › pays ──────", "  1 failed", "    [chromium] › a.spec.ts:3:1 › pays", "  3 passed (2s)", "  1 error was not a part of any test, see above for details"];
+    // X3: the runner's summary is not the last thing the step printed
+    let mut x3 = VITEST.to_vec();
+    x3.push("ledger drift: 1000 != 999");
+    // X8: a prefix row must not cover a pytest id with a space in it
+    let x8 = ["FAILED tests/a.py::test_total[eur 1000] - assert 1 == 2", "=== 1 failed, 3 passed in 0.12s ==="];
+    type Case<'a> = (&'a str, Option<&'a str>, i64, Vec<&'a str>, String);
+    let cases: Vec<Case> = vec![
+        ("X1 cargo: a dead binary beside a quarantined failure", Some("cargo"), 101, x1.to_vec(), live(&[("pays", "a")])),
+        ("X2 playwright: an error outside every test", Some("playwright"), 1, x2.to_vec(), live(&[("[chromium] › a.spec.ts:3:1 › pays", "a")])),
+        ("X3 vitest: output after the runner's summary", Some("vitest"), 1, x3, live(&[(VID, "a")])),
+        ("X8 pytest: a prefix row", Some("pytest"), 1, x8.to_vec(), live(&[("tests/a.py::test_total[eur", "a")])),
+    ];
+    for (name, runner, rc, lines, q) in cases {
+        let r = flaky(runner, rc, &lines, &q, QREF);
+        assert_eq!((r.code, retries(&r)), (1, 0), "{name}: {}", r.stdout);
+    }
+    // and the exact pytest id, with its space, is covered
+    let r = flaky(Some("pytest"), 1, &x8, &live(&[("tests/a.py::test_total[eur 1000]", "a")]), QREF);
+    assert_eq!((r.code, retries(&r)), (0, 1), "{}", r.stdout);
 }
