@@ -38,17 +38,20 @@ pub const DENY: &[(&str, &str)] = &[
 /// Always fatal to a retry, quarantine or not: a compile error or a timeout is never a flake.
 const NEVER: &[&str] = &["compile", "timeout"];
 
-fn compiled(table: &'static [(&'static str, &'static str)], cell: &'static OnceLock<Vec<(&'static str, Regex)>>) -> &'static [(&'static str, Regex)] {
+type Table = &'static [(&'static str, &'static str)];
+type Cell = OnceLock<Vec<(&'static str, Regex)>>;
+
+fn compiled(table: Table, cell: &'static Cell) -> &'static [(&'static str, Regex)] {
     cell.get_or_init(|| table.iter().map(|(n, p)| (*n, Regex::new(p).expect("retry table regex"))).collect())
 }
 
 fn infra() -> &'static [(&'static str, Regex)] {
-    static C: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    static C: Cell = OnceLock::new();
     compiled(INFRA, &C)
 }
 
 fn deny() -> &'static [(&'static str, Regex)] {
-    static C: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    static C: Cell = OnceLock::new();
     compiled(DENY, &C)
 }
 
