@@ -242,7 +242,7 @@ pub struct ParsedLog {
     pub retry_summary: Option<String>,
 }
 
-/// `STEP_RETRY <step> attempt=<n> rc=<rc> class=<cls> via=<diagnose:RULE or quarantine:FINDING> test=<text>`: attempt `n` of a step was red and
+/// `STEP_RETRY <step> attempt=<n> rc=<rc> class=<cls> via=quarantine:FINDING test=<text>`: attempt `n` of a step was red and
 /// the step was re-run once on the same sha (D446). The step's own `STEP_EXIT` is the last attempt's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Retry {
