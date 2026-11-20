@@ -12,23 +12,24 @@ fn main() {
         "print" => println!("{}", arg(1)),
         "exit" => std::process::exit(arg(1).parse().unwrap_or(1)),
         "pass" => {}
-        // `redprint LINE...`: print each LINE, exit 1 (a step that is red every time, with output a reader can judge)
+        // `redprint RC LINE...`: print each LINE (the two characters `\e` become ESC, so a test can carry ANSI colour), exit RC: a step that
+        // is red every time, with output a reader can judge
         "redprint" => {
-            for l in a.iter().skip(1) {
-                println!("{l}");
+            for l in a.iter().skip(2) {
+                println!("{}", l.replace("\\e", "\u{1b}"));
             }
-            std::process::exit(1);
+            std::process::exit(arg(1).parse().unwrap_or(1));
         }
-        // `flaky MARKER LINE...`: the first run (MARKER absent) writes MARKER, prints each LINE and exits 1; every later run exits 0
+        // `flaky MARKER RC LINE...`: the first run (MARKER absent) writes MARKER, prints each LINE and exits RC; every later run exits 0
         "flaky" => {
             if std::path::Path::new(arg(1)).exists() {
                 return;
             }
             std::fs::write(arg(1), "ran once").unwrap();
-            for l in a.iter().skip(2) {
-                println!("{l}");
+            for l in a.iter().skip(3) {
+                println!("{}", l.replace("\\e", "\u{1b}"));
             }
-            std::process::exit(1);
+            std::process::exit(arg(2).parse().unwrap_or(1));
         }
         // `lines N`: print N numbered lines (one process, no shell)
         "lines" => {
