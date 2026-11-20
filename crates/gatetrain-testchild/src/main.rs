@@ -12,6 +12,20 @@ fn main() {
         "print" => println!("{}", arg(1)),
         "exit" => std::process::exit(arg(1).parse().unwrap_or(1)),
         "pass" => {}
+        // `failprint TEXT`: print TEXT, exit 1 (a step that is red every time, with output a classifier can read)
+        "failprint" => {
+            println!("{}", arg(1));
+            std::process::exit(1);
+        }
+        // `flaky MARKER TEXT`: the first run (MARKER absent) writes MARKER, prints TEXT and exits 1; every later run exits 0
+        "flaky" => {
+            if std::path::Path::new(arg(1)).exists() {
+                return;
+            }
+            std::fs::write(arg(1), "ran once").unwrap();
+            println!("{}", arg(2));
+            std::process::exit(1);
+        }
         // `lines N`: print N numbered lines (one process, no shell)
         "lines" => {
             let out = std::io::stdout();
