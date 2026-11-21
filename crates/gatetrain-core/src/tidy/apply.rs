@@ -319,6 +319,7 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done>
             let (after, freed) = match (r.ok().then(|| docker_reported_total(&r.out)).flatten(), it.bytes) {
                 (Some(f), Some(b)) => (Some((b - f).max(0)), format!("{} (as docker reported)", super::inventory::human(Some(f)))),
                 (Some(f), None) => (None, format!("{} (as docker reported)", super::inventory::human(Some(f)))),
+                // planned sizes and this system-df fallback stay binary (1024) because the golden transcripts pin them: ~7% high at GB scale, fallback only
                 (None, _) => measured_after(it.bytes, before, df_after),
             };
             Ok((after, if r.ok() { "ok" } else { "failed" }, format!("build cache older than {} days; freed: {freed}", fmt_g(cfg.cache_days))))

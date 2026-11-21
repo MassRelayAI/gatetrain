@@ -1090,11 +1090,12 @@ pub const UNREAD: &str = "__GT_UNREADABLE__";
 /// read prints `UNREAD`; zombies and processes that vanished mid-scan are skipped), then `MOUNT <source>` per mount of each running
 /// container, then the end marker. `root` is `/proc` (a test points it at a fixture).
 pub fn proc_scan_script(root: &str) -> String {
+    // own processes whose cwd is unreadable are skipped ONLY when their comm is exactly one of the session daemons below (a user's
+    // `systemd --user` and `(sd-pam)` always have an unreadable cwd); any other unreadable own process makes the answer unknown
     format!(
-        "for p in {root}/[0-9]*; do [ -d \"$p\" ] || continue; [ \"$(stat -c %u \"$p\" 2>/dev/null)\" = \"$(id -u)\" ] || continue; grep -q '^State:[[:space:]]*Z' \"$p/status\" 2>/dev/null && continue; c=$(readlink \"$p/cwd\" 2>/dev/null) || {{ [ -d \"$p\" ] && echo {UNREAD}; continue; }}; echo \"$c\"; readlink \"$p/exe\" 2>/dev/null; for f in \"$p\"/fd/*; do readlink \"$f\" 2>/dev/null; done; done; if command -v docker >/dev/null 2>&1; then docker ps -q 2>/dev/null | xargs -r docker inspect --format '{{{{range .Mounts}}}}{{{{.Source}}}}{{{{println}}}}{{{{end}}}}' 2>/dev/null | sed 's/^/MOUNT /'; fi; echo {END}"
+        "for p in {root}/[0-9]*; do [ -d \"$p\" ] || continue; [ \"$(stat -c %u \"$p\" 2>/dev/null)\" = \"$(id -u)\" ] || continue; grep -q '^State:[[:space:]]*Z' \"$p/status\" 2>/dev/null && continue; c=$(readlink \"$p/cwd\" 2>/dev/null) || {{ [ -d \"$p\" ] || continue; n=$(cat \"$p/comm\" 2>/dev/null); case \"$n\" in systemd|'(sd-pam)'|ssh-agent|gpg-agent|dbus-daemon) continue;; esac; echo {UNREAD}; continue; }}; echo \"$c\"; readlink \"$p/exe\" 2>/dev/null; for f in \"$p\"/fd/*; do readlink \"$f\" 2>/dev/null; done; done; if command -v docker >/dev/null 2>&1; then ids=$(docker ps -q 2>/dev/null) || echo {UNREAD}; if [ -n \"$ids\" ]; then m=$(docker inspect --format '{{{{range .Mounts}}}}{{{{.Source}}}}{{{{println}}}}{{{{end}}}}' $ids 2>/dev/null) || echo {UNREAD}; [ -n \"$m\" ] && echo \"$m\" | sed 's/^/MOUNT /'; fi; fi; echo {END}"
     )
 }
-
 /// Read the scan's output: `None` when it did not finish or any process was unreadable; else whether anything is in or on `path`.
 pub fn parse_holders(out: &str, path: &str) -> Option<bool> {
     let lines: Vec<String> = splitlines(out).iter().map(|l| strip(l).to_string()).collect();
