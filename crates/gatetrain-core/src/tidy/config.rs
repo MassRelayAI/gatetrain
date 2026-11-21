@@ -74,6 +74,9 @@ pub struct TidyCfg {
     pub remove_timeout_s: f64,
     /// a worktree with a file changed more recently than this many days is kept (0 = off)
     pub worktree_min_idle_days: f64,
+    /// a detached-HEAD checkout (a chain checkout) whose commit is NOT on main is a tidy item once nothing inside it changed for this many
+    /// days (its commit is archived under a tag first); 0 = off (only merged ones go)
+    pub chain_checkout_max_age_days: f64,
     /// how deep the "newest file inside" walk goes
     pub idle_walk_depth: f64,
     /// the link listing walks a whole worktree: it gets this long (seconds)
@@ -116,6 +119,7 @@ impl Default for TidyCfg {
             size_timeout_s: 30.0,
             remove_timeout_s: 1800.0,
             worktree_min_idle_days: 2.0,
+            chain_checkout_max_age_days: 0.0,
             idle_walk_depth: 12.0,
             link_list_timeout_s: 300.0,
             item_budget_s: 600.0,
@@ -123,7 +127,8 @@ impl Default for TidyCfg {
     }
 }
 
-const KNOWN: [&str; 33] = [
+const KNOWN: [&str; 34] = [
+    "chain_checkout_max_age_days",
     "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_archive", "image_keep_patterns", "image_patterns", "item_budget_s", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
     "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "protect", "protect_containers", "remove_timeout_s", "root_checkout", "scratch_dir",
     "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_min_idle_days", "worktree_prefix",
@@ -214,6 +219,7 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             "size_timeout_s" => t.size_timeout_s = number(k, v)?,
             "remove_timeout_s" => t.remove_timeout_s = number(k, v)?,
             "worktree_min_idle_days" => t.worktree_min_idle_days = number(k, v)?,
+            "chain_checkout_max_age_days" => t.chain_checkout_max_age_days = number(k, v)?,
             "idle_walk_depth" => t.idle_walk_depth = number(k, v)?,
             "link_list_timeout_s" => t.link_list_timeout_s = number(k, v)?,
             "item_budget_s" => t.item_budget_s = number(k, v)?,

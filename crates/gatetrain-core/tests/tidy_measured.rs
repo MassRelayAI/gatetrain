@@ -68,3 +68,42 @@ fn when_docker_usage_cannot_be_read_the_freed_size_is_unknown_not_the_plan() {
     assert_eq!(done, 1);
     assert_eq!(reclaimed, 0, "an unmeasured action contributes nothing to 'reclaimed'");
 }
+
+// ---- GT-3 (a): the prune's own report is the measurement; the planned number is never "reclaimed", and a real prune is never "0 B"
+
+#[test]
+fn a_prune_that_ran_reports_the_total_docker_printed_even_when_df_did_not_move() {
+    let sim = linux_sim();
+    // `docker system df` still shows 8 GB afterwards (the old reading of "0 B"), but docker printed what it removed
+    sim.pre(Box::new(|_s, c| if c.starts_with("docker builder prune") { Some(RunOut::done(0, "Deleted build cache objects:\nabc\ndef\n\nTotal:\t2.5GB\n")) } else { None }));
+    let d = tempfile::tempdir().unwrap();
+    let (done, failed, reclaimed) = report(&sim, &["cache"], &d);
+    assert_eq!((done, failed), (1, 0));
+    assert_eq!(reclaimed, (2.5 * GB as f64) as i64, "docker said 2.5GB");
+    let log = std::fs::read_to_string(d.path().join("l")).unwrap();
+    assert!(log.contains("freed: 2.50 GB") || log.contains("freed: 2.5 GB"), "the note names the measurement: {log}");
+}
+
+#[test]
+fn the_older_total_reclaimed_space_line_is_read_too() {
+    let sim = linux_sim();
+    sim.pre(Box::new(|_s, c| if c.starts_with("docker builder prune") { Some(RunOut::done(0, "Total reclaimed space: 700MB\n")) } else { None }));
+    let d = tempfile::tempdir().unwrap();
+    let (_done, _failed, reclaimed) = report(&sim, &["cache"], &d);
+    assert_eq!(reclaimed, 700 * (1 << 20));
+}
+
+#[test]
+fn docker_saying_zero_is_zero_whatever_df_says() {
+    let sim = linux_sim();
+    sim.pre(Box::new(|s, c| {
+        if c.starts_with("docker builder prune") {
+            s.cache_row = Some("Build Cache|2GB|1GB\nImages|3GB|1GB\n".into()); // df moved by 6 GB for another reason
+            return Some(RunOut::done(0, "Total:\t0B\n"));
+        }
+        None
+    }));
+    let d = tempfile::tempdir().unwrap();
+    let (_done, _failed, reclaimed) = report(&sim, &["cache"], &d);
+    assert_eq!(reclaimed, 0, "the command's own report wins over a before/after of the whole host");
+}

@@ -92,9 +92,18 @@ pub struct SimState {
     pub hidden_flags: HashSet<String>,
     /// repositories where `git ls-files -v` fails
     pub ls_v_fails: HashSet<String>,
+    /// working directories of running processes (what `/proc/*/cwd` shows)
+    pub holders: Vec<String>,
+    /// the process listing fails (cannot be told)
+    pub holders_fail: bool,
 }
 
 impl SimState {
+    /// the commit id of a detached worktree: 40 hex digits made from the path, so a test can name it in `ancestors`
+    pub fn detached_sha(&self, path: &str) -> String {
+        let h: String = n(path).bytes().map(|b| format!("{b:02x}")).collect();
+        format!("{h:0<40}").chars().take(40).collect()
+    }
     pub fn sha(&self, br: &str) -> String {
         self.shas.get(br).cloned().unwrap_or_else(|| format!("sha-{br}"))
     }
@@ -414,6 +423,14 @@ impl Sim {
             links.push(m[2].to_string());
             return ok(links.join("\n") + "\n");
         }
+        if c.starts_with("for p in /proc/") {
+            if st.holders_fail {
+                return RunOut::done(1, "");
+            }
+            let mut v = st.holders.clone();
+            v.push("__GT_END__".into());
+            return ok(v.join("\n") + "\n");
+        }
         if c.starts_with("unlink ") {
             if !st.unlink_noop {
                 for p in c.split(" && ") {
@@ -506,7 +523,7 @@ impl Sim {
             return ok(if st.dirty.contains(&repo) { "M x\n".into() } else { String::new() });
         }
         if a.starts_with("worktree list") {
-            return ok(st.worktrees.iter().map(|w| format!("worktree {}\nHEAD abc\nbranch refs/heads/{}\n{}{}", w.0, w.1, if st.locked.contains(&n(&w.0)) { "locked\n" } else { "" }, if !st.has(&w.0) && n(&w.0) != n(&st.main) { "prunable gitdir file points to non-existent location\n" } else { "" })).collect::<Vec<_>>().join("\n"));
+            return ok(st.worktrees.iter().map(|w| format!("worktree {}\nHEAD {}\n{}\n{}{}", w.0, if w.1.is_empty() { st.detached_sha(&w.0) } else { "abc".to_string() }, if w.1.is_empty() { "detached".to_string() } else { format!("branch refs/heads/{}", w.1) }, if st.locked.contains(&n(&w.0)) { "locked\n" } else { "" }, if !st.has(&w.0) && n(&w.0) != n(&st.main) { "prunable gitdir file points to non-existent location\n" } else { "" })).collect::<Vec<_>>().join("\n"));
         }
         if a == "branch --list" {
             return ok(st.branches.iter().map(|b| format!("  {b}")).collect::<Vec<_>>().join("\n") + "\n");

@@ -52,12 +52,14 @@ pub enum Extra {
     None,
     Target { cargo: bool, tag: Option<bool>, branch: Option<String> },
     Worktree { branch: String, links: usize },
+    /// a detached-HEAD checkout: the commit it is on and whether that commit is on main
+    Detached { sha: String, merged: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
     pub cls: String,
-    /// clean | move | remove | rm-container | rm-image | prune-cache | remove-worktree
+    /// clean | move | remove | rm-container | rm-image | prune-cache | remove-worktree | remove-detached
     pub kind: String,
     /// exact path or name
     pub key: String,
@@ -100,6 +102,7 @@ impl Item {
                     Extra::None => J::Obj(vec![]),
                     Extra::Target { cargo, tag, branch } => J::Obj(vec![("cargo".into(), J::Bool(*cargo)), ("tag".into(), J::opt_bool(*tag)), ("branch".into(), J::opt_str(branch))]),
                     Extra::Worktree { branch, links } => J::Obj(vec![("branch".into(), J::s(branch)), ("links".into(), J::Int(*links as i64))]),
+                    Extra::Detached { sha, merged } => J::Obj(vec![("sha".into(), J::s(sha)), ("merged".into(), J::Bool(*merged))]),
                 },
             ),
         ])
@@ -181,6 +184,11 @@ pub fn human_f(n: f64) -> String {
         n /= 1024.0;
     }
     unreachable!()
+}
+
+/// A full commit id as git prints it (SHA-1 or SHA-256): hex only, never a name or a flag.
+fn is_sha(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 pub fn parse_size(s: &str) -> i64 {
@@ -265,6 +273,7 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
         ops.start_item();
         let n = norm(wpath);
         let wr = ops.rp(wpath)?;
+        let mut detached_item: Option<Item> = None;
         let mut info = WtInfo { path: wpath.clone(), branch: wbranch.clone(), merged: None, dirty: None, links: None, bytes: None, keep: None };
         if kept_n.contains(&n) || wr.as_ref().map(|r| kept_r.contains(r)).unwrap_or(false) {
             info.keep = Some("main/root/keep list".into());
@@ -272,8 +281,47 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             info.keep = Some("main worktree".into()); // the first entry of `git worktree list` is the main checkout, whatever its spelling
         } else if w.locked {
             info.keep = Some("locked".into());
+        } else if wbranch.is_none() && !(w.detached && w.head.as_deref().is_some_and(is_sha)) {
+            info.keep = Some("detached head".into()); // no branch and no commit id git printed: nothing to prove
         } else if wbranch.is_none() {
-            info.keep = Some("detached head".into());
+            // a chain checkout: detached, so there is no branch to keep or delete; its commit is what is judged
+            let sha = w.head.clone().unwrap();
+            if ops.win && ops.win_unsafe(wpath) {
+                info.keep = Some("unsafe name".into());
+            } else if keep_lanes_l.contains(&lane_of(wpath, cfg).to_lowercase()) {
+                info.keep = Some("keep list".into());
+            } else if ops.link_state(wpath)? != super::ops::LinkState::Real {
+                info.keep = Some("is a link, missing or unreadable".into());
+            } else if !ops.toplevel_ok(wpath)? {
+                info.keep = Some("unverifiable (its own git root cannot be confirmed)".into());
+            } else {
+                info.dirty = ops.dirty(wpath)?;
+                let merged = ops.merged_sha(&sha)?;
+                info.merged = merged;
+                let idle_days = if merged == Some(true) { cfg.worktree_min_idle_days } else { cfg.chain_checkout_max_age_days };
+                if info.dirty != Some(false) {
+                    info.keep = Some(if info.dirty == Some(true) { "uncommitted work" } else { "status unreadable" }.into());
+                } else if merged != Some(true) && cfg.chain_checkout_max_age_days <= 0.0 {
+                    info.keep = Some(if merged == Some(false) { "detached head, not merged" } else { "detached head, merge state unknown" }.into());
+                } else if idle_days > 0.0 && ops.recent(wpath, idle_days * 1440.0)? != Some(false) {
+                    info.keep = Some(format!("used in the last {} days", fmt_g(idle_days)));
+                } else if ops.held_by_process(wpath)? != Some(false) {
+                    info.keep = Some("held by a running process (or that cannot be told)".into());
+                } else {
+                    match ops.list_links(wpath) {
+                        Ok(l) => info.links = Some(l.len()),
+                        Err(Fatal::Item(e)) => info.keep = Some(format!("cannot list its links ({e})")),
+                        Err(e) => return Err(e),
+                    }
+                    info.bytes = ops.size(wpath)?;
+                }
+                if info.keep.is_none() {
+                    let (rule, why) = if merged == Some(true) { ("merged-detached-checkout", format!("detached at {}, which is on {}", &sha[..sha.len().min(12)], cfg.main_branch)) } else { ("aged-detached-checkout", format!("detached at {}, not on {}, untouched for {} days", &sha[..sha.len().min(12)], cfg.main_branch, fmt_g(cfg.chain_checkout_max_age_days))) };
+                    let mut it = Item::new("worktrees", "remove-detached", wpath, info.bytes, &why).ruled(rule);
+                    it.extra = Extra::Detached { sha, merged: merged == Some(true) };
+                    detached_item = Some(it);
+                }
+            }
         } else if !safe_branch(wbranch.as_deref().unwrap()) || (ops.win && ops.win_unsafe(wpath)) {
             info.keep = Some("unsafe name".into());
         } else if ops.link_state(wpath)? != super::ops::LinkState::Real {
@@ -325,7 +373,9 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
             info.bytes.map(|b| format!(" ({})", human(Some(b)))).unwrap_or_default(),
             slow(t0)
         ));
-        if info.keep.is_none() {
+        if let Some(it) = detached_item.filter(|_| info.keep.is_none()) {
+            inv.items.push(it);
+        } else if info.keep.is_none() {
             let br = info.branch.clone().unwrap();
             let mut it = Item::new("worktrees", "remove-worktree", wpath, info.bytes, &format!("branch {} is on {}", br, cfg.main_branch)).ruled("merged-clean-worktree");
             it.extra = Extra::Worktree { branch: br, links: info.links.unwrap_or(0) };

@@ -142,6 +142,35 @@ pub fn cmd_check(config_path: &str, host: Option<&str>, json: bool, mk: RunnerFa
     o
 }
 
+/// The prefix of the threshold line that says a `keep_lanes` entry matches nothing (it protects nothing; a config fact, not a host state).
+pub const KEEP_LANES_NOTICE: &str = "keep_lanes entry ";
+
+/// A `keep_lanes` entry that matches nothing is a fact about the CONFIG: shown on the first run after the config makes it true, then not
+/// again (and it stops making every scheduled run exit 1) until the set of such entries changes. The set is remembered in `<log>.notified`
+/// next to the action log; `record` writes it (a dry run reads it, never writes). `check` always shows it. Disk and other thresholds are
+/// never touched here. Returns the notices that were hidden.
+pub fn once_per_config_change(t: &super::config::TidyCfg, inv: &mut Inventory, record: bool) -> Vec<String> {
+    let notices: Vec<String> = inv.breaches.iter().filter(|b| b.starts_with(KEEP_LANES_NOTICE)).cloned().collect();
+    if t.log.is_empty() {
+        return vec![];
+    }
+    let path = format!("{}.notified", t.log);
+    let key = notices.join("\n");
+    let known = std::fs::read_to_string(&path).ok();
+    if !notices.is_empty() && known.as_deref() == Some(key.as_str()) {
+        inv.breaches.retain(|b| !b.starts_with(KEEP_LANES_NOTICE));
+        return notices;
+    }
+    if record && known.as_deref() != Some(key.as_str()) {
+        if notices.is_empty() {
+            let _ = std::fs::remove_file(&path); // nothing to remember: a later reappearance is said again
+        } else {
+            let _ = std::fs::write(&path, &key);
+        }
+    }
+    vec![]
+}
+
 pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<&str>, auto: bool, mk: RunnerFactory, now: Option<f64>) -> CliOut {
     let mut o = CliOut::new();
     let (cfg, hs) = match hosts(config_path, host) {
@@ -176,6 +205,7 @@ pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<
         };
         let plan: Vec<_> = inv.items.iter().filter(|i| classes.contains(&i.cls) && !(auto && i.attended_only)).cloned().collect();
         if !apply && !auto {
+            let _ = once_per_config_change(&t, &mut inv, false);
             o.say(format_check(&inv));
             o.say(format!("dry run: {} action(s) in classes {}; add --apply to execute", plan.len(), classes.join(",")));
             if !inv.breaches.is_empty() {
@@ -188,10 +218,11 @@ pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<
             Ok(x) => x,
             Err(e) => return fatal(o, h, e, stop),
         };
-        let after = match gather(h, r.as_ref(), &t, now) {
+        let mut after = match gather(h, r.as_ref(), &t, now) {
             Ok(x) => x,
             Err(e) => return fatal(o, h, e, stop),
         };
+        let _ = once_per_config_change(&t, &mut after, true);
         o.ran = match o.ran {
             TidyRun::NotRun => TidyRun::Ran { failed, breaches: after.breaches.len() },
             TidyRun::Ran { failed: f, breaches: b } => TidyRun::Ran { failed: f + failed, breaches: b + after.breaches.len() },

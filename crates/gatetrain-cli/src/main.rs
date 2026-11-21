@@ -10,6 +10,7 @@ mod advisecmd;
 mod chaincmd;
 mod probecmd;
 mod holdcmd;
+mod metricscmd;
 mod seams;
 mod tickcmd;
 mod tidycmd;
@@ -168,6 +169,21 @@ enum Cmd {
         min: i64,
         #[arg(long = "max", default_value_t = 60)]
         max: i64,
+    },
+    /// The minutes-lost view over the last N batches: chains and reds, step medians, critical paths, cache hits, shard skew, and the
+    /// minutes lost to red chains, restarts and fix-to-next-chain waits, each attributed to its cause
+    Metrics {
+        #[arg(long, default_value = "gatetrain.db")]
+        db: String,
+        /// the last N batches (0 = all)
+        #[arg(long, default_value_t = 10)]
+        last: usize,
+        /// print JSON instead of text
+        #[arg(long)]
+        json: bool,
+        /// also write batches.csv, steps.csv and causes.csv into this folder
+        #[arg(long, value_name = "DIR")]
+        csv_dir: Option<PathBuf>,
     },
     /// Steps red in one finished run and green in another on the same commit
     Flaky {
@@ -475,6 +491,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Ingest { log, db, run_id, host, replace, stale_min, now } => cmd_runs::ingest(cmd_runs::IngestArgs { log, db, run_id, host, replace, stale_min, now }),
         Cmd::Status { log, db, now, stale_min, min, max } => cmd_runs::status(cmd_runs::StatusArgs { logs: log, db, now, stale_min, lo: min, hi: max }),
         Cmd::NextTick { log, db, now, min, max } => cmd_runs::next_tick(log, &db, now, min, max),
+        Cmd::Metrics { db, last, json, csv_dir } => metricscmd::run(&db, last, json, csv_dir.as_deref()),
         Cmd::Flaky { db } => cmd_runs::flaky(&db),
         Cmd::Stop { pattern, follower, yes, config, host } => cmd_runs::stop_cmd(&pattern, follower, yes, config, host),
         Cmd::Config { cmd: ConfigCmd::Dump { file } } => {

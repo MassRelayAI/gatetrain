@@ -19,6 +19,7 @@ pub mod lanes;
 pub mod ledger;
 pub mod logfmt;
 pub mod memory;
+pub mod metrics;
 pub mod portscan;
 pub mod precheck;
 pub mod predict;

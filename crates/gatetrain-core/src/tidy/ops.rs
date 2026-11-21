@@ -176,6 +176,9 @@ pub struct Wt {
     pub path: String,
     pub branch: Option<String>,
     pub locked: bool,
+    /// `HEAD` of the worktree as `git worktree list` prints it, and whether it is detached (no branch)
+    pub head: Option<String>,
+    pub detached: bool,
     /// git says its registration is stale (its folder is missing): `git worktree prune` would remove it
     pub prunable: bool,
 }
@@ -646,9 +649,13 @@ impl<'a> Ops<'a> {
         lines.push(String::new());
         for line in lines {
             if let Some(r) = line.strip_prefix("worktree ") {
-                cur = Some(Wt { path: strip(r).to_string(), branch: None, locked: false, prunable: false });
+                cur = Some(Wt { path: strip(r).to_string(), branch: None, locked: false, head: None, detached: false, prunable: false });
             } else if let (true, Some(c)) = (line == "locked" || line.starts_with("locked "), cur.as_mut()) {
                 c.locked = true;
+            } else if let (Some(r), Some(c)) = (line.strip_prefix("HEAD "), cur.as_mut()) {
+                c.head = Some(strip(r).to_string());
+            } else if let (true, Some(c)) = (line == "detached", cur.as_mut()) {
+                c.detached = true;
             } else if let (true, Some(c)) = (line == "prunable" || line.starts_with("prunable "), cur.as_mut()) {
                 c.prunable = true;
             } else if let (Some(r), Some(c)) = (line.strip_prefix("branch "), cur.as_mut()) {
@@ -717,6 +724,33 @@ impl<'a> Ops<'a> {
             return Ok(None);
         }
         Ok(Some(splitlines(&v.out).iter().any(|l| l.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == 'S'))))
+    }
+
+    /// Does a running process hold this folder (its working directory is inside it, or on Windows its command line names it)?
+    /// `None` = it could not be told, which the caller reads as held. Linux sees the processes this user may read; Windows has no
+    /// working directory to read, so a command line or executable path under the folder is what counts.
+    pub fn held_by_process(&self, path: &str) -> R<Option<bool>> {
+        let c = if self.win {
+            self.run0(&format!("powershell -NoProfile -Command \"Get-CimInstance Win32_Process | ForEach-Object {{ $_.CommandLine; $_.ExecutablePath }}\"; echo {END}"))?
+        } else {
+            self.run0(&format!("for p in /proc/[0-9]*; do readlink \"$p/cwd\" 2>/dev/null; done; echo {END}"))?
+        };
+        let lines: Vec<String> = splitlines(&c.out).iter().map(|l| strip(l).to_string()).collect();
+        if !c.ok() || !lines.iter().any(|l| l == END) {
+            return Ok(None);
+        }
+        let np = norm(path);
+        let pre = format!("{np}/");
+        let hit = |l: &String| {
+            if self.win {
+                let n = l.replace('\\', "/").to_lowercase();
+                let np = np.to_lowercase();
+                n.contains(&format!("{np}/")) || n.ends_with(&np)
+            } else {
+                *l == np || l.starts_with(&pre)
+            }
+        };
+        Ok(Some(lines.iter().any(|l| l != END && hit(l))))
     }
 
     // -- links (L12, L44)

@@ -107,6 +107,7 @@ Commands:
   status     One table for every chain log given: state, eta and when to look next
   next-tick  When to look at a running chain next
   flaky      Steps red in one finished run and green in another on the same commit
+  metrics    The minutes-lost view over the last N batches (see docs/metrics.md)
   stop       Stop a chain: queued followers first, then the processes (Linux only; a dry run unless --yes)
   doctor     Pre-run checks per host
   lanes      Pre-stack collision radar over lane refs
@@ -593,6 +594,8 @@ Tidy removes an item only when one of these rules names it. The rule is written 
 | class | rule (as logged) | what must be true |
 |---|---|---|
 | worktrees | `merged-clean-worktree` | The branch is not main, and its content is on main: an ancestor, or a merge into main changes nothing (`git merge-tree --write-tree`, git 2.38+). No uncommitted work (ignored files do not count). Not locked, not a link, not on a keep list, a plain branch name, and no file changed in the last `worktree_min_idle_days` when that is set. |
+| worktrees | `merged-detached-checkout` | A worktree with no branch (a chain checkout) whose commit is on main (same proof as above). Clean, not locked, not a link, not on a keep list, no file changed in the last `worktree_min_idle_days`, and **no running process holds it** (Linux: no process has its working directory inside it; Windows: no process command line or executable path names it; a listing that cannot be read counts as held). Proved again at the moment of action, on the commit the plan named. Removed by the link-safe removal, then `git worktree remove` unregisters exactly that checkout. |
+| worktrees | `aged-detached-checkout` | Only when `chain_checkout_max_age_days` is above 0: the same checks for a detached checkout whose commit is NOT on main, with nothing inside changed for that many days. Its commit is archived under the tag `archive/detached-<12 hex>` before anything is removed. |
 | targets | `lane-merged-target` | A folder under `target_roots`, named after a lane whose branch content is on main. Idle for `min_idle_min`, no file inside changed in that time, not named by a running `hold`, its worktree not dirty, not a link, not on a keep list. |
 | targets | `orphan-target` | The same, for a lane with no branch, and only when `orphan_targets = "clean"`. |
 | targets | `over-budget-target` | A folder named in `targets` whose measured size is over its `budget_gb`. Attended only: `--auto` never takes it. |
@@ -602,6 +605,12 @@ Tidy removes an item only when one of these rules names it. The rule is written 
 | trash | `old-trash-entry` | A direct child of `trash_dir`, older than `trash_days`. Age counts from when tidy first saw it, or from the stamp in its name, whichever is later. |
 
 Every `--apply` and `--auto` action appends one line to the tidy log (`log`, default `tidy-log.jsonl`): the item, the class, the bytes before and after, the time, the `rule` and the `why` (the facts for this item, such as `branch line/x is on main`). A line with status `intent` is written before the action, so a crash leaves a trace.
+
+### What tidy reports as freed, links, and the `keep_lanes` warning
+
+- **Freed is measured, never planned.** The build-cache prune reports what `docker builder prune` itself printed (`Total:` or `Total reclaimed space:`); only when the command printed neither is it the before and after of `docker system df`, and when that cannot be read the freed size is `unknown` and counts as nothing. A prune that ran is never reported as `0 B` because `df` did not move, and the planned size is an upper bound, never a result.
+- **A worktree removal never follows a link out of the worktree.** Before anything is removed the worktree's links are listed. A link whose target is inside the worktree (an npm workspace link, a relative symlink) goes with it. A link whose target is outside it (another checkout's `node_modules`, say) is unlinked first, as a link, by `unlink` on Linux and macOS or `rmdir` (directory junction) / `del` (file link) on Windows, and is never walked or deleted through. The removal is then a plain recursive remove of what is left, and afterwards every link target is checked to still exist: a missing one stops the run as a guard violation. A listing that cannot be trusted refuses the item. On Windows a junction is read from the reparse-point attribute and removed with `rmdir` on the junction itself, which removes only the junction.
+- **A `keep_lanes` entry that matches nothing** is a fact about the config, not about the host. `check` always shows it. `tidy` (with `--apply` or `--auto`) shows it the first time, remembers the set of such entries in `<log>.notified`, and does not show it again, nor count it as a crossed threshold, until the set changes. A dry run reads that file and never writes it. Disk and budget thresholds are never hidden.
 
 ### Protected paths
 
@@ -638,12 +647,13 @@ main_checkout = "/srv/repo/main"        # needed for lane / worktree logic
 root_checkout = "/srv/repo/root"        # pinned, never touched
 keep_paths    = ["/srv/repo/chain-wt"]  # worktrees or folders in use
 protect       = ["/srv/captures"]       # never removed, never contained in a removal, never reached through a link; paths or globs, default none
-keep_lanes    = ["lane-x"]              # lane names are the worktree FOLDER NAME minus worktree_prefix; an entry that matches nothing is reported
+keep_lanes    = ["lane-x"]              # lane names are the worktree FOLDER NAME minus worktree_prefix; an entry that matches nothing is reported once per config change (see below)
 worktree_prefix = "wt-"                 # a prefix of the folder name (wt-lane-x -> lane-x), never a path: a separator is a config error
 target_roots  = ["/srv/build/targets"]  # each child folder is one lane's target, named after the lane
 targets       = [{ path = "/srv/build/chain", budget_gb = 300 }]   # a shared target: reported, cleaned only by hand
 min_idle_min  = 60                      # a folder used more recently is kept (the newest file inside counts, not only the folder's own time)
 worktree_min_idle_days = 2              # a worktree with a file changed in the last N days is kept, even when merged and clean (0 = off)
+chain_checkout_max_age_days = 0         # a detached checkout NOT on main goes after this many idle days, tagged first (0 = only merged ones go)
 main_volatile_paths = [".obsidian/"]    # tools rewrite these inside main while tidy runs; they do not count as a change of main (tracked content and untracked-but-not-ignored files elsewhere do)
 link_list_timeout_s = 300               # the link listing walks a whole worktree and gets this long; a timeout refuses that ONE item, it does not stop the run
 item_budget_s = 600                     # every probe of ONE item (worktree, target, recycle-bin entry) shares this; an item that runs out is skipped and reported (0 = none)

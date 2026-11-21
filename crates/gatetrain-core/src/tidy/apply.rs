@@ -78,7 +78,7 @@ pub fn apply_plan_report(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, inv: &
             intent.push(("status".into(), J::s("intent")));
             intent.push(("note".into(), J::s("about to run")));
             log_action(log, &J::Obj(intent))?; // written BEFORE the action: a crash mid-action leaves a trace
-            let fb = if ["clean", "move", "remove", "remove-worktree"].contains(&it.kind.as_str()) { ops.free_gb(&it.key)? } else { None };
+            let fb = if ["clean", "move", "remove", "remove-worktree", "remove-detached"].contains(&it.kind.as_str()) { ops.free_gb(&it.key)? } else { None };
             let (after, status, note) = match do_item(&ops, cfg, it, now) {
                 Ok(x) => x,
                 Err(Fatal::Item(msg)) => {
@@ -129,6 +129,14 @@ fn set(rec: &mut Vec<(String, J)>, k: &str, v: J) {
 type Done = (Option<i64>, &'static str, String);
 
 /// Docker's own total for one `docker system df` type ("Images", "Build Cache"), or None when it cannot be read.
+/// What `docker builder prune` itself says it removed: a `Total:` line (BuildKit) or `Total reclaimed space:` (the older prunes). `None` when
+/// the output has neither, so the caller falls back to measuring; `0B` is a real answer (zero).
+pub fn docker_reported_total(out: &str) -> Option<i64> {
+    let re = regex::Regex::new(r"(?im)^\s*Total(?: reclaimed space)?\s*:\s*([0-9]+(?:\.[0-9]+)?\s*[KMGT]?i?B)\s*$").unwrap();
+    let m = re.captures_iter(out).last()?;
+    Some(super::inventory::parse_size(m.get(1)?.as_str()))
+}
+
 fn docker_type_bytes(ops: &Ops, ty: &str) -> R<Option<i64>> {
     let o = ops.run0(r#"docker system df --format "{{.Type}}|{{.Size}}|{{.Reclaimable}}""#)?;
     if !o.ok() {
@@ -258,6 +266,7 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done>
             Ok((if status == "ok" { Some(0) } else { None }, status, note))
         }
         "remove-worktree" => remove_worktree(ops, cfg, it),
+        "remove-detached" => remove_detached(ops, cfg, it),
         "rm-container" => {
             let o = ops.run0(r#"docker ps --format "{{.Names}}""#)?;
             if split_ws(&o.out).contains(&it.key.as_str()) {
@@ -305,7 +314,13 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done>
             let argv: Vec<String> = ["docker", "builder", "prune", "-f", "--filter"].iter().map(|s| s.to_string()).chain([format!("until={}h", cache_hours(cfg))]).collect();
             let before = docker_type_bytes(ops, "Build Cache")?;
             let r = ops.run_argv(&argv, None)?;
-            let (after, freed) = measured_after(it.bytes, before, docker_type_bytes(ops, "Build Cache")?);
+            let df_after = docker_type_bytes(ops, "Build Cache")?;
+            // the command's own report is the measurement; `docker system df` (a whole-host before/after) is the fallback only
+            let (after, freed) = match (r.ok().then(|| docker_reported_total(&r.out)).flatten(), it.bytes) {
+                (Some(f), Some(b)) => (Some(b - f), format!("{} (as docker reported)", super::inventory::human(Some(f)))),
+                (Some(f), None) => (None, format!("{} (as docker reported)", super::inventory::human(Some(f)))),
+                (None, _) => measured_after(it.bytes, before, df_after),
+            };
             Ok((after, if r.ok() { "ok" } else { "failed" }, format!("build cache older than {} days; freed: {freed}", fmt_g(cfg.cache_days))))
         }
         k => guard(format!("unknown action {k}")),
@@ -417,6 +432,61 @@ pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
         return Ok((after, "failed", "cargo clean freed nothing".into()));
     }
     Ok((after, "ok", note))
+}
+
+/// A detached-HEAD checkout (a chain checkout), proved again at the moment of action: still registered, unlocked, still detached at the
+/// planned commit, clean, no running process in it, and its commit on main (or, for the aged class, untouched for the configured days and
+/// then archived under a tag first). The folder goes by the link-safe removal, then `git worktree remove` unregisters exactly that one.
+pub fn remove_detached(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
+    let p = it.key.as_str();
+    let Extra::Detached { sha, .. } = &it.extra else { return guard(format!("{p} is not a detached-checkout item")) };
+    let Some(m) = cfg.main_checkout.as_deref() else { return guard("worktree removal needs main_checkout in the config".into()) };
+    ops.check_path(p)?;
+    if ops.is_link(p)? != Some(false) {
+        return guard(format!("{p} is a link (or cannot be probed); not removing a worktree through it"));
+    }
+    if !ops.toplevel_ok(p)? {
+        return guard(format!("{p} is not the top level of its own git worktree (its .git is missing?); not removing"));
+    }
+    if ops.dirty(p)? != Some(false) {
+        return guard(format!("{p} has uncommitted work"));
+    }
+    let reg: Vec<_> = ops.worktrees()?.into_iter().filter(|w| super::ops::norm(&w.path) == super::ops::norm(p)).collect();
+    match reg.first() {
+        None => return Err(Fatal::Item(format!("{p} is no longer a registered worktree; not removing"))),
+        Some(w) if w.locked => return Err(Fatal::Item(format!("{p} is locked now; not removing"))),
+        Some(w) if !w.detached || w.head.as_deref() != Some(sha.as_str()) => return Err(Fatal::Item(format!("{p} is no longer detached at {sha}; not removing"))),
+        _ => {}
+    }
+    let merged = ops.merged_sha(sha)? == Some(true);
+    if !merged && !(cfg.chain_checkout_max_age_days > 0.0 && ops.recent(p, cfg.chain_checkout_max_age_days * 1440.0)? == Some(false)) {
+        return guard(format!("{sha} is not on {} and {p} is not older than chain_checkout_max_age_days; not removing", cfg.main_branch));
+    }
+    if ops.held_by_process(p)? != Some(false) {
+        return Err(Fatal::Item(format!("{p} is held by a running process (or that could not be told); not removing")));
+    }
+    let before = ops.snapshot_main()?;
+    let tag = format!("archive/detached-{}", &sha[..sha.len().min(12)]);
+    let make_tag = || -> R<()> {
+        if merged {
+            return Ok(()); // already on main: nothing can be lost
+        }
+        let ex = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
+        if !(ex.ok() && crate::pycompat::strip(&ex.out) == sha.as_str()) && !ops.git(m, &["tag", &tag, sha])?.ok() {
+            return guard(format!("could not create the archive tag {tag} for {sha}; the checkout is kept"));
+        }
+        Ok(())
+    };
+    let (status, note) = ops.remove_dir_with(p, Some(&make_tag))?;
+    if status != "ok" {
+        return Ok((None, status, note));
+    }
+    let pr = ops.git_to(m, &["worktree", "remove", "--force", p], Some(cfg.remove_timeout_s))?;
+    if !pr.ok() {
+        return Ok((None, "failed", format!("STALE REGISTRATION: {p} is removed but `git worktree remove` could not unregister it (rc {})", pr.rc.map(|r| r.to_string()).unwrap_or_else(|| "timeout".into()))));
+    }
+    ops.assert_main(before)?;
+    Ok((Some(0), "ok", format!("links unlinked, detached checkout removed ({}), main checkout unchanged", if merged { format!("{} is on {}", &sha[..sha.len().min(12)], cfg.main_branch) } else { format!("not merged; archived as {tag}") })))
 }
 
 /// Order: resolve the branch to one sha, archive THAT sha under a tag and verify it, unlink links, remove the worktree, then delete

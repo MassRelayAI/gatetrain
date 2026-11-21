@@ -320,3 +320,20 @@ fn every_clap_subcommand_answers_help_without_python() {
         assert_eq!(code(&o), 0, "`{n} --help`: {}", err(&o));
     }
 }
+
+#[test]
+fn metrics_prints_the_minutes_lost_text_json_and_csv() {
+    let (d, db) = db();
+    for f in ["run-one-red.log", "run-green.log"] {
+        assert_eq!(code(&gt(&["ingest", &fx(f), "--db", &db])), 0);
+    }
+    let o = gt(&["metrics", "--db", &db]);
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    assert!(out(&o).starts_with("minutes lost: "), "{}", out(&o));
+    let j = gt(&["metrics", "--db", &db, "--json", "--csv-dir", d.path().join("csv").to_str().unwrap()]);
+    assert_eq!(code(&j), 0);
+    assert!(out(&j).contains("\"causes\""));
+    assert!(d.path().join("csv/causes.csv").exists() && d.path().join("csv/steps.csv").exists() && d.path().join("csv/batches.csv").exists());
+    let missing = gt(&["metrics", "--db", d.path().join("none.db").to_str().unwrap()]);
+    assert_ne!(code(&missing), 0);
+}
