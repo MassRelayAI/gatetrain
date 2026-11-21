@@ -191,6 +191,15 @@ fn is_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Docker prints sizes with decimal units (1 GB = 1000^3 bytes).
+pub fn parse_docker_size(s: &str) -> i64 {
+    let re = Regex::new(r"(?i)^\s*([0-9.]+)\s*([KMGT]?)i?B?\s*$").unwrap();
+    let Some(m) = re.captures(strip(s)) else { return 0 };
+    let Ok(v) = m[1].parse::<f64>() else { return 0 };
+    let p = ["", "K", "M", "G", "T"].iter().position(|x| *x == m[2].to_uppercase()).unwrap();
+    (v * 1000f64.powi(p as i32)) as i64
+}
+
 pub fn parse_size(s: &str) -> i64 {
     let re = Regex::new(r"(?i)^\s*([0-9.]+)\s*([KMGT]?)i?B?\s*$").unwrap();
     let Some(m) = re.captures(strip(s)) else { return 0 };
@@ -305,6 +314,10 @@ pub fn gather(host: &Host, runner: &dyn Runner, cfg: &TidyCfg, now: Option<f64>)
                     info.keep = Some(if merged == Some(false) { "detached head, not merged" } else { "detached head, merge state unknown" }.into());
                 } else if idle_days > 0.0 && ops.recent(wpath, idle_days * 1440.0)? != Some(false) {
                     info.keep = Some(format!("used in the last {} days", fmt_g(idle_days)));
+                } else if let Some(run) = ops.held_by_hold(wpath)? {
+                    info.keep = Some(format!("named by the host lock of run {run}"));
+                } else if ops.git_busy(wpath)? != Some(false) {
+                    info.keep = Some("a rebase, merge, cherry-pick or bisect is in progress (or that cannot be told)".into());
                 } else if ops.held_by_process(wpath)? != Some(false) {
                     info.keep = Some("held by a running process (or that cannot be told)".into());
                 } else {

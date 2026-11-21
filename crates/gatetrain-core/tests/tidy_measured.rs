@@ -7,7 +7,6 @@ use gatetrain_core::tidy::apply::apply_plan_report;
 use gatetrain_core::tidy::RunOut;
 use serde_json::json;
 
-const GB: i64 = 1 << 30;
 
 fn report(sim: &Shared, classes: &[&str], d: &tempfile::TempDir) -> (usize, usize, i64) {
     let log = d.path().join("l");
@@ -31,8 +30,8 @@ fn a_cache_prune_that_frees_little_reports_what_it_freed_not_the_plan() {
     let d = tempfile::tempdir().unwrap();
     let (done, failed, reclaimed) = report(&sim, &["cache"], &d);
     assert_eq!((done, failed), (1, 0));
-    assert!(reclaimed < GB, "reported {reclaimed} bytes reclaimed; the prune freed 0.5 GB, not the 6 GB planned");
-    assert!(reclaimed >= GB / 2 - GB / 64, "reported {reclaimed}; expected about 0.5 GB");
+    assert!(reclaimed < 600_000_000, "reported {reclaimed} bytes reclaimed; the prune freed 0.5 GB, not the 6 GB planned");
+    assert!(reclaimed >= 499_000_000, "reported {reclaimed}; expected about 0.5 GB");
 }
 
 #[test]
@@ -79,9 +78,9 @@ fn a_prune_that_ran_reports_the_total_docker_printed_even_when_df_did_not_move()
     let d = tempfile::tempdir().unwrap();
     let (done, failed, reclaimed) = report(&sim, &["cache"], &d);
     assert_eq!((done, failed), (1, 0));
-    assert_eq!(reclaimed, (2.5 * GB as f64) as i64, "docker said 2.5GB");
+    assert_eq!(reclaimed, 2_500_000_000, "docker says 2.5GB, which is decimal");
     let log = std::fs::read_to_string(d.path().join("l")).unwrap();
-    assert!(log.contains("freed: 2.50 GB") || log.contains("freed: 2.5 GB"), "the note names the measurement: {log}");
+    assert!(log.contains("as docker reported"), "the note names the measurement: {log}");
 }
 
 #[test]
@@ -90,7 +89,7 @@ fn the_older_total_reclaimed_space_line_is_read_too() {
     sim.pre(Box::new(|_s, c| if c.starts_with("docker builder prune") { Some(RunOut::done(0, "Total reclaimed space: 700MB\n")) } else { None }));
     let d = tempfile::tempdir().unwrap();
     let (_done, _failed, reclaimed) = report(&sim, &["cache"], &d);
-    assert_eq!(reclaimed, 700 * (1 << 20));
+    assert_eq!(reclaimed, 700_000_000);
 }
 
 #[test]

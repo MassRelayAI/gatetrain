@@ -181,8 +181,7 @@ fn if_the_unlink_does_nothing_the_removal_stops_before_it_can_follow_the_link() 
     }
     let d = tempfile::tempdir().unwrap();
     let r = apply_worktrees(&sim, json!({}), &d);
-    // a guard violation (Err) or a failed item: either way the other checkout is whole
-    let _ = r;
+    assert!(matches!(r, Err(Fatal::Guard(_))) || r.as_ref().is_ok_and(|x| x.1 >= 1), "a failed unlink must be a guard stop or a failed item: {r:?}");
     assert!(sim.s().has("/repo/main/node_modules/pkg.js"), "the link target must survive a failed unlink");
 }
 
@@ -247,4 +246,103 @@ fn other_thresholds_are_never_hidden() {
     tidy_run(&sim, &conf, &["--auto"]);
     let o = tidy_run(&sim, &conf, &["--auto"]);
     assert!(o.stdout.contains("THRESHOLD: disk /build"), "{}", o.stdout);
+}
+
+// ---------------------------------------------------------------- review fixes (0.2.1)
+
+#[test]
+fn an_unreadable_process_makes_the_answer_unknown_and_the_checkout_is_kept() {
+    let sim = chain_sim(true);
+    sim.s().holders = vec!["/somewhere/else".into(), gatetrain_core::tidy::ops::UNREAD.into()];
+    let inv = gather_chain(&sim, json!({}));
+    assert!(chain_item(&inv).is_none());
+    assert!(keep_of(&inv).contains("held by a running process"), "{}", keep_of(&inv));
+}
+
+#[test]
+fn a_container_mounting_the_checkout_or_a_parent_or_a_child_holds_it() {
+    for src in [CHAIN, "/repo/wt", "/repo/wt/chain-1/sub"] {
+        let sim = chain_sim(true);
+        sim.s().holders = vec![format!("MOUNT {src}")];
+        assert!(chain_item(&gather_chain(&sim, json!({}))).is_none(), "mount {src}");
+    }
+    let sim = chain_sim(true);
+    sim.s().holders = vec!["MOUNT /other".into()];
+    assert!(chain_item(&gather_chain(&sim, json!({}))).is_some());
+}
+
+#[test]
+fn an_open_file_or_the_executable_inside_the_checkout_holds_it() {
+    let sim = chain_sim(true);
+    sim.s().holders = vec!["/".into(), format!("{CHAIN}/target/debug/tool (deleted)")];
+    assert!(chain_item(&gather_chain(&sim, json!({}))).is_none());
+}
+
+#[test]
+fn on_windows_a_detached_checkout_is_always_kept_because_no_handle_check_exists() {
+    let sim = win_sim();
+    {
+        let s = &mut *sim.s();
+        s.worktrees.push(("C:/repo/wt/chain-1".into(), String::new()));
+        s.dir("C:/repo/wt/chain-1", 10 * DAY);
+        s.file("C:/repo/wt/chain-1/a", 5, 10 * DAY);
+        let sha = s.detached_sha("C:/repo/wt/chain-1");
+        s.ancestors.insert(sha);
+    }
+    let inv = gather_sim(&sim, win_extra(), true, 50.0).2;
+    assert!(inv.items.iter().all(|i| i.key != "C:/repo/wt/chain-1"));
+    assert!(inv.worktrees.iter().find(|w| w.path == "C:/repo/wt/chain-1").unwrap().keep.clone().unwrap().contains("held by a running process"));
+}
+
+#[test]
+fn a_file_written_after_the_plan_stops_a_merged_detached_removal_at_apply_time() {
+    let sim = chain_sim(true);
+    let d = tempfile::tempdir().unwrap();
+    let log = d.path().join("l.jsonl");
+    let (h, t, inv) = gather_sim(&sim, json!({"log": log.to_string_lossy(), "worktree_min_idle_days": 2}), false, 50.0);
+    assert!(chain_item(&inv).is_some());
+    sim.s().file(&format!("{CHAIN}/fresh.rs"), 1, 60); // a minute old
+    let (_done, failed) = apply_plan(&h, &sim, &t, &inv, &["worktrees".to_string()], Some(NOW as f64), None, false).unwrap();
+    assert!(failed >= 1);
+    assert!(sim.s().has(CHAIN));
+}
+
+#[test]
+fn a_content_equal_but_not_ancestor_commit_is_archived_under_a_tag() {
+    let sim = chain_sim(false);
+    {
+        let s = &mut *sim.s();
+        let sha = s.detached_sha(CHAIN);
+        let t = s.tree_main.clone();
+        s.mtree.insert(sha, t); // merging it into main changes nothing: "merged" by content, not an ancestor
+    }
+    let d = tempfile::tempdir().unwrap();
+    let (done, _f) = apply_worktrees(&sim, json!({}), &d).unwrap();
+    assert!(done >= 1);
+    assert!(!sim.s().has(CHAIN));
+    assert!(sim.calls().iter().any(|c| c.contains(" tag archive/detached-")), "{:?}", sim.calls());
+}
+
+#[test]
+fn a_half_done_rebase_merge_cherry_pick_or_bisect_keeps_the_checkout() {
+    for f in ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "BISECT_LOG"] {
+        let sim = chain_sim(true);
+        sim.s().dir(&format!("{CHAIN}/.git/{f}"), 10 * DAY);
+        let inv = gather_chain(&sim, json!({}));
+        assert!(chain_item(&inv).is_none(), "{f}");
+        assert!(keep_of(&inv).contains("in progress"), "{f}: {}", keep_of(&inv));
+    }
+}
+
+#[test]
+fn a_checkout_named_by_the_host_lock_is_kept() {
+    let sim = chain_sim(true);
+    let (cfg, mut h) = hostcfg(json!({}), false, 50.0);
+    h.lock_file = Some("/run/h.lock".into());
+    let lock = json!({"state": "held", "run_id": "r1", "targets": [CHAIN]});
+    sim.s().scripts.insert("/run/h.lock.info".into(), lock.to_string());
+    let t = gatetrain_core::tidy::config::build_cfg(&cfg, &h).unwrap();
+    let inv = gatetrain_core::tidy::inventory::gather(&h, &sim, &t, Some(NOW as f64)).unwrap();
+    assert!(chain_item(&inv).is_none());
+    assert!(keep_of(&inv).contains("host lock of run r1"), "{}", keep_of(&inv));
 }

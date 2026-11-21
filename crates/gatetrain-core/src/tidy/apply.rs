@@ -134,7 +134,7 @@ type Done = (Option<i64>, &'static str, String);
 pub fn docker_reported_total(out: &str) -> Option<i64> {
     let re = regex::Regex::new(r"(?im)^\s*Total(?: reclaimed space)?\s*:\s*([0-9]+(?:\.[0-9]+)?\s*[KMGT]?i?B)\s*$").unwrap();
     let m = re.captures_iter(out).last()?;
-    Some(super::inventory::parse_size(m.get(1)?.as_str()))
+    Some(super::inventory::parse_docker_size(m.get(1)?.as_str()))
 }
 
 fn docker_type_bytes(ops: &Ops, ty: &str) -> R<Option<i64>> {
@@ -317,7 +317,7 @@ pub fn do_item(ops: &Ops, cfg: &TidyCfg, it: &Item, now: Option<f64>) -> R<Done>
             let df_after = docker_type_bytes(ops, "Build Cache")?;
             // the command's own report is the measurement; `docker system df` (a whole-host before/after) is the fallback only
             let (after, freed) = match (r.ok().then(|| docker_reported_total(&r.out)).flatten(), it.bytes) {
-                (Some(f), Some(b)) => (Some(b - f), format!("{} (as docker reported)", super::inventory::human(Some(f)))),
+                (Some(f), Some(b)) => (Some((b - f).max(0)), format!("{} (as docker reported)", super::inventory::human(Some(f)))),
                 (Some(f), None) => (None, format!("{} (as docker reported)", super::inventory::human(Some(f)))),
                 (None, _) => measured_after(it.bytes, before, df_after),
             };
@@ -462,13 +462,25 @@ pub fn remove_detached(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     if !merged && !(cfg.chain_checkout_max_age_days > 0.0 && ops.recent(p, cfg.chain_checkout_max_age_days * 1440.0)? == Some(false)) {
         return guard(format!("{sha} is not on {} and {p} is not older than chain_checkout_max_age_days; not removing", cfg.main_branch));
     }
+    // the idle rule again at the moment of action, for the merged class too: something may have written there since the plan
+    let idle_days = if merged { cfg.worktree_min_idle_days } else { cfg.chain_checkout_max_age_days };
+    if idle_days > 0.0 && ops.recent(p, idle_days * 1440.0)? != Some(false) {
+        return Err(Fatal::Item(format!("{p} was used in the last {} days; not removing", fmt_g(idle_days))));
+    }
+    if let Some(run) = ops.held_by_hold(p)? {
+        return Err(Fatal::Item(format!("{p} is named by the host lock of run {run}; not removing")));
+    }
+    if ops.git_busy(p)? != Some(false) {
+        return Err(Fatal::Item(format!("{p} has a rebase, merge, cherry-pick or bisect in progress (or that could not be told); not removing")));
+    }
     if ops.held_by_process(p)? != Some(false) {
-        return Err(Fatal::Item(format!("{p} is held by a running process (or that could not be told); not removing")));
+        return Err(Fatal::Item(format!("{p} is held by a running process or container (or that could not be told); not removing")));
     }
     let before = ops.snapshot_main()?;
     let tag = format!("archive/detached-{}", &sha[..sha.len().min(12)]);
+    let strict = ops.is_ancestor(sha)?;
     let make_tag = || -> R<()> {
-        if merged {
+        if strict {
             return Ok(()); // already on main: nothing can be lost
         }
         let ex = ops.git(m, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")])?;
@@ -486,7 +498,7 @@ pub fn remove_detached(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
         return Ok((None, "failed", format!("STALE REGISTRATION: {p} is removed but `git worktree remove` could not unregister it (rc {})", pr.rc.map(|r| r.to_string()).unwrap_or_else(|| "timeout".into()))));
     }
     ops.assert_main(before)?;
-    Ok((Some(0), "ok", format!("links unlinked, detached checkout removed ({}), main checkout unchanged", if merged { format!("{} is on {}", &sha[..sha.len().min(12)], cfg.main_branch) } else { format!("not merged; archived as {tag}") })))
+    Ok((Some(0), "ok", format!("links unlinked, detached checkout removed ({}), main checkout unchanged", if strict { format!("{} is on {}", &sha[..sha.len().min(12)], cfg.main_branch) } else { format!("not an ancestor of {}; archived as {tag}", cfg.main_branch) })))
 }
 
 /// Order: resolve the branch to one sha, archive THAT sha under a tag and verify it, unlink links, remove the worktree, then delete

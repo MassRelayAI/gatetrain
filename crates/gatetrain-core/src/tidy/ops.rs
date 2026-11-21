@@ -726,31 +726,59 @@ impl<'a> Ops<'a> {
         Ok(Some(splitlines(&v.out).iter().any(|l| l.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == 'S'))))
     }
 
-    /// Does a running process hold this folder (its working directory is inside it, or on Windows its command line names it)?
-    /// `None` = it could not be told, which the caller reads as held. Linux sees the processes this user may read; Windows has no
-    /// working directory to read, so a command line or executable path under the folder is what counts.
-    pub fn held_by_process(&self, path: &str) -> R<Option<bool>> {
-        let c = if self.win {
-            self.run0(&format!("powershell -NoProfile -Command \"Get-CimInstance Win32_Process | ForEach-Object {{ $_.CommandLine; $_.ExecutablePath }}\"; echo {END}"))?
-        } else {
-            self.run0(&format!("for p in /proc/[0-9]*; do readlink \"$p/cwd\" 2>/dev/null; done; echo {END}"))?
-        };
-        let lines: Vec<String> = splitlines(&c.out).iter().map(|l| strip(l).to_string()).collect();
-        if !c.ok() || !lines.iter().any(|l| l == END) {
+    /// Is a git operation half done in this worktree (rebase, merge, cherry-pick, bisect)? `None` = could not be told.
+    pub fn git_busy(&self, path: &str) -> R<Option<bool>> {
+        let g = self.git(path, &["rev-parse", "--git-dir"])?;
+        let gd = strip(&g.out).to_string();
+        if !g.ok() || gd.is_empty() {
             return Ok(None);
         }
-        let np = norm(path);
-        let pre = format!("{np}/");
-        let hit = |l: &String| {
-            if self.win {
-                let n = l.replace('\\', "/").to_lowercase();
-                let np = np.to_lowercase();
-                n.contains(&format!("{np}/")) || n.ends_with(&np)
-            } else {
-                *l == np || l.starts_with(&pre)
+        let gd = if gd.starts_with('/') || (gd.len() > 1 && gd.as_bytes()[1] == b':') { gd } else { self.join(path, &gd) };
+        for f in ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "BISECT_LOG"] {
+            match self.exists(&self.join(&gd, f))? {
+                Some(false) => {}
+                Some(true) => return Ok(Some(true)),
+                None => return Ok(None),
             }
-        };
-        Ok(Some(lines.iter().any(|l| l != END && hit(l))))
+        }
+        Ok(Some(false))
+    }
+
+    /// Strictly an ancestor of main (a content-equal merge is not enough to skip an archive tag).
+    pub fn is_ancestor(&self, sha: &str) -> R<bool> {
+        if !safe_branch(sha) {
+            return Ok(false);
+        }
+        Ok(self.git(self.main()?, &["merge-base", "--is-ancestor", sha, &format!("refs/heads/{}", self.cfg.main_branch)])?.ok())
+    }
+
+    /// The run that a host lock sidecar names as building in, or under, this folder.
+    pub fn held_by_hold(&self, path: &str) -> R<Option<String>> {
+        let np = norm(path);
+        for (h, run) in self.hold_named()? {
+            if np == h || np.starts_with(&format!("{h}/")) || h.starts_with(&format!("{np}/")) {
+                return Ok(Some(run));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Does anything running hold this folder? `None` = it could not be told, which every caller reads as held.
+    /// Linux: for every process of THIS user, its working directory, executable and open files (`/proc/<pid>/{cwd,exe,fd/*}`) inside or
+    /// equal to the folder, and every running container whose mount source is the folder, inside it or a parent of it (`docker inspect`).
+    /// A process of this user whose working directory cannot be read makes the answer unknown. LIMITATION: processes of other users
+    /// (including root processes in containers that bind-mount a checkout without docker being reachable) cannot be read; they are
+    /// covered only by the idle check (`worktree_min_idle_days`). Windows: always unknown (a command line is not a handle; matching it
+    /// misses shells opened in the folder, relative paths and other users), so a Windows host never removes a detached checkout.
+    pub fn held_by_process(&self, path: &str) -> R<Option<bool>> {
+        if self.win {
+            return Ok(None);
+        }
+        let c = self.run0(&proc_scan_script("/proc"))?;
+        if !c.ok() {
+            return Ok(None);
+        }
+        Ok(parse_holders(&c.out, path))
     }
 
     // -- links (L12, L44)
@@ -1053,4 +1081,33 @@ pub fn free_gb(h: &Host, runner: &dyn Runner, path: &str) -> R<Option<f64>> {
     }
     let cols = split_ws(lines.last().unwrap());
     Ok(if cols.len() >= 4 && is_digits(cols[3]) { cols[3].parse::<f64>().ok().map(|v| v / (1024.0 * 1024.0)) } else { None })
+}
+
+/// The unreadable-process marker of the scan.
+pub const UNREAD: &str = "__GT_UNREADABLE__";
+
+/// One shell line that lists what holds folders: per process of the current user its cwd, exe and fd targets (a process whose cwd cannot be
+/// read prints `UNREAD`; zombies and processes that vanished mid-scan are skipped), then `MOUNT <source>` per mount of each running
+/// container, then the end marker. `root` is `/proc` (a test points it at a fixture).
+pub fn proc_scan_script(root: &str) -> String {
+    format!(
+        "for p in {root}/[0-9]*; do [ -d \"$p\" ] || continue; [ \"$(stat -c %u \"$p\" 2>/dev/null)\" = \"$(id -u)\" ] || continue; grep -q '^State:[[:space:]]*Z' \"$p/status\" 2>/dev/null && continue; c=$(readlink \"$p/cwd\" 2>/dev/null) || {{ [ -d \"$p\" ] && echo {UNREAD}; continue; }}; echo \"$c\"; readlink \"$p/exe\" 2>/dev/null; for f in \"$p\"/fd/*; do readlink \"$f\" 2>/dev/null; done; done; if command -v docker >/dev/null 2>&1; then docker ps -q 2>/dev/null | xargs -r docker inspect --format '{{{{range .Mounts}}}}{{{{.Source}}}}{{{{println}}}}{{{{end}}}}' 2>/dev/null | sed 's/^/MOUNT /'; fi; echo {END}"
+    )
+}
+
+/// Read the scan's output: `None` when it did not finish or any process was unreadable; else whether anything is in or on `path`.
+pub fn parse_holders(out: &str, path: &str) -> Option<bool> {
+    let lines: Vec<String> = splitlines(out).iter().map(|l| strip(l).to_string()).collect();
+    if !lines.iter().any(|l| l == END) || lines.iter().any(|l| l == UNREAD) {
+        return None;
+    }
+    let np = norm(path);
+    let inside = |x: &str| x == np || x.starts_with(&format!("{np}/"));
+    Some(lines.iter().any(|l| match l.strip_prefix("MOUNT ") {
+        Some(src) => {
+            let src = norm(src);
+            inside(&src) || np.starts_with(&format!("{src}/"))
+        }
+        None => l != END && inside(l.trim_end_matches(" (deleted)")),
+    }))
 }

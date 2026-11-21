@@ -525,6 +525,9 @@ impl Sim {
         if a.starts_with("worktree list") {
             return ok(st.worktrees.iter().map(|w| format!("worktree {}\nHEAD {}\n{}\n{}{}", w.0, if w.1.is_empty() { st.detached_sha(&w.0) } else { "abc".to_string() }, if w.1.is_empty() { "detached".to_string() } else { format!("branch refs/heads/{}", w.1) }, if st.locked.contains(&n(&w.0)) { "locked\n" } else { "" }, if !st.has(&w.0) && n(&w.0) != n(&st.main) { "prunable gitdir file points to non-existent location\n" } else { "" })).collect::<Vec<_>>().join("\n"));
         }
+        if a == "rev-parse --git-dir" {
+            return ok(format!("{repo}/.git\n"));
+        }
         if a == "branch --list" {
             return ok(st.branches.iter().map(|b| format!("  {b}")).collect::<Vec<_>>().join("\n") + "\n");
         }
