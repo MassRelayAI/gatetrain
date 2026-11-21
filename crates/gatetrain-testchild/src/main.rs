@@ -50,16 +50,20 @@ fn main() {
             let _ = Command::new(me).args(["marker", arg(1), arg(2)]).spawn();
             std::thread::sleep(Duration::from_secs_f64(arg(2).parse().unwrap_or(0.0)));
         }
-        // `fakessh TARGET -o OPT ... COMMAND`: stands in for ssh in the multi-host tests. COMMAND (POSIX-quoted, as the coordinator
+        // `fakessh [-o OPT]... -- TARGET COMMAND`: stands in for ssh in the multi-host tests. COMMAND (POSIX-quoted, as the coordinator
         // sends it) runs here, on this machine; `cat -- FILE` is answered by reading FILE. `FAKESSH_DROP=<target>,...` makes every
         // `agent run` to those targets end like a dropped connection (exit 255, no output).
         "fakessh" => {
-            let target = arg(1).to_string();
-            let mut i = 2;
+            // ssh [-o OPT]... [--] TARGET COMMAND
+            let mut i = 1;
             while arg(i) == "-o" {
                 i += 2;
             }
-            let words = split_posix(arg(i));
+            if arg(i) == "--" {
+                i += 1;
+            }
+            let target = arg(i).to_string();
+            let words = split_posix(arg(i + 1));
             let drop = std::env::var("FAKESSH_DROP").unwrap_or_default();
             if words.iter().any(|w| w == "run") && drop.split(',').any(|t| t == target) {
                 eprintln!("Connection to {target} closed by remote host.");

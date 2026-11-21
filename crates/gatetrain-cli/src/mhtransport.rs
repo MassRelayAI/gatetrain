@@ -49,11 +49,13 @@ pub fn ssh_program() -> Vec<String> {
 /// `<ssh> <target> -o ... '<command line>'`: the options make a silent host a lost one within about a minute.
 pub fn ssh_argv(ssh: &[String], target: &str, remote: &[String]) -> Vec<String> {
     let mut v: Vec<String> = ssh.to_vec();
-    v.push(target.to_string());
     for o in ["BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=15", "ServerAliveCountMax=4"] {
         v.push("-o".into());
         v.push(o.into());
     }
+    // options first, then `--`: a target can never be read as an option
+    v.push("--".into());
+    v.push(target.to_string());
     v.push(shlex_join(remote));
     v
 }
@@ -64,9 +66,9 @@ pub fn push_argv(top: &Path, w: &Worker, sha: &str) -> Vec<String> {
     vec!["git".into(), "-C".into(), top.to_string_lossy().into_owned(), "push".into(), "--quiet".into(), "--force".into(), url, format!("{sha}:refs/gatetrain/incoming")]
 }
 
-/// The agent's own arguments for `hello` on a worker.
-pub fn hello_args(w: &Worker, sha: &str, probes: &[String]) -> Vec<String> {
-    let mut a = vec![w.bin.clone(), "agent".into(), "hello".into(), "--workdir".into(), w.workdir.clone(), "--sha".into(), sha.into()];
+/// The agent's own arguments for `hello` on a worker with `slots` checkouts.
+pub fn hello_args(w: &Worker, sha: &str, probes: &[String], slots: usize) -> Vec<String> {
+    let mut a = vec![w.bin.clone(), "agent".into(), "hello".into(), "--workdir".into(), w.workdir.clone(), "--sha".into(), sha.into(), "--slots".into(), slots.to_string()];
     if let Some(r) = &w.repo {
         a.extend(["--repo".into(), r.clone()]);
     }
@@ -85,10 +87,13 @@ pub fn hello_args(w: &Worker, sha: &str, probes: &[String]) -> Vec<String> {
     a
 }
 
-fn run_args(bin: &str, workdir: &str, steps_rel: &str, req: &StepReq, out: Option<&Path>) -> Vec<String> {
+fn run_args(bin: &str, workdir: &str, steps_rel: &str, req: &StepReq, out: Option<&Path>, slot: Option<usize>) -> Vec<String> {
     let mut a = vec![bin.into(), "agent".into(), "run".into(), "--workdir".into(), workdir.into(), "--sha".into(), req.sha.clone(), "--steps".into(), steps_rel.into(), "--step".into(), req.step.clone(), "--run-id".into(), req.run_id.clone(), "--par".into(), req.par.to_string()];
     if let Some(o) = out {
         a.extend(["--out".into(), o.to_string_lossy().into_owned()]);
+    }
+    if let Some(k) = slot {
+        a.extend(["--slot".into(), k.to_string()]);
     }
     for p in &req.probes {
         a.extend(["--probe".into(), p.clone()]);
@@ -151,6 +156,19 @@ fn stream(argv: &[String], tag: &str, limit: Option<f64>, line: &mut dyn FnMut(&
     Ok((st.code(), found, er.join().unwrap_or_default()))
 }
 
+/// A file name a worker may send back for this step: only `<step>.full`, `<step>.check.full` and the step's own shard files
+/// (`<step>.<i>of<n>.full`, as its result names them), in `[A-Za-z0-9._-]`. Anything else (another step's file, a stamp, `C:x`,
+/// a path) is refused, so a worker can never write outside its own step's files in --out.
+pub fn output_name_ok(step: &str, shards: &[String], f: &str) -> bool {
+    let plain = !f.is_empty() && f.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) && !f.starts_with('.');
+    let shard = |x: &str| {
+        x.strip_prefix(step).and_then(|r| r.strip_prefix('.')).and_then(|r| r.strip_suffix(".full")).and_then(|r| r.split_once("of")).is_some_and(|(i, n)| {
+            matches!((i.parse::<u32>(), n.parse::<u32>()), (Ok(i), Ok(n)) if i >= 1 && i <= n && n <= 64)
+        })
+    };
+    plain && (f == format!("{step}.full") || f == format!("{step}.check.full") || (shards.iter().any(|s| s == f) && shard(f)))
+}
+
 fn tail(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -171,7 +189,7 @@ impl Transport for Real {
                 return Err(format!("git push to the host failed: {}", tail(&String::from_utf8_lossy(&o.stderr))));
             }
         }
-        let argv = ssh_argv(&self.ssh, &w.target, &hello_args(w, sha, probes));
+        let argv = ssh_argv(&self.ssh, &w.target, &hello_args(w, sha, probes, host.slots));
         let (rc, json, err) = stream(&argv, "AGENT_HELLO", Some(3700.0), &mut |_| {})?;
         match json {
             Some(j) => serde_json::from_str(&j).map_err(|e| format!("an AGENT_HELLO line that is not valid: {e}")),
@@ -182,11 +200,11 @@ impl Transport for Real {
     fn run_step(&self, host: &HostSpec, req: &StepReq, line: &mut dyn FnMut(&str)) -> Result<AgentResult, String> {
         let argv = if host.local {
             // the coordinator's own slots: the same agent, as a child process in its own checkout, writing straight into --out
-            run_args(&self.exe.to_string_lossy(), &self.top.to_string_lossy(), &self.steps_rel, req, Some(&self.out))
+            run_args(&self.exe.to_string_lossy(), &self.top.to_string_lossy(), &self.steps_rel, req, Some(&self.out), None)
         } else {
             let w = self.worker(host)?;
             let mut remote = w.prefix.clone();
-            remote.extend(run_args(&w.bin, &w.workdir, &self.steps_rel, req, None));
+            remote.extend(run_args(&w.bin, &w.workdir, &self.steps_rel, req, None, Some(req.slot)));
             ssh_argv(&self.ssh, &w.target, &remote)
         };
         // the step's own timeout is enforced by the engine on the host; this one only catches a session that never ends
@@ -205,7 +223,7 @@ impl Transport for Real {
         let w = self.worker(host)?;
         let mut missing = Vec::new();
         for f in &res.files {
-            if f.contains('/') || f.contains('\\') || f.starts_with('.') {
+            if !output_name_ok(&res.step, &res.shards.iter().map(|s| s.log_ref.clone()).collect::<Vec<_>>(), f) {
                 missing.push(format!("{f} (not a plain file name)"));
                 continue;
             }
@@ -229,7 +247,7 @@ impl Transport for Real {
 
     fn finish(&self, host: &HostSpec, run_id: &str) {
         if let Ok(w) = self.worker(host) {
-            let argv = ssh_argv(&self.ssh, &w.target, &[w.bin.clone(), "agent".into(), "clean".into(), "--workdir".into(), w.workdir.clone(), "--run-id".into(), run_id.into()]);
+            let argv = ssh_argv(&self.ssh, &w.target, &[w.bin.clone(), "agent".into(), "clean".into(), "--workdir".into(), w.workdir.clone(), "--run-id".into(), run_id.into(), "--slots".into(), host.slots.to_string()]);
             let _ = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
         }
     }
@@ -254,17 +272,31 @@ mod tests {
 
     #[test]
     fn hello_carries_the_repo_the_prepare_and_the_probes() {
-        let a = hello_args(&w(), "abc1234", &["node -v".into()]);
+        let a = hello_args(&w(), "abc1234", &["node -v".into()], 3);
         let j = a.join(" ");
         assert!(j.contains("--repo /srv/gt/repo.git") && j.contains("--prepare npm ci") && j.contains("--prepare-key package-lock.json") && j.contains("--probe node -v"), "{j}");
         assert!(!j.contains("--fetch"), "push mode does not fetch");
+        assert!(j.contains("--slots 3"), "{j}");
     }
 
     #[test]
-    fn ssh_is_batch_mode_with_keepalive_and_one_quoted_command() {
+    fn ssh_is_batch_mode_with_keepalive_options_first_then_the_target_after_a_double_dash() {
         let v = ssh_argv(&["ssh".into()], "h", &["gatetrain".into(), "agent".into(), "--probe".into(), "node -v".into()]);
-        assert_eq!(v[1], "h");
-        assert!(v.contains(&"BatchMode=yes".to_string()) && v.contains(&"ServerAliveInterval=15".to_string()));
+        let dd = v.iter().position(|a| a == "--").expect("a -- before the target");
+        assert_eq!(v[dd + 1], "h");
+        assert!(v[..dd].contains(&"BatchMode=yes".to_string()) && v[..dd].contains(&"ServerAliveInterval=15".to_string()));
         assert_eq!(v.last().unwrap(), "gatetrain agent --probe 'node -v'");
+        assert_eq!(v.len(), dd + 3);
+    }
+
+    #[test]
+    fn only_the_steps_own_output_files_are_copied_back() {
+        let shards = ["unit.1of2.full".to_string(), "unit.2of2.full".to_string()];
+        for ok in ["unit.full", "unit.check.full", "unit.1of2.full"] {
+            assert!(output_name_ok("unit", &shards, ok), "{ok}");
+        }
+        for bad in ["other.full", "stamp-abc.json", "C:evil", "unit.full:x", "unit.3of2.full", "..", "unit.ful", "u nit.full"] {
+            assert!(!output_name_ok("unit", &shards, bad), "{bad}");
+        }
     }
 }

@@ -1856,6 +1856,9 @@ impl<'a> Engine<'a> {
         if v["sha"].as_str() != Some(sha) {
             return Some(format!("the chain stamp {} names another commit", file.display()));
         }
+        if v["partial"].as_bool() == Some(true) {
+            return Some(format!("the chain stamp {} is partial (a run of some steps only)", file.display()));
+        }
         if let Some(want) = self.cfg.preflight_steps_file.as_deref() {
             let have = evidence::file_digest(&self.abs(wd, want));
             if have.is_none() || v["digest"].as_str() != have.as_deref() {
@@ -1921,7 +1924,8 @@ impl<'a> Engine<'a> {
         let mut missing = vec![];
         for l in f.facts.get("lanes").and_then(|l| l.as_array()).cloned().unwrap_or_default() {
             let tip = l["tip"].as_str().unwrap_or_default();
-            let ok = std::fs::read_to_string(dir.join(format!("stamp-{tip}.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["sha"].as_str() == Some(tip));
+            // a partial stamp (a run of some steps) proves only those steps: it is no lane stamp
+            let ok = std::fs::read_to_string(dir.join(format!("stamp-{tip}.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["sha"].as_str() == Some(tip) && v["partial"].as_bool() != Some(true));
             if !ok {
                 missing.push(format!("{} ({})", l["ref"].as_str().unwrap_or("?"), short(tip)));
             }

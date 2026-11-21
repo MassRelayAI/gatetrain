@@ -25,6 +25,9 @@ pub fn workers_of(file: &Path, only: &[String]) -> Result<Option<Workers>, Strin
     let mut map = HashMap::new();
     for h in cfg.hosts.iter().filter(|h| h.enabled && h.roles.iter().any(|r| r == "worker") && (only.is_empty() || only.contains(&h.name))) {
         let target = h.reach.strip_prefix("ssh ").map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| format!("host {:?}: a worker needs reach = \"ssh <target>\", got {:?}", h.name, h.reach))?;
+        if target.starts_with('-') || target.contains(char::is_whitespace) {
+            return Err(format!("host {:?}: reach must be \"ssh <user@address>\" with one target and no ssh options, got {:?}", h.name, h.reach));
+        }
         let w = &h.worker;
         let workdir = w.workdir.clone().ok_or_else(|| format!("host {:?}: a worker needs a workdir", h.name))?;
         let slots = w.slots.or(h.max_parallel_steps).unwrap_or(1).max(1) as usize;
@@ -122,4 +125,25 @@ pub fn run(a: ChainArgs, mut plan: Plan, text: &str, w: Workers, expected: Optio
     };
     let res = gatetrain_core::multihost::run(&plan, &digest_of(text), &o, t, &mut emit);
     finish(res, a.db, Some(run_id), &out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("hosts.toml");
+        std::fs::write(&p, body).unwrap();
+        (d, p)
+    }
+
+    #[test]
+    fn a_reach_that_looks_like_an_ssh_option_is_refused() {
+        let (_d, p) = file("[[hosts]]\nname = 'w'\nroles = ['worker']\nreach = 'ssh -oProxyCommand=touch-x'\nworkdir = '/w'\n");
+        let e = workers_of(&p, &[]).expect_err("refused");
+        assert!(e.contains("reach"), "{e}");
+        let (_d2, p2) = file("[[hosts]]\nname = 'w'\nroles = ['worker']\nreach = 'ssh user@192.0.2.1'\nworkdir = '/w'\n");
+        assert!(workers_of(&p2, &[]).unwrap().is_some());
+    }
 }

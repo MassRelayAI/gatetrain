@@ -143,7 +143,9 @@ fn advise_prints_evidence_stores_the_advice_and_changes_nothing_else() {
     std::fs::write(&cfg, format!("{HX}# sharded\n")).unwrap();
     {
         let l = rusqlite::Connection::open(&db).unwrap();
-        l.execute("INSERT INTO runs(id,kind,host,started_at,ended_at,outcome) VALUES('a4','chain','hx','2026-11-20T10:00:00+00:00','2026-11-20T10:10:00+00:00','green')", []).unwrap();
+        // the advice was recorded at the real time of the call above: the run after it starts now, not on a fixed date
+        let start = gatetrain_core::logfmt::Ts::now_utc().plus_seconds(60.0);
+        l.execute("INSERT INTO runs(id,kind,host,started_at,ended_at,outcome) VALUES('a4','chain','hx',?,?,'green')", [start.iso(), start.plus_seconds(600.0).iso()]).unwrap();
     }
     let o = gt(d.path()).args(args).output().unwrap();
     assert!(o.status.success(), "{}", out(&o));

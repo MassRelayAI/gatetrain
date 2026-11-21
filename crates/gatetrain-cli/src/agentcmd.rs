@@ -41,6 +41,9 @@ pub struct HelloArgs {
     /// a fingerprint command (repeat)
     #[arg(long)]
     probe: Vec<String>,
+    /// how many checkouts to keep ready: slot 0 is the work dir, slot k is `<work dir>-slot<k>`, a worktree of the same repository
+    #[arg(long, default_value_t = 1)]
+    slots: usize,
 }
 
 #[derive(Args)]
@@ -63,6 +66,9 @@ pub struct RunArgs {
     out: Option<PathBuf>,
     #[arg(long)]
     probe: Vec<String>,
+    /// which checkout runs the step (see `hello --slots`)
+    #[arg(long, default_value_t = 0)]
+    slot: usize,
 }
 
 #[derive(Args)]
@@ -71,6 +77,17 @@ pub struct CleanArgs {
     workdir: PathBuf,
     #[arg(long)]
     run_id: String,
+    #[arg(long, default_value_t = 1)]
+    slots: usize,
+}
+
+/// The checkout of one slot: the work dir itself, or `<work dir>-slot<k>`.
+pub fn slot_dir(workdir: &Path, k: usize) -> PathBuf {
+    if k == 0 {
+        workdir.to_path_buf()
+    } else {
+        PathBuf::from(format!("{}-slot{k}", workdir.to_string_lossy().trim_end_matches(['/', '\\'])))
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -113,37 +130,57 @@ fn hello_inner(a: &HelloArgs) -> Result<Hello, String> {
     if !valid_sha(&a.sha) {
         return Err("--sha must be a commit id".into());
     }
+    if !(1..=256).contains(&a.slots) {
+        return Err("--slots must be 1 to 256".into());
+    }
     if !a.workdir.exists() {
         let repo = a.repo.as_ref().ok_or_else(|| format!("the work dir {} does not exist (give the host a repo to make it from)", a.workdir.display()))?;
         git(repo, &["worktree", "prune"])?;
-        let wd = a.workdir.to_string_lossy().into_owned();
-        git(repo, &["worktree", "add", "--detach", &wd, &a.sha])?;
+        git(repo, &["worktree", "add", "--detach", &a.workdir.to_string_lossy(), &a.sha])?;
     }
-    let nowhere = a.workdir.join(".git");
-    clean(&a.workdir, &nowhere)?;
+    clean(&a.workdir, &a.workdir.join(".git"))?;
     if a.fetch {
         git(&a.workdir, &["fetch", "--quiet"])?;
     }
     git(&a.workdir, &["cat-file", "-e", &format!("{}^{{commit}}", a.sha)]).map_err(|_| format!("commit {} is not in the work dir (push it, or fetch it)", a.sha))?;
-    git(&a.workdir, &["checkout", "--detach", "--quiet", &a.sha])?;
-    let head = git(&a.workdir, &["rev-parse", "HEAD"])?;
+    let mut head = String::new();
+    // every slot has its own checkout, so a step can only ever see (and dirty) its own tree
+    for k in 0..a.slots {
+        let dir = slot_dir(&a.workdir, k);
+        if !dir.exists() {
+            let src = a.repo.clone().unwrap_or_else(|| a.workdir.clone());
+            git(&src, &["worktree", "prune"])?;
+            git(&src, &["worktree", "add", "--detach", &dir.to_string_lossy(), &a.sha]).map_err(|e| format!("slot {k}: {e}"))?;
+        }
+        head = ready_checkout(&dir, a).map_err(|e| if k == 0 { e } else { format!("slot {k} ({}): {e}", dir.display()) })?;
+    }
+    let fp = fingerprint(&a.workdir, &a.probe)?;
+    Ok(Hello { protocol: PROTOCOL, sha: head, fingerprint: Some(fp), platform: platform_tag(), error: None })
+}
+
+/// One checkout at the commit, clean, prepared. Returns its HEAD.
+fn ready_checkout(dir: &Path, a: &HelloArgs) -> Result<String, String> {
+    let nowhere = dir.join(".git");
+    clean(dir, &nowhere)?;
+    git(dir, &["checkout", "--detach", "--quiet", &a.sha])?;
+    let head = git(dir, &["rev-parse", "HEAD"])?;
     if let Some(cmd) = &a.prepare {
         let mut h = Sha256::new();
         h.update(cmd.as_bytes());
         for f in &a.prepare_key {
             h.update(b"\0");
             h.update(f.as_bytes());
-            h.update(git(&a.workdir, &["rev-parse", &format!("{head}:{f}")]).unwrap_or_else(|_| "missing".into()).as_bytes());
+            h.update(git(dir, &["rev-parse", &format!("{head}:{f}")]).unwrap_or_else(|_| "missing".into()).as_bytes());
         }
         let key: String = h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect();
-        let dir = private_dir(&a.workdir)?;
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let marker = dir.join(format!("prepared-{key}"));
+        let pdir = private_dir(dir)?;
+        std::fs::create_dir_all(&pdir).map_err(|e| e.to_string())?;
+        let marker = pdir.join(format!("prepared-{key}"));
         // no key files: run every time (nothing says the last result still holds)
         if a.prepare_key.is_empty() || !marker.exists() {
-            let log = dir.join("prepare.log");
+            let log = pdir.join("prepare.log");
             let mut c = gatetrain_core::runner::shell_command(cmd);
-            c.current_dir(&a.workdir);
+            c.current_dir(dir);
             match gatetrain_core::runner::run_to_file(c, &log, 3600.0)? {
                 Some(0) => {
                     let _ = std::fs::write(&marker, &head);
@@ -152,31 +189,34 @@ fn hello_inner(a: &HelloArgs) -> Result<Hello, String> {
                 None => return Err(format!("prepare `{cmd}` timed out after 3600 s (output: {})", log.display())),
             }
         }
-        clean(&a.workdir, &nowhere).map_err(|e| format!("after prepare: {e}"))?;
+        clean(dir, &nowhere).map_err(|e| format!("after prepare: {e}"))?;
     }
-    let fp = fingerprint(&a.workdir, &a.probe)?;
-    Ok(Hello { protocol: PROTOCOL, sha: head, fingerprint: Some(fp), platform: platform_tag(), error: None })
+    Ok(head)
 }
 
 fn run_inner(a: &RunArgs) -> Result<AgentResult, String> {
     if !valid_sha(&a.sha) || !valid_id(&a.run_id) {
         return Err("--sha must be a commit id and --run-id letters, digits, . _ -".into());
     }
-    let head = git(&a.workdir, &["rev-parse", "HEAD"])?;
+    let wd = slot_dir(&a.workdir, a.slot);
+    let head = git(&wd, &["rev-parse", "HEAD"])?;
     if head != a.sha {
         return Err(format!("the work dir is at {head}, not {}", a.sha));
     }
     let out = match &a.out {
         Some(o) => o.clone(),
-        None => private_dir(&a.workdir)?.join("out").join(&a.run_id),
+        None => private_dir(&wd)?.join("out").join(&a.run_id),
     };
     std::fs::create_dir_all(&out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
-    clean(&a.workdir, &out)?;
-    let fp = fingerprint(&a.workdir, &a.probe)?;
-    let steps = a.workdir.join(&a.steps);
+    // not clean before the step: the step is LOST (it may pass on another checkout), never run on this tree
+    if let Err(e) = clean(&wd, &out) {
+        return Ok(AgentResult { protocol: PROTOCOL, sha: head, step: a.step.clone(), lost: Some(e), ..Default::default() });
+    }
+    let fp = fingerprint(&wd, &a.probe)?;
+    let steps = wd.join(&a.steps);
     let (mut plan, text) = crate::chaincmd::load_plan(&steps)?;
     // no `cwd`: the repository top, on every host (the coordinator does the same)
-    plan.cwd.get_or_insert_with(|| a.workdir.to_string_lossy().into_owned());
+    plan.cwd.get_or_insert_with(|| wd.to_string_lossy().into_owned());
     let o = Opts {
         par: a.par.max(1),
         out: out.clone(),
@@ -192,6 +232,7 @@ fn run_inner(a: &RunArgs) -> Result<AgentResult, String> {
         cores: std::thread::available_parallelism().map_or(1, |n| n.get()),
         retry_flakes: false,
         quarantine_ref: None,
+        stamp: false,
     };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();
@@ -207,6 +248,8 @@ fn run_inner(a: &RunArgs) -> Result<AgentResult, String> {
     if out.join(format!("{}.check.full", a.step)).exists() {
         files.push(format!("{}.check.full", a.step));
     }
+    // the tree after the step: a step that changed it did not run on the commit alone, so it is red
+    let dirty = clean(&wd, &out).err();
     Ok(AgentResult {
         protocol: PROTOCOL,
         sha: head,
@@ -220,6 +263,8 @@ fn run_inner(a: &RunArgs) -> Result<AgentResult, String> {
         files,
         out: out.to_string_lossy().into_owned(),
         error: None,
+        lost: None,
+        dirty,
     })
 }
 
@@ -250,22 +295,29 @@ pub fn run(cmd: AgentCmd) -> ExitCode {
                 eprintln!("agent clean: --run-id must be letters, digits, . _ -");
                 return ExitCode::from(2);
             }
-            match private_dir(&a.workdir) {
-                Ok(d) => {
-                    let p = d.join("out").join(&a.run_id);
-                    if p.exists() {
-                        if let Err(e) = std::fs::remove_dir_all(&p) {
-                            eprintln!("agent clean: {}: {e}", p.display());
-                            return ExitCode::from(1);
+            let mut rc = 0u8;
+            for k in 0..a.slots.clamp(1, 256) {
+                let dir = slot_dir(&a.workdir, k);
+                if !dir.exists() {
+                    continue;
+                }
+                match private_dir(&dir) {
+                    Ok(d) => {
+                        let p = d.join("out").join(&a.run_id);
+                        if p.exists() {
+                            if let Err(e) = std::fs::remove_dir_all(&p) {
+                                eprintln!("agent clean: {}: {e}", p.display());
+                                rc = 1;
+                            }
                         }
                     }
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("agent clean: {e}");
-                    ExitCode::from(1)
+                    Err(e) => {
+                        eprintln!("agent clean: {e}");
+                        rc = 1;
+                    }
                 }
             }
+            ExitCode::from(rc)
         }
     }
 }

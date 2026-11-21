@@ -248,7 +248,8 @@ unit: real (rc=1, 1 block(s))
 
 A green run on a git tree that is clean before and after writes `<out>/stamp-<sha>.json`: the commit, host, time, `mode` (`preflight`),
 `par`, total seconds, the `digest` (sha-256 of the steps file), each step with tier, exit code and seconds, and `cached`, the list of steps
-that came from the cache. The `<out>` folder itself is not counted as part of the tree. No stamp is written for a red run, a dirty tree or a
+that came from the cache, and `"partial": true` when the run had `--only` or `--skip` (the lane-stamp and pre-flight rules refuse a
+partial stamp). The `<out>` folder itself is not counted as part of the tree. No stamp is written for a red run, a dirty tree or a
 directory that is not a git repository; the last line says why. The stamp is what the batch engine's lane-stamp rule reads
 (`[lanes] require_stamp`, see [ADR 002](design/adr-002-lane-stamp-and-cause-gated-rerun.md)).
 

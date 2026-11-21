@@ -91,6 +91,8 @@ pub struct Opts {
     pub retry_flakes: bool,
     /// `<ref>:<path>` of the tracked quarantine file, read with `git show` from a trusted ref (never the working tree); read only with `retry_flakes`
     pub quarantine_ref: Option<String>,
+    /// write `stamp-<sha>.json` for a green run on a clean tree (the agent of a multi-host run never does: only the coordinator stamps)
+    pub stamp: bool,
 }
 
 /// At most this many steps of one run are re-run; a further flaky step stays red.
@@ -975,6 +977,8 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let mut stamp_text: Option<(String, String)> = None;
     let stamp = if !reds.is_empty() {
         Err("the run is red".to_string())
+    } else if !o.stamp {
+        Err("this run writes no stamp (one step of a multi-host run: only its coordinator stamps)".to_string())
     } else if let (Some(sha), Some(before)) = (&sha, &dirty_before) {
         let after = git_out(&cwd, &porcelain).unwrap_or_else(|| "git status failed".into());
         if !before.is_empty() || !after.is_empty() {
@@ -997,6 +1001,10 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 "cached": cached.iter().map(|&i| plan.steps[i].name.clone()).collect::<Vec<_>>(),
                 "prev": Vec::<String>::new(),
             });
+            if !o.only.is_empty() || !o.skip.is_empty() {
+                // a run of some steps proves only those: the lane-stamp and pre-flight rules refuse it
+                body["partial"] = true.into();
+            }
             if !retries.is_empty() {
                 body["retried"] = retries.iter().map(|r| serde_json::json!({"name": r.name, "first_rc": r.first_rc, "final_rc": r.final_rc, "class": r.class, "via": r.via, "test": r.test})).collect();
             }

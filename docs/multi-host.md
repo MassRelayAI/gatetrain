@@ -77,8 +77,11 @@ Before a host gets a step, the coordinator runs `gatetrain agent hello` on it. T
 3. runs `prepare` in the work dir, unless the same command already succeeded there for the same content of the `prepare_key` files
    (the key is the command plus the blob ids of those files at the commit; no `prepare_key` = run every time). A failing `prepare`
    refuses the host; its output stays in `<git dir>/gatetrain/prepare.log` on the host. The tree must still be clean after it;
-4. reports `git rev-parse HEAD`, its platform tag, its gatetrain version and the answers to the fingerprint commands it was given: the
-   common `[multihost] fingerprint` ones and those of every tag it declares.
+4. does 1 to 3 for **every slot's checkout**: slot 0 is the work dir, slot k is `<workdir>-slot<k>`, a worktree of the same
+   repository, so a step only ever sees (and can only dirty) its own tree;
+5. reports `git rev-parse HEAD`, its platform tag, its gatetrain version and the answers to the fingerprint commands it was given: the
+   common `[multihost] fingerprint` ones and those of every tag it declares. An answer is stdout and stderr together; a command that
+   prints nothing refuses the host (an empty answer proves nothing).
 
 The coordinator runs every fingerprint command once for itself, in its own checkout. Then, per host:
 
@@ -87,6 +90,8 @@ The coordinator runs every fingerprint command once for itself, in its own check
   reason names the command and both answers);
 - a tag whose `tag_fingerprint` commands answer differently is **dropped** for the run (`HOST_TAG_DROPPED <host> <tag> <reason>`); the
   host keeps its other tags. A laptop without `rustc` but with the same `node` keeps `js` and never gets a Rust step.
+
+A worker named like the coordinator, or two workers with one name, is a configuration error (exit 2).
 
 The host's **fingerprint** is the sha-256 over the gatetrain version and the (command, answer) pairs of the commands it was accepted
 with. It is checked again for every step: `agent run` verifies HEAD, a clean tree and the answers before it runs, and the coordinator
@@ -110,8 +115,12 @@ after about a minute):
   runs that one step through the ordinary engine (`chain --only NAME`, no cache, no retries) into `<git dir>/gatetrain/out/<R>`, never
   part of the tree. Its lines are kept in the coordinator's `<out>/<step>.<host>.agent.log` as progress; the verdict is only the final
   `AGENT_RESULT {json}` line: commit, fingerprint, the step's exit code, seconds, shards and output file names.
-- `ssh <target> 'cat -- <file>'` copies each output file (`<step>.full`, shard files) into the coordinator's `--out`, so `diagnose`
-  works on the coordinator as for a local run.
+- `ssh <target> 'cat -- <file>'` copies each output file into the coordinator's `--out`, so `diagnose` works on the coordinator as for
+  a local run. Only the step's own names are accepted (`<step>.full`, `<step>.check.full`, its `<step>.<i>of<n>.full` shard files,
+  characters `[A-Za-z0-9._-]`): a worker can never write another step's file, a stamp, or anything outside `--out`.
+- `agent run` writes no stamp; only the coordinator stamps. The coordinator removes `stamp-<sha>.json` from `--out` before the run, so
+  an older stamp, or one of a run killed before its end, never stands for this run.
+- The ssh command line is `ssh -o ... -- <target> '<command>'`, and a `reach` whose target starts with `-` is refused.
 - At the end, `agent clean` removes the run's output folder on each worker (best effort).
 - `command_prefix` wraps each `agent run` (for example `["caffeinate", "-i"]` keeps a macOS laptop awake while it runs a step).
 
@@ -139,7 +148,10 @@ The ssh program can be replaced with `GATETRAIN_SSH` (a JSON list, or words spli
 | a worker does not answer `hello` (asleep, off the network, no route) | refused for the run; its share goes to the other hosts |
 | ssh drops, times out, the agent dies, or the answer has no valid `AGENT_RESULT` | the step is **lost**, never green: `STEP_HOST_LOST <step> <host> <reason>`; it goes to the front of the queue and runs on another qualified host (never the one that lost it) |
 | a host loses `max_host_failures` steps | the host is removed for the run (`HOST_REMOVED`); its queued steps go to the other hosts. A step it is still running counts only by its verified result |
-| the result names another commit or fingerprint, or the agent refuses (dirty, wrong HEAD, tools changed) | the host is removed at once; the step is lost and runs elsewhere |
+| the result names another commit or fingerprint, or the agent refuses (wrong HEAD, tools changed) | the host is removed at once; the step is lost and runs elsewhere, and every result it still reports for steps that were running is lost too |
+| a slot's checkout is not clean before a step | the step is lost (runs elsewhere), that checkout is retired for the run (`HOST_SLOT_RETIRED`, left as it is for a person); the host goes on with its other slots, and counts the loss against `max_host_failures` |
+| a step leaves its checkout dirty (tracked changes or untracked files) | the step is **red** (rc 120), whatever its own exit code; it is not tried elsewhere, and that checkout is retired |
+| every checkout of a host is retired | the host is removed |
 | a step lost `max_step_attempts` times, or no qualified live host is left | the step is red: rc 125 (`lost`) or 126 (`no qualified host`) |
 | a step is **red** on a host | it is red. It is not tried on another host (no host-shopping) |
 
@@ -153,7 +165,9 @@ consumer keeps working (the lane-stamp rule, the pre-flight rule, the evidence l
 
 - each step carries `"host"` (who ran it) and `"fingerprint"` (that host's fingerprint);
 - `"hosts"`: every host of the run with its tags, slots, commit, fingerprint, and whether it was accepted (and why not);
-- `"multi_host": true` and the `"run_id"`.
+- `"multi_host": true` and the `"run_id"`;
+- `"partial": true` when the run had `--only` or `--skip` (a local run too). The lane-stamp rule and the pre-flight rule refuse a
+  partial stamp: it proves only some of the steps.
 
 Steps of a multi-host run carry no cache key (`"key": null`), so the evidence loader never reuses them as cached results.
 
@@ -185,6 +199,9 @@ Steps of a multi-host run carry no cache key (`"key": null`), so the evidence lo
 
 ## Limits (0.3.0)
 
+- The coordinator's own slots share its one checkout: a step that dirties it can make a step running beside it red too. The run is red
+  either way (no stamp is written over a dirty tree).
+- Each worker slot is a checkout, so `prepare` runs once per checkout (and is then remembered by its key).
 - Workers must be POSIX hosts (Linux, macOS, a Linux under WSL). A Windows worker is not supported; a Windows coordinator is.
 - One run per worker at a time: two coordinators pushing to one worker would move its work dir under each other.
 - `--cache` and `--retry-flakes` are refused with `--hosts`: a multi-host run is a proof-like run.

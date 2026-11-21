@@ -18,6 +18,10 @@ enum Act {
     Drop,
     /// a result that names another fingerprint (the host's tools changed)
     Drift,
+    /// the agent found the work dir not clean before the step (a transient file): may pass on another try
+    NotClean,
+    /// the step passed but left the work dir dirty
+    Dirty,
 }
 
 struct FakeHost {
@@ -38,6 +42,7 @@ fn host(platform: &str, outputs: &[(&str, &str)], default: Act) -> FakeHost {
 struct Fake {
     hosts: HashMap<String, FakeHost>,
     calls: Mutex<Vec<(String, String)>>,
+    slots: Mutex<Vec<usize>>,
 }
 
 impl Fake {
@@ -63,6 +68,7 @@ impl Transport for Fake {
     }
     fn run_step(&self, h: &HostSpec, req: &StepReq, line: &mut dyn FnMut(&str)) -> Result<AgentResult, String> {
         self.calls.lock().unwrap().push((h.name.clone(), req.step.clone()));
+        self.slots.lock().unwrap().push(req.slot);
         let fh = &self.hosts[&h.name];
         let act = fh.acts.get(&req.step).cloned().unwrap_or_else(|| fh.default.clone());
         line(&format!("STEP_START {} now", req.step));
@@ -75,6 +81,9 @@ impl Transport for Fake {
             }
             Act::Drop => Err("the session ended without a result (exit 255): Connection reset by peer".into()),
             Act::Drift => Ok(res(0, "0".repeat(64))),
+            // an exit code is there too: the coordinator must honour `lost` over it
+            Act::NotClean => Ok(AgentResult { lost: Some("the work dir has changes (1 path(s))".into()), ..res(0, fp) }),
+            Act::Dirty => Ok(AgentResult { dirty: Some("the step left 1 path(s) in git status".into()), ..res(0, fp) }),
         }
     }
     fn fetch(&self, _h: &HostSpec, r: &AgentResult, out: &Path) -> Result<(), String> {
@@ -158,7 +167,7 @@ fn go(r: &Repo, o: &MhOpts, f: Arc<Fake>) -> (Outcome, Vec<String>) {
 }
 
 fn fake(hosts: Vec<(&str, FakeHost)>) -> Arc<Fake> {
-    Arc::new(Fake { hosts: hosts.into_iter().map(|(n, h)| (n.to_string(), h)).collect(), calls: Mutex::new(vec![]) })
+    Arc::new(Fake { hosts: hosts.into_iter().map(|(n, h)| (n.to_string(), h)).collect(), calls: Mutex::new(vec![]), slots: Mutex::new(vec![]) })
 }
 
 fn rec_host(o: &Outcome, step: &str) -> Option<String> {
@@ -351,4 +360,80 @@ fn a_dirty_coordinator_refuses_a_multi_host_run() {
     let o = opts(&r, cfg(), vec![worker("w", &[P], 1)], &[]);
     let e = run(&r.plan, "d", &o, f, &mut |_| {}).err().expect("refused");
     assert!(e.contains("dirty"), "{e}");
+}
+
+#[test]
+fn a_step_that_leaves_the_work_dir_dirty_is_red_and_not_run_elsewhere() {
+    let r = repo(&steps(&[("dirt", ""), ("ok", "")]));
+    let mut one = host(P, &TOOLS, Act::Rc(0, 0));
+    one.acts.insert("dirt".into(), Act::Dirty);
+    let f = fake(vec![("one", one), ("two", host(P, &TOOLS, Act::Rc(0, 0)))]);
+    let o = opts(&r, cfg(), vec![worker("one", &[P], 1), worker("two", &[P], 1)], &[("dirt", 9.0), ("ok", 1.0)]);
+    let (out, lines) = go(&r, &o, f.clone());
+    assert_eq!(out.reds.len(), 1, "{lines:#?}");
+    assert_eq!(out.reds[0].0, "dirt");
+    assert_eq!(f.tries("dirt"), 1, "a dirty tree is the step's own red, not a lost step");
+    assert!(lines.iter().any(|l| l.starts_with("RED_NOW dirt") && l.contains("dirty")), "{lines:#?}");
+    assert!(out.stamp.is_err());
+}
+
+#[test]
+fn a_work_dir_not_clean_before_a_step_loses_the_step_without_removing_the_host_at_once() {
+    let r = repo(&steps(&[("a", ""), ("b", ""), ("c", "")]));
+    let mut one = host(P, &TOOLS, Act::Rc(0, 0));
+    one.acts.insert("a".into(), Act::NotClean);
+    let f = fake(vec![("one", one), ("two", host(P, &TOOLS, Act::Rc(0, 40)))]);
+    // two slots, two checkouts: the dirty one is retired, the host goes on with the other
+    let o = opts(&r, cfg(), vec![worker("one", &[P], 2), worker("two", &[P], 1)], &[("a", 9.0), ("b", 5.0), ("c", 1.0)]);
+    let (out, lines) = go(&r, &o, f.clone());
+    assert!(out.reds.is_empty(), "{lines:#?}");
+    assert_eq!(rec_host(&out, "a").as_deref(), Some("two"), "the lost step ran again elsewhere");
+    assert!(!lines.iter().any(|l| l.starts_with("HOST_REMOVED one")), "one failure is below max_host_failures: {lines:#?}");
+    assert!(f.ran("one").len() >= 2, "the host stays in the run");
+    assert!(lines.iter().any(|l| l.starts_with("HOST_SLOT_RETIRED one")), "{lines:#?}");
+}
+
+#[test]
+fn results_still_in_flight_when_a_host_is_removed_for_a_tool_change_are_lost() {
+    let r = repo(&steps(&[("a", ""), ("b", "")]));
+    let mut drift = host(P, &TOOLS, Act::Rc(0, 300));
+    drift.acts.insert("a".into(), Act::Drift);
+    let f = fake(vec![("drift", drift), ("ok", host(P, &TOOLS, Act::Rc(0, 0)))]);
+    let o = opts(&r, cfg(), vec![worker("drift", &[P], 2), worker("ok", &[P], 1)], &[]);
+    let (out, lines) = go(&r, &o, f.clone());
+    assert!(out.reds.is_empty(), "{lines:#?}");
+    assert_eq!(f.ran("drift").len(), 2, "both steps were placed on the drifting host: {lines:#?}");
+    assert_eq!(rec_host(&out, "b").as_deref(), Some("ok"), "b finished on the drifted host after it was removed: not taken");
+}
+
+#[test]
+fn a_worker_named_like_the_coordinator_is_refused_at_start() {
+    let r = repo(&steps(&[("a", "")]));
+    let f = fake(vec![("coord", host(P, &TOOLS, Act::Rc(0, 0)))]);
+    let o = opts(&r, cfg(), vec![worker("coord", &[P], 1)], &[]);
+    let e = run(&r.plan, "d", &o, f, &mut |_| {}).err().expect("refused");
+    assert!(e.contains("coord"), "{e}");
+}
+
+#[test]
+fn an_empty_fingerprint_answer_is_refused_and_stderr_counts() {
+    let r = repo(&steps(&[("a", "")]));
+    // prints an empty line and exits 0 at the repository top
+    let e = gatetrain_core::multihost::fingerprint(&r.dir, &["git rev-parse --show-prefix".into()]).unwrap_err();
+    assert!(e.contains("printed nothing"), "{e}");
+    // `git --version` prints on stdout; a message on stderr is part of the answer too
+    let f = gatetrain_core::multihost::fingerprint(&r.dir, &["git --version".into()]).unwrap();
+    assert!(f.items[0].1.starts_with("git version"), "{:?}", f.items);
+}
+
+#[test]
+fn every_slot_of_a_host_gets_its_own_slot_number() {
+    let r = repo(&steps(&[("a", ""), ("b", ""), ("c", "")]));
+    let f = fake(vec![("w", host(P, &TOOLS, Act::Rc(0, 100)))]);
+    let o = opts(&r, cfg(), vec![worker("w", &[P], 3)], &[]);
+    let (out, _) = go(&r, &o, f.clone());
+    assert!(out.reds.is_empty());
+    let mut slots = f.slots.lock().unwrap().clone();
+    slots.sort();
+    assert_eq!(slots, vec![0, 1, 2], "three steps at once on three different checkouts");
 }

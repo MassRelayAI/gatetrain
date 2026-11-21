@@ -203,7 +203,8 @@ fn a_failing_prepare_refuses_the_host_and_a_passing_one_is_remembered_by_its_key
     assert!(refused.contains("prepare"), "{refused}");
     assert!(stamp_hosts(&w).iter().all(|(_, h)| h == "ready"));
     let markers = walk(&w.root.join("ready.git")).iter().filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("prepared-")).count();
-    assert_eq!(markers, 1, "the success is remembered under the key");
+    assert_eq!(markers, 2, "the success is remembered under the key, once per checkout (slots = 2)");
+    assert!(w.root.join("ready-work-slot1").is_dir(), "the second slot has its own checkout");
 }
 
 fn walk(d: &Path) -> Vec<PathBuf> {
@@ -217,4 +218,39 @@ fn walk(d: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+fn stamps_in(w: &World) -> Vec<String> {
+    std::fs::read_dir(w.coord.join("out")).map(|r| r.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("stamp-")).collect()).unwrap_or_default()
+}
+
+#[test]
+fn a_red_run_leaves_no_stamp_not_the_local_agents_and_not_an_old_one() {
+    // the only worker is refused, so both steps run on the coordinator's own slot through the agent
+    let steps = step("red", &["exit", "3"]) + &step("ok", &["print", "fine"]);
+    let w = world(&steps, &[("bad", "2")]);
+    let sha = String::from_utf8(Command::new("git").arg("-C").arg(&w.coord).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap();
+    std::fs::create_dir_all(w.coord.join("out")).unwrap();
+    std::fs::write(w.coord.join("out").join(format!("stamp-{}.json", sha.trim())), "{\"sha\": \"old\"}").unwrap();
+    let o = chain(&w, &["--local-slots", "1"], "");
+    let log = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{log}");
+    assert!(log.contains("HOST_REFUSED bad"), "{log}");
+    assert_eq!(stamps_in(&w), Vec::<String>::new(), "{log}");
+}
+
+#[test]
+fn a_step_that_dirties_a_worker_checkout_is_red_and_only_that_step() {
+    let mut steps = step("dirt", &["marker", "dirt.txt", "0.2"]);
+    for i in 1..=4 {
+        steps += &step(&format!("c{i}"), &["sleep", "0.3"]);
+    }
+    let w = world(&steps, &[("w1", "1")]);
+    let o = chain(&w, &["--local-slots", "0"], "");
+    let log = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{log}\n{}", String::from_utf8_lossy(&o.stderr));
+    let summary = log.lines().find(|l| l.starts_with("RED_SUMMARY:")).unwrap();
+    assert!(summary.starts_with("RED_SUMMARY: dirt(") && summary.matches("(rc=").count() == 1, "only the step that dirtied its checkout: {log}");
+    assert!(log.lines().any(|l| l.starts_with("RED_NOW dirt") && l.contains("dirty")), "{log}");
+    assert_eq!(stamps_in(&w), Vec::<String>::new());
 }

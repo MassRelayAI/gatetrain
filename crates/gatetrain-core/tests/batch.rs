@@ -909,6 +909,19 @@ fn a_stamp_for_another_sha_does_not_count() {
 }
 
 #[test]
+fn a_partial_stamp_is_no_lane_stamp() {
+    let sd = tempfile::tempdir().unwrap();
+    let mut fx = Fx::new(&stamp_cfg(sd.path()));
+    fx.open("b1");
+    for l in ["lane1", "lane2"] {
+        let t = g(&fx.repo, &["rev-parse", l]);
+        // a run of some of the steps (--only, or one step of a multi-host run) proves only those steps
+        std::fs::write(sd.path().join(format!("stamp-{t}.json")), format!("{{\"sha\": \"{t}\", \"steps\": [], \"digest\": \"d\", \"partial\": true}}")).unwrap();
+    }
+    assert!(matches!(fx.adv("b1").unwrap(), Outcome::Refused { rule, .. } if rule == "stack.lane-stamp"));
+}
+
+#[test]
 fn the_lane_stamp_setting_off_behaves_as_before() {
     let mut fx = Fx::new(""); // no [lanes] table: no stamps exist and the stack goes through
     fx.open("b1");
@@ -1565,6 +1578,12 @@ fn a_green_preflight_without_a_stamp_for_the_tip_with_the_steps_file_digest_is_r
     std::fs::remove_file(fx.pf_stamp_path(&sha)).unwrap();
     fx.pf_stamp(&"2".repeat(40));
     assert_eq!(fx.refused("b1").0, "preflight.stamp-for-sha");
+    // a partial stamp of the right sha and steps file
+    let v = serde_json::json!({"sha": sha, "digest": fx.pf_digest(), "steps": [{"name": "a", "rc": 0}], "partial": true});
+    std::fs::write(fx.pf_stamp_path(&sha), v.to_string()).unwrap();
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "preflight.stamp-for-sha");
+    assert!(because.contains("partial"), "{because}");
     // the same fixture without the violation passes
     fx.pf_stamp(&sha);
     fx.step("b1", "preflighted");

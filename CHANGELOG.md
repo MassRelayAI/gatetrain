@@ -24,6 +24,16 @@ The version is `workspace.package.version` in `Cargo.toml`; one entry per releas
     `command_prefix`; new top-level `[multihost]` table. `config dump` of a file without them is unchanged.
   - `chain --tags`: a local run refuses a step whose `requires` this host lacks (exit 2).
 - Ledger version 9: `steps.host`, `steps.host_fingerprint`, `run_hosts`, `host_events` (append-only). Run `gatetrain ledger migrate`.
+- Review fixes before release:
+  - `agent run` never writes a stamp, and the coordinator removes `stamp-<sha>.json` from `--out` before a multi-host run: a red run
+    can no longer leave a stamp that passes the lane-stamp or pre-flight rule.
+  - A stamp of a run with `--only` or `--skip` carries `"partial": true`; the lane-stamp and pre-flight rules refuse it.
+  - Each worker slot has its own checkout (`<workdir>-slot<k>`). A step that leaves its checkout dirty is red (rc 120); a checkout not
+    clean before a step makes the step lost (re-run elsewhere) and retires that checkout, without removing the host at once.
+  - Results still in flight on a host removed for a commit or tool change are lost, never counted.
+  - Only the step's own output file names are copied back; a fingerprint answer is stdout and stderr, and an empty one refuses the
+    host; a worker named like the coordinator (or twice) is refused; ssh gets `-- <target>` and a `reach` starting with `-` is refused.
+  - The `advise` loop test no longer depends on today's date.
 
 ## 0.2.2
 

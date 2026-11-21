@@ -21,6 +21,8 @@ pub const PROTOCOL: u32 = 1;
 pub const RC_LOST: i64 = 125;
 /// rc of a step no accepted host qualifies for.
 pub const RC_NO_HOST: i64 = 126;
+/// rc of a step that left its checkout dirty (tracked changes or untracked files), whatever its own exit code.
+pub const RC_DIRTY: i64 = 120;
 
 /// `<arch>-<os>` of this binary: `x86_64-linux`, `aarch64-macos`, `x86_64-windows`.
 pub fn platform_tag() -> String {
@@ -88,9 +90,11 @@ fn short(s: &str) -> String {
 pub fn fingerprint(cwd: &Path, probes: &[String]) -> Result<Fingerprint, String> {
     let mut items = Vec::new();
     for p in probes {
-        let mut c = crate::runner::shell_command(p);
+        // stderr is part of the answer (`java -version`, `python2 -V` print there); an empty answer proves nothing
+        let mut c = crate::runner::shell_command(&format!("{p} 2>&1"));
         c.current_dir(cwd);
         match crate::runner::run_cmd(c, Some(60.0))? {
+            crate::runner::RunOut::Done { rc: 0, out } if out.trim().is_empty() => return Err(format!("fingerprint command `{p}` printed nothing: an empty answer proves nothing")),
             crate::runner::RunOut::Done { rc: 0, out } => items.push((p.clone(), out.trim().replace("\r\n", "\n"))),
             crate::runner::RunOut::Done { rc, .. } => return Err(format!("fingerprint command `{p}` exited {rc}")),
             crate::runner::RunOut::TimedOut => return Err(format!("fingerprint command `{p}` timed out")),
@@ -150,6 +154,13 @@ pub struct AgentResult {
     pub out: String,
     /// set when the agent refused to run (the host is no longer equivalent)
     pub error: Option<String>,
+    /// set when the step could not start for a reason that may pass on another try (a work dir that is not clean before the step):
+    /// the step is LOST and runs again, the host is not removed for it alone
+    #[serde(default)]
+    pub lost: Option<String>,
+    /// set when the step left the work dir dirty (tracked changes or untracked files): the step is RED, whatever its exit code
+    #[serde(default)]
+    pub dirty: Option<String>,
 }
 
 /// A host as the scheduler sees it.
@@ -175,6 +186,8 @@ pub struct StepReq {
     pub timeout_s: Option<f64>,
     /// the fingerprint commands this host was accepted with (the agent answers them again before it runs)
     pub probes: Vec<String>,
+    /// which of the host's slots runs it (0-based): each slot of a worker has its own checkout
+    pub slot: usize,
 }
 
 /// The door to the hosts. `Err` from [`Transport::run_step`] means the step was LOST (no valid answer); a red step is `Ok`.
@@ -404,7 +417,7 @@ enum St {
 
 enum Ev {
     Line(usize, usize, String),
-    Done(usize, usize, Box<Result<AgentResult, String>>),
+    Done(usize, usize, usize, Box<Result<AgentResult, String>>),
 }
 
 /// The checks every result passes before it counts: the commit, the fingerprint, the step, a known exit code. Err(why, remove the host now).
@@ -414,6 +427,9 @@ fn check_result(r: &AgentResult, sha: &str, fp: &str, step: &str) -> Result<i64,
     }
     if r.protocol != PROTOCOL {
         return Err((format!("agent protocol {} is not {PROTOCOL}", r.protocol), true));
+    }
+    if let Some(why) = &r.lost {
+        return Err((format!("not run: {why}"), false));
     }
     if r.sha != sha {
         return Err((format!("the result names commit {} instead of {}", short(&r.sha), short(sha)), true));
@@ -447,6 +463,19 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
         }
     };
     dirty("before the run")?;
+    if let Some(w) = o.workers.iter().find(|w| w.name == coord) {
+        return Err(format!("worker {:?} has the coordinator's own name: name every host once", w.name));
+    }
+    for (i, w) in o.workers.iter().enumerate() {
+        if o.workers[..i].iter().any(|x| x.name == w.name) {
+            return Err(format!("worker {:?} is named twice", w.name));
+        }
+    }
+    // a stamp of this commit left in --out (an older run, a run killed before its end) must never stand for this run
+    let old = o.out.join(format!("stamp-{sha}.json"));
+    if old.exists() {
+        std::fs::remove_file(&old).map_err(|e| format!("cannot remove the old stamp {}: {e}", old.display()))?;
+    }
     let selected: Vec<usize> = (0..plan.steps.len()).filter(|&i| (o.only.is_empty() || o.only.contains(&plan.steps[i].name)) && !o.skip.contains(&plan.steps[i].name)).collect();
 
     let mut log_hash = Sha256::new();
@@ -588,6 +617,11 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
     let mut alive = vec![true; hosts.len()];
     let mut host_fail = vec![0usize; hosts.len()];
     let mut busy = vec![0usize; hosts.len()];
+    // each slot of a host has its own checkout: the free slot numbers, and the slots whose checkout a step left dirty
+    let mut free: Vec<Vec<usize>> = hosts.iter().map(|x| (0..x.slots).rev().collect()).collect();
+    let mut broken = vec![0usize; hosts.len()];
+    // a host removed because its commit or tools changed: whatever it still reports is not taken
+    let mut tainted = vec![false; hosts.len()];
     let requires: Vec<Vec<String>> = plan.steps.iter().map(|s| requires_of(s, &o.platform)).collect();
     let mut fast_red = false;
     let (tx, rx) = mpsc::channel::<Ev>();
@@ -666,7 +700,7 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
             let ready = |s: usize| state[s] == St::Pending && plan.steps[s].needs.iter().all(|nm| plan.steps.iter().position(|x| &x.name == nm).is_none_or(|j| state[j] == St::Green || !selected.contains(&j)));
             let mut starts: Vec<(usize, usize, Take)> = Vec::new();
             for h in 0..hosts.len() {
-                while alive[h] && busy[h] + starts.iter().filter(|x| x.1 == h).count() < hosts[h].slots {
+                while alive[h] && starts.iter().filter(|x| x.1 == h).count() < free[h].len() {
                     let taken: Vec<usize> = starts.iter().map(|x| x.0).collect();
                     match board.take(h, &|s| ready(s) && !taken.contains(&s), &can) {
                         Some((s, how)) => starts.push((s, h, how)),
@@ -693,7 +727,8 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
                 state[s] = St::Running;
                 busy[h] += 1;
                 running += 1;
-                let req = StepReq { step: name, sha: sha.clone(), run_id: o.run_id.clone(), par: nshards(&plan.steps[s]) as usize, timeout_s: plan.steps[s].timeout_s, probes: probe_lists[h].clone() };
+                let slot = free[h].pop().expect("a free slot was counted");
+                let req = StepReq { step: name, sha: sha.clone(), run_id: o.run_id.clone(), par: nshards(&plan.steps[s]) as usize, timeout_s: plan.steps[s].timeout_s, probes: probe_lists[h].clone(), slot };
                 let (t, host, tx) = (t.clone(), hosts[h].clone(), tx.clone());
                 std::thread::spawn(move || {
                     let tx2 = tx.clone();
@@ -701,13 +736,13 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
                         let _ = tx2.send(Ev::Line(s, h, l.to_string()));
                     })))
                     .unwrap_or_else(|_| Err("the transport for this step died".into()));
-                    let _ = tx.send(Ev::Done(s, h, Box::new(res)));
+                    let _ = tx.send(Ev::Done(s, h, slot, Box::new(res)));
                 });
             }
             if running == 0 {
                 break;
             }
-            let (s, h, res) = loop {
+            let (s, h, slot, res) = loop {
                 match rx.recv() {
                     Ok(Ev::Line(s, h, l)) => {
                         // progress only: kept next to the step's output, never read as a verdict
@@ -716,7 +751,7 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
                         });
                         let _ = std::io::Write::write_all(f, format!("{l}\n").as_bytes());
                     }
-                    Ok(Ev::Done(s, h, r)) => break (s, h, *r),
+                    Ok(Ev::Done(s, h, slot, r)) => break (s, h, slot, *r),
                     Err(e) => return Err(format!("chain: lost a worker thread: {e}")),
                 }
             };
@@ -724,12 +759,34 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
             busy[h] -= 1;
             let name = plan.steps[s].name.clone();
             let verdict = match &res {
+                Ok(_) if tainted[h] => Err(("the host was removed while this step ran (its commit or tools changed): its result is not taken".to_string(), false)),
                 Ok(r) => check_result(r, &sha, &fps[h], &name),
                 Err(e) => Err((e.clone(), false)),
             };
+            // a checkout found dirty, before or after the step, is not used again in this run (it is left as it is, for a person)
+            let spoiled = res.as_ref().is_ok_and(|r| r.lost.is_some() || r.dirty.is_some());
+            if spoiled {
+                broken[h] += 1;
+                say(&format!("HOST_SLOT_RETIRED {} slot={slot} its checkout is dirty", hosts[h].name));
+                ev(&mut events, &hosts[h].name, Some(&name), "slot-retired", &format!("slot {slot}: the checkout is dirty"));
+            } else {
+                free[h].push(slot);
+            }
+            if alive[h] && broken[h] >= hosts[h].slots {
+                alive[h] = false;
+                board.drop_host(h);
+                let r = "every checkout of the host is dirty".to_string();
+                say(&format!("HOST_REMOVED {} {r}", hosts[h].name));
+                ev(&mut events, &hosts[h].name, None, "removed", &r);
+                if let Some(rec) = host_recs.iter_mut().find(|x| x.host == hosts[h].name) {
+                    rec.reason = Some(format!("removed during the run: {r}"));
+                }
+            }
             match verdict {
                 Ok(rc) => {
                     let r = res.as_ref().expect("a checked result");
+                    // a step that left its checkout dirty is red: the tree it ran on is not the commit any more
+                    let rc = if r.dirty.is_some() { RC_DIRTY } else { rc };
                     if !hosts[h].local {
                         if let Err(e) = t.fetch(&hosts[h], r, &o.out) {
                             append(&o.out.join(format!("{name}.full")), &format!("chain: the output of this step could not be copied from {}: {e}", hosts[h].name));
@@ -768,7 +825,14 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
                         if tier == Tier::Fast {
                             fast_red = true;
                         }
-                        say(&format!("RED_NOW {name} rc={rc} at {} (host {}; full output: {name}.full)", Ts::now_utc().iso(), hosts[h].name));
+                        match &r.dirty {
+                            Some(d) => {
+                                let why = format!("the step left the checkout on {} dirty: {d}", hosts[h].name).replace(['\r', '\n'], " ");
+                                append(&o.out.join(format!("{name}.full")), &format!("chain: {why}; the step is red"));
+                                say(&format!("RED_NOW {name} rc={rc} at {} ({why}; full output: {name}.full)", Ts::now_utc().iso()));
+                            }
+                            None => say(&format!("RED_NOW {name} rc={rc} at {} (host {}; full output: {name}.full)", Ts::now_utc().iso(), hosts[h].name)),
+                        }
                     }
                 }
                 Err((why, remove_now)) => {
@@ -778,6 +842,9 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
                     host_fail[h] += 1;
                     lost_on[s].insert(h);
                     attempts[s] += 1;
+                    if remove_now {
+                        tainted[h] = true;
+                    }
                     if alive[h] && (remove_now || host_fail[h] >= o.cfg.max_host_failures) {
                         alive[h] = false;
                         board.drop_host(h);
@@ -838,11 +905,15 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
             .iter()
             .map(|r| serde_json::json!({"name": r.host, "role": r.role, "tags": r.tags, "slots": r.slots, "sha": r.sha, "fingerprint": r.fingerprint, "accepted": r.accepted, "reason": r.reason}))
             .collect();
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "v": 1, "kind": o.mode, "sha": sha, "host": coord, "at": Ts::now_utc().iso(), "mode": o.mode, "par": total_slots,
             "total_seconds": round1(t_run.elapsed().as_secs_f64()), "digest": digest, "steps": steps, "cached": Vec::<String>::new(),
             "prev": Vec::<String>::new(), "multi_host": true, "run_id": o.run_id, "hosts": hosts_j,
         });
+        if !o.only.is_empty() || !o.skip.is_empty() {
+            // a run of some steps proves only those: the lane-stamp and pre-flight rules refuse it
+            body["partial"] = true.into();
+        }
         let text = serde_json::to_string_pretty(&body).unwrap_or_default() + "\n";
         let p = o.out.join(format!("stamp-{sha}.json"));
         std::fs::write(&p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
