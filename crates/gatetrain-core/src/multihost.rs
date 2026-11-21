@@ -90,14 +90,26 @@ fn short(s: &str) -> String {
 pub fn fingerprint(cwd: &Path, probes: &[String]) -> Result<Fingerprint, String> {
     let mut items = Vec::new();
     for p in probes {
-        // stderr is part of the answer (`java -version`, `python2 -V` print there); an empty answer proves nothing
-        let mut c = crate::runner::shell_command(&format!("{p} 2>&1"));
+        // the answer is stdout, then stderr (`java -version` prints there), both captured from the process itself, so a compound
+        // command or a trailing comment cannot lose a stream; `stdout:<command>` answers with stdout only (a tool with noisy warnings).
+        // An empty answer proves nothing.
+        let (cmd, stdout_only) = match p.strip_prefix("stdout:") {
+            Some(c) => (c.trim_start(), true),
+            None => (p.as_str(), false),
+        };
+        let mut c = crate::runner::shell_command(cmd);
         c.current_dir(cwd);
-        match crate::runner::run_cmd(c, Some(60.0))? {
-            crate::runner::RunOut::Done { rc: 0, out } if out.trim().is_empty() => return Err(format!("fingerprint command `{p}` printed nothing: an empty answer proves nothing")),
-            crate::runner::RunOut::Done { rc: 0, out } => items.push((p.clone(), out.trim().replace("\r\n", "\n"))),
-            crate::runner::RunOut::Done { rc, .. } => return Err(format!("fingerprint command `{p}` exited {rc}")),
-            crate::runner::RunOut::TimedOut => return Err(format!("fingerprint command `{p}` timed out")),
+        match crate::runner::run_cmd_both(c, Some(60.0))? {
+            None => return Err(format!("fingerprint command `{p}` timed out")),
+            Some(o) if o.code != 0 => return Err(format!("fingerprint command `{p}` exited {}", o.code)),
+            Some(o) => {
+                let out = if stdout_only { o.stdout } else { format!("{}\n{}", o.stdout.trim_end(), o.stderr.trim_end()) };
+                let out = out.trim().replace("\r\n", "\n");
+                if out.is_empty() {
+                    return Err(format!("fingerprint command `{p}` printed nothing: an empty answer proves nothing"));
+                }
+                items.push((p.clone(), out));
+            }
         }
     }
     Ok(Fingerprint::of(env!("CARGO_PKG_VERSION"), items))
@@ -471,9 +483,11 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
             return Err(format!("worker {:?} is named twice", w.name));
         }
     }
-    // a stamp of this commit left in --out (an older run, a run killed before its end) must never stand for this run
+    // a full run: a stamp of this commit left in --out (an older run, a run killed before its end) must never stand for this run.
+    // A partial run (--only, --skip) writes no stamp, so it leaves an existing one alone.
+    let partial = !o.only.is_empty() || !o.skip.is_empty();
     let old = o.out.join(format!("stamp-{sha}.json"));
-    if old.exists() {
+    if !partial && old.exists() {
         std::fs::remove_file(&old).map_err(|e| format!("cannot remove the old stamp {}: {e}", old.display()))?;
     }
     let selected: Vec<usize> = (0..plan.steps.len()).filter(|&i| (o.only.is_empty() || o.only.contains(&plan.steps[i].name)) && !o.skip.contains(&plan.steps[i].name)).collect();
@@ -889,6 +903,8 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
     let mut stamp_text = None;
     let stamp = if !reds.is_empty() {
         Err("the run is red".to_string())
+    } else if partial {
+        Err("a partial multi-host run (--only, --skip) writes no stamp".to_string())
     } else if let Err(why) = dirty("after the run") {
         Err(format!("{why}: no stamp written"))
     } else {
@@ -905,15 +921,11 @@ pub fn run(plan: &Plan, digest: &str, o: &MhOpts, t: Arc<dyn Transport>, emit: &
             .iter()
             .map(|r| serde_json::json!({"name": r.host, "role": r.role, "tags": r.tags, "slots": r.slots, "sha": r.sha, "fingerprint": r.fingerprint, "accepted": r.accepted, "reason": r.reason}))
             .collect();
-        let mut body = serde_json::json!({
+        let body = serde_json::json!({
             "v": 1, "kind": o.mode, "sha": sha, "host": coord, "at": Ts::now_utc().iso(), "mode": o.mode, "par": total_slots,
             "total_seconds": round1(t_run.elapsed().as_secs_f64()), "digest": digest, "steps": steps, "cached": Vec::<String>::new(),
             "prev": Vec::<String>::new(), "multi_host": true, "run_id": o.run_id, "hosts": hosts_j,
         });
-        if !o.only.is_empty() || !o.skip.is_empty() {
-            // a run of some steps proves only those: the lane-stamp and pre-flight rules refuse it
-            body["partial"] = true.into();
-        }
         let text = serde_json::to_string_pretty(&body).unwrap_or_default() + "\n";
         let p = o.out.join(format!("stamp-{sha}.json"));
         std::fs::write(&p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?;

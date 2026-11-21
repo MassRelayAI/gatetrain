@@ -80,8 +80,10 @@ Before a host gets a step, the coordinator runs `gatetrain agent hello` on it. T
 4. does 1 to 3 for **every slot's checkout**: slot 0 is the work dir, slot k is `<workdir>-slot<k>`, a worktree of the same
    repository, so a step only ever sees (and can only dirty) its own tree;
 5. reports `git rev-parse HEAD`, its platform tag, its gatetrain version and the answers to the fingerprint commands it was given: the
-   common `[multihost] fingerprint` ones and those of every tag it declares. An answer is stdout and stderr together; a command that
-   prints nothing refuses the host (an empty answer proves nothing).
+   common `[multihost] fingerprint` ones and those of every tag it declares. An answer is the command's stdout followed by its
+   stderr, captured from the process (a compound command or a trailing comment loses neither), so **a warning on stderr is part of
+   the fingerprint**: a host that prints a different warning is a different host. For a tool with noisy warnings write the command as
+   `stdout:<command>` to answer with stdout only. A command that prints nothing refuses the host (an empty answer proves nothing).
 
 The coordinator runs every fingerprint command once for itself, in its own checkout. Then, per host:
 
@@ -118,8 +120,8 @@ after about a minute):
 - `ssh <target> 'cat -- <file>'` copies each output file into the coordinator's `--out`, so `diagnose` works on the coordinator as for
   a local run. Only the step's own names are accepted (`<step>.full`, `<step>.check.full`, its `<step>.<i>of<n>.full` shard files,
   characters `[A-Za-z0-9._-]`): a worker can never write another step's file, a stamp, or anything outside `--out`.
-- `agent run` writes no stamp; only the coordinator stamps. The coordinator removes `stamp-<sha>.json` from `--out` before the run, so
-  an older stamp, or one of a run killed before its end, never stands for this run.
+- `agent run` writes no stamp; only the coordinator stamps. Before a full run the coordinator removes `stamp-<sha>.json` from
+  `--out`, so an older stamp, or one of a run killed before its end, never stands for this run.
 - The ssh command line is `ssh -o ... -- <target> '<command>'`, and a `reach` whose target starts with `-` is refused.
 - At the end, `agent clean` removes the run's output folder on each worker (best effort).
 - `command_prefix` wraps each `agent run` (for example `["caffeinate", "-i"]` keeps a macOS laptop awake while it runs a step).
@@ -166,8 +168,8 @@ consumer keeps working (the lane-stamp rule, the pre-flight rule, the evidence l
 - each step carries `"host"` (who ran it) and `"fingerprint"` (that host's fingerprint);
 - `"hosts"`: every host of the run with its tags, slots, commit, fingerprint, and whether it was accepted (and why not);
 - `"multi_host": true` and the `"run_id"`;
-- `"partial": true` when the run had `--only` or `--skip` (a local run too). The lane-stamp rule and the pre-flight rule refuse a
-  partial stamp: it proves only some of the steps.
+- A multi-host run with `--only` or `--skip` writes no stamp and leaves an existing one alone. (A local run with them writes a stamp
+  marked `"partial": true`, which the lane-stamp and pre-flight rules refuse.)
 
 Steps of a multi-host run carry no cache key (`"key": null`), so the evidence loader never reuses them as cached results.
 

@@ -801,6 +801,11 @@ fn exec(c: Command, shown: &str) -> Result<Output, String> {
     spawn_wait(c, None, None)?.ok_or_else(|| format!("Command '{shown}' timed out after 60 seconds"))
 }
 
+/// Run a prepared command with a time limit and keep both streams: `None` = it timed out (the process tree is killed).
+pub fn run_cmd_both(c: Command, timeout: Option<f64>) -> Result<Option<Output>, String> {
+    spawn_wait(c, None, timeout)
+}
+
 /// Run a prepared command (its own working directory and environment) with a time limit; the process tree is killed on a timeout.
 pub fn run_cmd(c: Command, timeout: Option<f64>) -> Result<RunOut, String> {
     run_out(c, None, timeout)

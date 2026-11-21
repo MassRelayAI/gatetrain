@@ -437,3 +437,33 @@ fn every_slot_of_a_host_gets_its_own_slot_number() {
     slots.sort();
     assert_eq!(slots, vec![0, 1, 2], "three steps at once on three different checkouts");
 }
+
+#[test]
+fn a_compound_probe_with_a_trailing_comment_keeps_its_stderr_and_stdout_only_drops_it() {
+    let r = repo(&steps(&[("a", "")]));
+    #[cfg(windows)]
+    let (both, quiet) = ("echo a & echo b 1>&2 & rem trailing comment", "stdout:echo a & echo b 1>&2");
+    #[cfg(not(windows))]
+    let (both, quiet) = ("echo a; echo b >&2 # trailing comment", "stdout:echo a; echo b >&2");
+    let f = gatetrain_core::multihost::fingerprint(&r.dir, &[both.to_string(), quiet.to_string()]).unwrap();
+    let ans = &f.items[0].1;
+    assert!(ans.contains('a') && ans.contains('b'), "stderr of every part of a compound probe is in the answer: {ans:?}");
+    let q = &f.items[1].1;
+    assert!(q.contains('a') && !q.contains('b'), "a `stdout:` probe answers with stdout only: {q:?}");
+}
+
+#[test]
+fn a_partial_multi_host_run_leaves_an_existing_full_stamp_alone() {
+    let r = repo(&steps(&[("a", ""), ("b", "")]));
+    let sha = String::from_utf8(Command::new("git").arg("-C").arg(&r.dir).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap();
+    let f = fake(vec![("w", host(P, &TOOLS, Act::Rc(0, 0)))]);
+    let mut o = opts(&r, cfg(), vec![worker("w", &[P], 1)], &[]);
+    std::fs::create_dir_all(&o.out).unwrap();
+    let stamp = o.out.join(format!("stamp-{}.json", sha.trim()));
+    std::fs::write(&stamp, "{\"full\": true}").unwrap();
+    o.only = vec!["a".into()];
+    let (out, lines) = go(&r, &o, f);
+    assert!(out.reds.is_empty(), "{lines:#?}");
+    assert!(out.stamp.is_err(), "a partial multi-host run writes no stamp");
+    assert_eq!(std::fs::read_to_string(&stamp).unwrap(), "{\"full\": true}", "the full run's stamp is untouched");
+}

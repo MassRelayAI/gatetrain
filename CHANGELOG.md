@@ -4,6 +4,8 @@ The version is `workspace.package.version` in `Cargo.toml`; one entry per releas
 
 ## 0.3.0
 
+- **Behaviour change:** a stamp written by a run with `--only` or `--skip` is now marked `"partial": true` and is no longer accepted
+  as a lane stamp, a pre-flight stamp or evidence. Run the whole steps file to stamp a lane or a pre-flight.
 - Multi-host chains (docs/multi-host.md): `gatetrain chain --hosts hosts.toml` spreads one run over the coordinator and every enabled
   `[[hosts]]` entry with `roles = ["worker"]`, over ssh, with no daemon, no open port and no shared filesystem. One log, one ledger
   run, one stamp.
@@ -27,12 +29,13 @@ The version is `workspace.package.version` in `Cargo.toml`; one entry per releas
 - Review fixes before release:
   - `agent run` never writes a stamp, and the coordinator removes `stamp-<sha>.json` from `--out` before a multi-host run: a red run
     can no longer leave a stamp that passes the lane-stamp or pre-flight rule.
-  - A stamp of a run with `--only` or `--skip` carries `"partial": true`; the lane-stamp and pre-flight rules refuse it.
+  - A stamp of a local run with `--only` or `--skip` carries `"partial": true`; the lane-stamp and pre-flight rules refuse it. A
+    multi-host run with them writes no stamp and leaves an existing full one alone.
   - Each worker slot has its own checkout (`<workdir>-slot<k>`). A step that leaves its checkout dirty is red (rc 120); a checkout not
     clean before a step makes the step lost (re-run elsewhere) and retires that checkout, without removing the host at once.
   - Results still in flight on a host removed for a commit or tool change are lost, never counted.
-  - Only the step's own output file names are copied back; a fingerprint answer is stdout and stderr, and an empty one refuses the
-    host; a worker named like the coordinator (or twice) is refused; ssh gets `-- <target>` and a `reach` starting with `-` is refused.
+  - Only the step's own output file names are copied back; a fingerprint answer is stdout then stderr, captured from the process
+    (`stdout:<command>` for stdout only), and an empty one refuses the host; a worker named like the coordinator (or twice) is refused; ssh gets `-- <target>` and a `reach` starting with `-` is refused.
   - The `advise` loop test no longer depends on today's date.
 
 ## 0.2.2
