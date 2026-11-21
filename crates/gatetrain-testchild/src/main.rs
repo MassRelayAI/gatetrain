@@ -50,6 +50,42 @@ fn main() {
             let _ = Command::new(me).args(["marker", arg(1), arg(2)]).spawn();
             std::thread::sleep(Duration::from_secs_f64(arg(2).parse().unwrap_or(0.0)));
         }
+        // `fakessh TARGET -o OPT ... COMMAND`: stands in for ssh in the multi-host tests. COMMAND (POSIX-quoted, as the coordinator
+        // sends it) runs here, on this machine; `cat -- FILE` is answered by reading FILE. `FAKESSH_DROP=<target>,...` makes every
+        // `agent run` to those targets end like a dropped connection (exit 255, no output).
+        "fakessh" => {
+            let target = arg(1).to_string();
+            let mut i = 2;
+            while arg(i) == "-o" {
+                i += 2;
+            }
+            let words = split_posix(arg(i));
+            let drop = std::env::var("FAKESSH_DROP").unwrap_or_default();
+            if words.iter().any(|w| w == "run") && drop.split(',').any(|t| t == target) {
+                eprintln!("Connection to {target} closed by remote host.");
+                std::process::exit(255);
+            }
+            if words.first().map(String::as_str) == Some("cat") {
+                let mut so = std::io::stdout();
+                for f in words.iter().skip(1).filter(|w| *w != "--") {
+                    match std::fs::read(f) {
+                        Ok(b) => {
+                            let _ = so.write_all(&b);
+                        }
+                        Err(e) => {
+                            eprintln!("cat: {f}: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                return;
+            }
+            let st = Command::new(&words[0]).args(&words[1..]).status().unwrap_or_else(|e| {
+                eprintln!("fakessh: {}: {e}", words[0]);
+                std::process::exit(127)
+            });
+            std::process::exit(st.code().unwrap_or(255));
+        }
         "sleep" => std::thread::sleep(Duration::from_secs_f64(arg(1).parse().unwrap_or(0.0))),
         // `printsleep TEXT SECS`: print TEXT and flush, then sleep (output written before a timeout kill)
         "printsleep" => {
@@ -126,4 +162,59 @@ fn main() {
             std::process::exit(64);
         }
     }
+}
+
+/// POSIX shell words: single quotes literal, double quotes and backslash escapes; enough for what `shlex_join` writes.
+fn split_posix(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut have = false;
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\'' => {
+                have = true;
+                for d in it.by_ref() {
+                    if d == '\'' {
+                        break;
+                    }
+                    cur.push(d);
+                }
+            }
+            '"' => {
+                have = true;
+                while let Some(d) = it.next() {
+                    match d {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(e) = it.next() {
+                                cur.push(e);
+                            }
+                        }
+                        _ => cur.push(d),
+                    }
+                }
+            }
+            '\\' => {
+                have = true;
+                if let Some(e) = it.next() {
+                    cur.push(e);
+                }
+            }
+            c if c.is_whitespace() => {
+                if have {
+                    out.push(std::mem::take(&mut cur));
+                    have = false;
+                }
+            }
+            c => {
+                have = true;
+                cur.push(c);
+            }
+        }
+    }
+    if have {
+        out.push(cur);
+    }
+    out
 }

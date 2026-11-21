@@ -103,6 +103,44 @@ pub struct Host {
     /// The host's own `[hosts.tidy]` table, in file order (the first bad key is the one reported).
     #[serde(serialize_with = "ser_tbl")]
     pub tidy: Tbl,
+    /// multi-host workers (docs/multi-host.md); left out of `config dump` when unset, so older dumps stay the same
+    #[serde(flatten)]
+    pub worker: WorkerCfg,
+}
+
+/// The keys a `[[hosts]]` entry with `roles = ["worker"]` uses (docs/multi-host.md). Every one is optional.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WorkerCfg {
+    /// what the host can run (`x86_64-linux`, `js`, ...)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// steps at once (default: max_parallel_steps, else 1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slots: Option<i64>,
+    /// the checkout gatetrain runs steps in (a worktree of `repo`, or a clone)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    /// a bare repository on the host the coordinator pushes the commit into (sync = "push")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// where `git push` sends the commit (default: `<ssh target>:<repo>`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push_url: Option<String>,
+    /// `push` (the default when `repo` is set) or `fetch` (the workdir fetches from its own remote)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<String>,
+    /// the gatetrain binary on the host (default: `gatetrain`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gatetrain_bin: Option<String>,
+    /// a shell command run in the workdir after the checkout, before the host's first step (`npm ci`); a failure refuses the host
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepare: Option<String>,
+    /// tracked files whose content keys `prepare`: unchanged since its last success on the host = not run again
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prepare_key: Vec<String>,
+    /// an argument prefix for the host's agent commands (`["caffeinate", "-i"]` keeps a laptop awake while it runs a step)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub command_prefix: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,6 +252,7 @@ impl Default for Host {
             cache_server_check: None,
             gate_scripts: vec![],
             tidy: Tbl::new(),
+            worker: WorkerCfg::default(),
         }
     }
 }
@@ -351,7 +390,7 @@ fn disk(v: &T, w: &str) -> R<Disk> {
     Ok(Disk { path, min_free_gb, fast, r#use: use_, removable, measure })
 }
 
-const HOST_KEYS: [&str; 34] = ["awake_hours", "cache_server_check", "chain_pattern", "container_prefix", "cores", "cost_per_hour_usd", "disks", "enabled", "gate_scripts", "kind", "light_while_proving", "lock_file", "lock_max_age_hours", "max_parallel_steps", "max_pollers", "memory_check", "memory_gb", "memory_per_cargo_job_gb", "memory_per_step_gb", "memory_reserve_gb", "name", "os", "ports", "reach", "reserve_cores", "reserved_port_ranges", "roles", "step_default_gb", "tidy", "tools", "watcher_max_age_min", "worktrees", "wsl", "wsl_memory_gb"];
+const HOST_KEYS: [&str; 44] = ["awake_hours", "cache_server_check", "chain_pattern", "command_prefix", "container_prefix", "cores", "cost_per_hour_usd", "disks", "enabled", "gate_scripts", "gatetrain_bin", "kind", "light_while_proving", "lock_file", "lock_max_age_hours", "max_parallel_steps", "max_pollers", "memory_check", "memory_gb", "memory_per_cargo_job_gb", "memory_per_step_gb", "memory_reserve_gb", "name", "os", "ports", "prepare", "prepare_key", "push_url", "reach", "repo", "reserve_cores", "reserved_port_ranges", "roles", "slots", "step_default_gb", "sync", "tags", "tidy", "tools", "watcher_max_age_min", "workdir", "worktrees", "wsl", "wsl_memory_gb"];
 
 fn host(v: &T, i: usize) -> R<Host> {
     let w = format!("hosts[{i}]");
@@ -401,10 +440,28 @@ fn host(v: &T, i: usize) -> R<Host> {
     let cache_server_check = string(d, "cache_server_check", &w)?;
     let gate_scripts = strings(d, "gate_scripts", &w, &[])?;
     let tidy = tidy_table(d, &w)?;
+    let worker = WorkerCfg {
+        tags: strings(d, "tags", &w, &[])?,
+        slots: match opt_int(d, "slots", &w)? {
+            Some(n) if n < 1 => return bad(format!("{w}.slots: must be at least 1, got {n}")),
+            x => x,
+        },
+        workdir: string(d, "workdir", &w)?,
+        repo: string(d, "repo", &w)?,
+        push_url: string(d, "push_url", &w)?,
+        sync: match string(d, "sync", &w)? {
+            Some(x) if x != "push" && x != "fetch" => return bad(format!("{w}.sync: must be push or fetch, got {}", py_str(&x))),
+            x => x,
+        },
+        gatetrain_bin: string(d, "gatetrain_bin", &w)?,
+        prepare: string(d, "prepare", &w)?,
+        prepare_key: strings(d, "prepare_key", &w, &[])?,
+        command_prefix: strings(d, "command_prefix", &w, &[])?,
+    };
     Ok(Host {
         name, kind, roles, reach, os, cores, max_parallel_steps, disks, cost_per_hour_usd, max_pollers, awake_hours, enabled, tools, ports,
         reserved_port_ranges, container_prefix, watcher_max_age_min, worktrees: wts, lock_file, lock_max_age_hours, chain_pattern,
-        cache_server_check, gate_scripts, tidy,
+        cache_server_check, gate_scripts, tidy, worker,
     })
 }
 

@@ -153,7 +153,7 @@ fn a_green_run_with_db_leaves_the_run_its_steps_and_a_stamp() {
     let r = repo();
     let run = chain_in(r.path(), w.path(), &body, &["--db", db.to_str().unwrap(), "--run-id", "run-1", "--host", "builder-1", "--mode", "lane", "--par", "3"], &[]);
     assert_eq!(code(&run), 0, "{}{}", run.stdout, run.stderr);
-    assert_eq!(q(&db, "pragma user_version"), "8");
+    assert_eq!(q(&db, "pragma user_version"), "9");
     assert_eq!(q(&db, "select count(*) from runs"), "1");
     let want = format!("run-1|chain|builder-1|green|lane|3|{}|{}", digest_of(&std::fs::read_to_string(w.path().join("steps.toml")).unwrap()), digest_of(&run.stdout));
     assert_eq!(q(&db, "select id||'|'||kind||'|'||host||'|'||outcome||'|'||mode||'|'||par||'|'||plan_digest||'|'||log_sha256 from runs"), want);

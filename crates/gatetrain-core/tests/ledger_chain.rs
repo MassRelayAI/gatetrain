@@ -1,7 +1,8 @@
 //! The ledger schema is ONE forward-only chain: v1 (run snapshots, decisions) -> v2 (step_memory) -> v3 (batch_events)
 //! -> v4 (engine v2 E1: run and step columns, step_skips, stamps, stamp_links) -> v5 (E2: step_shards)
-//! -> v6 (E6: host_probes, disk_probes) -> v7 (E7: host_samples columns, disk_samples) -> v8 (E8: advice, advice_checks).
-//! A file at any older version reaches v8 with its rows intact; a newer one is refused.
+//! -> v6 (E6: host_probes, disk_probes) -> v7 (E7: host_samples columns, disk_samples) -> v8 (E8: advice, advice_checks)
+//! -> v9 (multi-host: steps.host, steps.host_fingerprint, run_hosts, host_events).
+//! A file at any older version reaches v9 with its rows intact; a newer one is refused.
 use gatetrain_core::ledger::{Ledger, CURRENT_VERSION};
 
 const TABLES: &str = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('step_memory','batch_events','run_snapshots','decisions')";
@@ -10,6 +11,7 @@ const V5_TABLES: &str = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' A
 const V6_TABLES: &str = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('host_probes','disk_probes')";
 const V7_TABLES: &str = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='disk_samples'";
 const V8_TABLES: &str = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('advice','advice_checks')";
+const V9_TABLES: &str = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('run_hosts','host_events')";
 
 /// A version-0 ledger as the Python side writes it: only the base tables.
 fn v0(path: &std::path::Path) {
@@ -29,29 +31,29 @@ fn columns(l: &Ledger, table: &str) -> Vec<String> {
     st.query_map([], |r| r.get::<_, String>(1)).unwrap().map(Result::unwrap).collect()
 }
 
-fn all_new(l: &Ledger) -> [i64; 6] {
-    [count(l, TABLES), count(l, V4_TABLES), count(l, V5_TABLES), count(l, V6_TABLES), count(l, V7_TABLES), count(l, V8_TABLES)]
+fn all_new(l: &Ledger) -> [i64; 7] {
+    [count(l, TABLES), count(l, V4_TABLES), count(l, V5_TABLES), count(l, V6_TABLES), count(l, V7_TABLES), count(l, V8_TABLES), count(l, V9_TABLES)]
 }
 
 #[test]
-fn the_current_version_is_eight() {
-    assert_eq!(CURRENT_VERSION, 8);
+fn the_current_version_is_nine() {
+    assert_eq!(CURRENT_VERSION, 9);
 }
 
 #[test]
-fn from_v0_reaches_v8_and_keeps_rows() {
+fn from_v0_reaches_v9_and_keeps_rows() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("l.db");
     v0(&p);
     let mut l = Ledger::open(&p).unwrap();
     assert_eq!(l.version().unwrap(), 0);
-    assert_eq!(l.migrate().unwrap(), (0, 8));
-    assert_eq!(l.version().unwrap(), 8);
-    assert_eq!(all_new(&l), [4, 3, 1, 2, 1, 2]);
+    assert_eq!(l.migrate().unwrap(), (0, 9));
+    assert_eq!(l.version().unwrap(), 9);
+    assert_eq!(all_new(&l), [4, 3, 1, 2, 1, 2, 2]);
     assert_eq!(l.runs().unwrap().len(), 1);
     assert_eq!(l.step_count("r1").unwrap(), 1);
     assert_eq!(count(&l, "SELECT COUNT(*) FROM host_samples WHERE host='host-a' AND load_1m=1.5 AND cpu_busy_pct IS NULL"), 1, "the old sample row is unchanged, the new columns are unknown");
-    assert_eq!(l.migrate().unwrap(), (8, 8), "idempotent");
+    assert_eq!(l.migrate().unwrap(), (9, 9), "idempotent");
 }
 
 /// Take a current ledger back to `v` the way an older binary left it: later tables and columns absent, user_version set.
@@ -61,6 +63,9 @@ fn at_version(path: &std::path::Path, v: i64) {
     l.conn.execute("INSERT INTO runs(id,kind,batch,host,commit_sha,started_at,ended_at,outcome) VALUES('r1','chain','lane-a','host-a','abc','t','t','green')", []).unwrap();
     l.conn.execute("INSERT INTO steps(run_id,name,exit_code,duration_sec) VALUES('r1','s',0,1.0)", []).unwrap();
     l.conn.execute("INSERT INTO host_samples(host,at,free_gb) VALUES('h','t',9.0)", []).unwrap();
+    if v < 9 {
+        l.conn.execute_batch("DROP TABLE run_hosts; DROP TABLE host_events; ALTER TABLE steps DROP COLUMN host; ALTER TABLE steps DROP COLUMN host_fingerprint;").unwrap();
+    }
     if v < 8 {
         l.conn.execute_batch("DROP TABLE advice; DROP TABLE advice_checks;").unwrap();
     }
@@ -95,16 +100,16 @@ fn at_version(path: &std::path::Path, v: i64) {
 }
 
 #[test]
-fn from_every_version_to_eight_rows_unchanged() {
-    for v in 1..=7 {
+fn from_every_version_to_nine_rows_unchanged() {
+    for v in 1..=8 {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("l.db");
         at_version(&p, v);
         let mut l = Ledger::open(&p).unwrap();
         assert_eq!(l.version().unwrap(), v);
         assert!(l.record_step_peak("r1", "s", 5.0, "reported", "t").is_err(), "v{v}: writes are refused until migrated");
-        assert_eq!(l.migrate().unwrap(), (v, 8), "from v{v}");
-        assert_eq!(all_new(&l), [4, 3, 1, 2, 1, 2], "from v{v}");
+        assert_eq!(l.migrate().unwrap(), (v, 9), "from v{v}");
+        assert_eq!(all_new(&l), [4, 3, 1, 2, 1, 2, 2], "from v{v}");
         assert_eq!(l.runs().unwrap().len(), 1, "from v{v}");
         assert_eq!(count(&l, "SELECT COUNT(*) FROM steps WHERE run_id='r1' AND duration_sec=1.0"), 1, "from v{v}: the step row is unchanged");
         assert_eq!(count(&l, "SELECT COUNT(*) FROM host_samples WHERE host='h' AND free_gb=9.0"), 1, "from v{v}: the sample row is unchanged");
@@ -121,8 +126,8 @@ fn from_v5_gets_only_the_hardware_additions() {
     let p = d.path().join("l.db");
     at_version(&p, 5);
     let mut l = Ledger::open(&p).unwrap();
-    assert_eq!(count(&l, V6_TABLES) + count(&l, V7_TABLES) + count(&l, V8_TABLES), 0);
-    assert_eq!(l.migrate().unwrap(), (5, 8));
+    assert_eq!(count(&l, V6_TABLES) + count(&l, V7_TABLES) + count(&l, V8_TABLES) + count(&l, V9_TABLES), 0);
+    assert_eq!(l.migrate().unwrap(), (5, 9));
     assert_eq!(l.runs().unwrap().len(), 1);
 }
 
@@ -142,6 +147,8 @@ fn the_new_tables_are_insert_only() {
         ("disk_samples", "INSERT INTO disk_samples(host,at,device) VALUES('h','t','sda')", "UPDATE disk_samples SET busy_pct=1", "DELETE FROM disk_samples"),
         ("advice", "INSERT INTO advice(advice_id,at,rule,confidence) VALUES('a','t','r','low')", "UPDATE advice SET rule='x'", "DELETE FROM advice"),
         ("advice_checks", "INSERT INTO advice_checks(advice_id,run_id,at,verdict) VALUES('a','r','t','v')", "UPDATE advice_checks SET verdict='x'", "DELETE FROM advice_checks"),
+        ("run_hosts", "INSERT INTO run_hosts(run_id,host,role,accepted) VALUES('r','h','worker',1)", "UPDATE run_hosts SET accepted=0", "DELETE FROM run_hosts"),
+        ("host_events", "INSERT INTO host_events(run_id,seq,at,host,event,reason) VALUES('r',1,'t','h','lost','x')", "UPDATE host_events SET event='placed'", "DELETE FROM host_events"),
     ] {
         l.conn.execute(insert, []).unwrap();
         assert!(l.conn.execute(update, []).unwrap_err().to_string().contains("append-only"), "{table} update");
@@ -169,6 +176,6 @@ fn probes_and_samples_are_stored_and_ingest_twice_writes_once() {
 fn a_newer_version_is_refused() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("l.db");
-    rusqlite::Connection::open(&p).unwrap().pragma_update(None, "user_version", 9).unwrap();
-    assert!(matches!(Ledger::open(&p), Err(gatetrain_core::Error::SchemaTooNew { found: 9, known: 8 })));
+    rusqlite::Connection::open(&p).unwrap().pragma_update(None, "user_version", 10).unwrap();
+    assert!(matches!(Ledger::open(&p), Err(gatetrain_core::Error::SchemaTooNew { found: 10, known: 9 })));
 }

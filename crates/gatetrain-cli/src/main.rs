@@ -7,10 +7,13 @@ use gatetrain_core::batch::{system_now, Engine, Outcome};
 use gatetrain_core::batchcfg::BatchConfig;
 use gatetrain_core::{analysis, config, declog, diagnose, history, ledger::Ledger, logfmt, predict};
 mod advisecmd;
+mod agentcmd;
 mod chaincmd;
 mod probecmd;
 mod holdcmd;
 mod metricscmd;
+mod mhcmd;
+mod mhtransport;
 mod seams;
 mod tickcmd;
 mod tidycmd;
@@ -107,6 +110,11 @@ enum Cmd {
     Tick(tickcmd::TickArgs),
     /// Run a steps file: fast then slow tier in parallel, full output per step, log-format lines on stdout, a stamp when green and clean
     Chain(chaincmd::ChainArgs),
+    /// The worker side of a multi-host chain, started by the coordinator over ssh (docs/multi-host.md): hello, run, clean
+    Agent {
+        #[command(subcommand)]
+        cmd: agentcmd::AgentCmd,
+    },
     /// Fail when any file of a repository holds a word on its hashed deny-list `.privacy-denylist` (a hit names the file and line, never the word)
     PrivacyCheck {
         /// the repository to check (default: the current folder)
@@ -588,6 +596,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
         Cmd::Chain(a) => Ok(chaincmd::run(a)),
+        Cmd::Agent { cmd } => Ok(agentcmd::run(cmd)),
         Cmd::Tick(a) => tickcmd::run(a),
         Cmd::Probe(a) => probecmd::run(a),
         Cmd::Advise(a) => advisecmd::run(a),

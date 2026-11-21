@@ -17,6 +17,7 @@ clap.workspace = true         # the command line
 anyhow.workspace = true       # error context
 ctrlc.workspace = true        # holder: release on a signal
 rusqlite.workspace = true     # diagnose reads step durations from a ledger
+sha2.workspace = true         # agent: the prepare key
 
 [dev-dependencies]
 rusqlite.workspace = true     # tamper with a ledger in the integration tests

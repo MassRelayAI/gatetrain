@@ -2,6 +2,29 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.3.0
+
+- Multi-host chains (docs/multi-host.md): `gatetrain chain --hosts hosts.toml` spreads one run over the coordinator and every enabled
+  `[[hosts]]` entry with `roles = ["worker"]`, over ssh, with no daemon, no open port and no shared filesystem. One log, one ledger
+  run, one stamp.
+  - Steps declare `requires = [tags]` (default: the coordinator's platform tag); hosts declare `tags`, `slots`, `cores`.
+  - A host counts only on the coordinator's exact commit and gatetrain version, and the exact answers to `[multihost] fingerprint`;
+    `[multihost.tag_fingerprint]` checks a tag's own tools (a tag whose tools differ is dropped, the host keeps the rest). Checked at
+    hello and again in every result; a host whose tools change mid-run is removed.
+  - The commit is pushed by the coordinator into a bare repository on the worker (`repo`, `push_url`, `sync = "push"`, the default) and
+    checked out in a worktree (`workdir`); `sync = "fetch"` fetches instead. `prepare` (keyed by `prepare_key` files) runs before the
+    host's first step and refuses the host when it fails. `command_prefix` wraps each step (for example `caffeinate -i`).
+  - Longest-first packing by the ledger's medians, honouring slots; work stealing for an idle host.
+  - A lost step (drop, timeout, no valid result) is re-run on another qualified host, never counted green; a host that loses
+    `max_host_failures` steps is removed; a step lost `max_step_attempts` times is red (125), one no host qualifies for is red (126); a
+    red step is never tried elsewhere.
+  - `gatetrain agent hello | run | clean`: the worker side; `GATETRAIN_SSH` replaces the ssh program.
+  - The stamp keeps every field its consumers read and adds each step's `host` and `fingerprint`, `hosts` and `multi_host`.
+  - New `[[hosts]]` keys: `tags`, `slots`, `workdir`, `repo`, `push_url`, `sync`, `gatetrain_bin`, `prepare`, `prepare_key`,
+    `command_prefix`; new top-level `[multihost]` table. `config dump` of a file without them is unchanged.
+  - `chain --tags`: a local run refuses a step whose `requires` this host lacks (exit 2).
+- Ledger version 9: `steps.host`, `steps.host_fingerprint`, `run_hosts`, `host_events` (append-only). Run `gatetrain ledger migrate`.
+
 ## 0.2.2
 
 - The process scan skips unreadable own session daemons by exact name (`systemd`, `(sd-pam)`, `ssh-agent`, `gpg-agent`, `dbus-daemon`) so a real host is not always unknown; docker installed but unreachable is unknown. Test on the real `/proc`.

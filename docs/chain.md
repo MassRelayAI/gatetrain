@@ -118,8 +118,15 @@ TOML. Unknown keys are refused (exit 2).
 | `shard_check` | step, optional | an argv run once after every shard is green, with `GATETRAIN_SHARD_OUT` naming the shard output files (an OS path list). A non-zero exit makes the step red. Needs `shards`. |
 | `shard_env` | step, optional | `true` when the command reads `GATETRAIN_SHARD` and `GATETRAIN_SHARDS` from its environment instead of using placeholders. Needs `shards`. |
 | `cache_salt` | step, optional | a string mixed into the cache key. Change it to invalidate the step's entries (a tool version, an environment the inputs do not show). |
+| `requires` | step, optional | host tags the step needs (`["js"]`, `["x86_64-linux"]`). With `--hosts` it runs only on a host that has all of them; no `requires` means the coordinator's platform tag. In a local run a step whose tags this host lacks is refused (exit 2); `--tags` adds tags to the local host. See [multi-host](multi-host.md). |
 
 On Windows a `run` string goes to the Windows shell, so use `argv` (for example `["sh", "-c", "..."]`) for anything with shell syntax.
+
+## Several hosts
+
+`--hosts hosts.toml` spreads one run over the coordinator and every enabled host whose `roles` include `"worker"`: one log, one
+ledger run, one stamp that names the host of every step. A step counts green only from a host on the exact commit with the exact tool
+versions; a lost step runs again elsewhere, a red one stays red. Everything else is in [multi-host](multi-host.md).
 
 ## Tiers, order and skips
 
@@ -208,7 +215,7 @@ logical step, at its first red shard. A reader that does not know `STEP_SHARD` s
 `chain-<UTC time>-<commit>`), `--mode preflight|lane|full` says what the run claims to be (default `preflight`; `full` with `--only` or
 `--skip` is refused, exit 2) and `--host NAME` names the host as `hosts.toml` does (default `$GATETRAIN_HOST`, which `hold` sets, then the
 environment). The ledger file is created, or migrated forward. **A ledger made before this version (v3) needs `gatetrain ledger migrate`
-once**; the current version is 5.
+once**; the current version is 9.
 
 The log carries a `CHAIN_OUT <folder>` line, so `gatetrain diagnose run.log` reads a red step's evidence from its `.full` files (or its red
 shards' files) with no banner in the log. For a log copied to another machine, `gatetrain diagnose run.log --out <folder>` names the
@@ -262,7 +269,8 @@ Inside `.full` and `STEP_EXIT`, a timeout is 124 and a step that could not be st
 ## Options
 
 `gatetrain chain --help` is the source of truth: `--steps` and `--out` (required), `--par`, `--keep-going`, `--only`, `--skip`, `--cache`,
-`--no-cache-for`, `--mode`, `--host`, `--db`, `--run-id`, `--retry-flakes`, `--quarantine-ref` (each needs the other).
+`--no-cache-for`, `--mode`, `--host`, `--db`, `--run-id`, `--retry-flakes`, `--quarantine-ref` (each needs the other), `--tags`, and for a
+multi-host run `--hosts`, `--workers`, `--local-slots` ([multi-host](multi-host.md)).
 
 ## Read the result
 

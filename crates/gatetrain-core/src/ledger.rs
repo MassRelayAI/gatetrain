@@ -279,8 +279,44 @@ CREATE TRIGGER IF NOT EXISTS advice_checks_no_delete BEFORE DELETE ON advice_che
   BEGIN SELECT RAISE(ABORT, 'advice_checks is append-only'); END;
 "#;
 
+/// Version 9 (multi-host chains, docs/multi-host.md): who ran each step, every host a run considered, every scheduling decision.
+const V9: &str = r#"
+ALTER TABLE steps ADD COLUMN host TEXT;
+ALTER TABLE steps ADD COLUMN host_fingerprint TEXT;
+CREATE TABLE IF NOT EXISTS run_hosts (
+  run_id       TEXT NOT NULL,
+  host         TEXT NOT NULL,
+  role         TEXT NOT NULL,           -- coordinator | worker
+  sha          TEXT,                    -- the commit the host reported
+  fingerprint  TEXT,                    -- the host's tool fingerprint
+  tags         TEXT,                    -- JSON list
+  slots        INTEGER,
+  accepted     INTEGER NOT NULL,
+  reason       TEXT,                    -- why it was refused or removed
+  PRIMARY KEY (run_id, host)
+);
+CREATE TABLE IF NOT EXISTS host_events (
+  run_id       TEXT NOT NULL,
+  seq          INTEGER NOT NULL,
+  at           TEXT NOT NULL,
+  host         TEXT NOT NULL,
+  step         TEXT,
+  event        TEXT NOT NULL,           -- placed | stolen | lost | removed | refused | unplaceable
+  reason       TEXT NOT NULL,
+  PRIMARY KEY (run_id, seq)
+);
+CREATE TRIGGER IF NOT EXISTS run_hosts_no_update BEFORE UPDATE ON run_hosts
+  BEGIN SELECT RAISE(ABORT, 'run_hosts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS run_hosts_no_delete BEFORE DELETE ON run_hosts
+  BEGIN SELECT RAISE(ABORT, 'run_hosts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS host_events_no_update BEFORE UPDATE ON host_events
+  BEGIN SELECT RAISE(ABORT, 'host_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS host_events_no_delete BEFORE DELETE ON host_events
+  BEGIN SELECT RAISE(ABORT, 'host_events is append-only'); END;
+"#;
+
 /// The schema version this binary writes.
-pub const CURRENT_VERSION: i64 = 8;
+pub const CURRENT_VERSION: i64 = 9;
 
 /// One row of `host_probes` (E6).
 #[derive(Debug, Clone, Default)]
@@ -391,6 +427,9 @@ impl Ledger {
         if from < 8 {
             tx.execute_batch(V8)?;
         }
+        if from < 9 {
+            tx.execute_batch(V9)?;
+        }
         tx.pragma_update(None, "user_version", CURRENT_VERSION)?;
         tx.commit()?;
         Ok((from, CURRENT_VERSION))
@@ -442,8 +481,8 @@ impl Ledger {
         )?;
         for s in &r.steps {
             tx.execute(
-                "INSERT INTO steps(run_id,name,started_at,ended_at,duration_sec,exit_code,cached,log_ref,tier,input_key,cached_from,shards) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![rid, s.name, s.started_at, s.ended_at, s.secs, s.rc, s.cached as i64, s.log_ref, s.tier, s.key, s.cached_from, s.shards],
+                "INSERT INTO steps(run_id,name,started_at,ended_at,duration_sec,exit_code,cached,log_ref,tier,input_key,cached_from,shards,host,host_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![rid, s.name, s.started_at, s.ended_at, s.secs, s.rc, s.cached as i64, s.log_ref, s.tier, s.key, s.cached_from, s.shards, s.host, s.fingerprint],
             )?;
         }
         for h in &r.shards {
@@ -454,6 +493,18 @@ impl Ledger {
         }
         for (step, why) in &r.skips {
             tx.execute("INSERT INTO step_skips(run_id,step,reason) VALUES(?,?,?)", params![rid, step, why])?;
+        }
+        for h in &r.hosts {
+            tx.execute(
+                "INSERT INTO run_hosts(run_id,host,role,sha,fingerprint,tags,slots,accepted,reason) VALUES(?,?,?,?,?,?,?,?,?)",
+                params![rid, h.host, h.role, h.sha, h.fingerprint, serde_json::to_string(&h.tags)?, h.slots, h.accepted as i64, h.reason],
+            )?;
+        }
+        for (i, e) in r.host_events.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO host_events(run_id,seq,at,host,step,event,reason) VALUES(?,?,?,?,?,?,?)",
+                params![rid, i as i64 + 1, e.at, e.host, e.step, e.event, e.reason],
+            )?;
         }
         if let Some((digest, body)) = &r.stamp {
             tx.execute(

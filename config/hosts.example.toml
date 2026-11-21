@@ -81,6 +81,48 @@ max_parallel_steps = 16
 cost_per_hour_usd = 1.20
 enabled = false             # only used in budget/speed profiles
 
+# ---- multi-host chains (docs/multi-host.md): `gatetrain chain --hosts hosts.toml` spreads one run over the coordinator and
+# every ENABLED host whose roles include "worker". A step counts green only from a host on the exact commit with the exact tools.
+[multihost]
+fingerprint = []                          # commands every worker must answer exactly as the coordinator does
+local_tags = ["js"]                       # the coordinator's tags besides its platform tag (x86_64-linux, aarch64-macos, ...)
+max_host_failures = 2                     # a worker that loses this many steps is removed for the run
+max_step_attempts = 3                     # a step lost this many times is red (rc 125), never green
+
+[multihost.tag_fingerprint]               # a tag counts on a worker only when these answer exactly as on the coordinator
+"x86_64-linux" = ["rustc -V", "cargo -V", "docker version --format '{{.Server.Version}}'"]
+js = ["node -v"]
+
+[[hosts]]                   # a Linux worker, for example a distribution under WSL with its own sshd as a systemd service
+name = "linux-worker"
+kind = "local"
+roles = ["worker"]
+reach = "ssh builder@192.0.2.10"           # an address: names may not resolve between the machines
+tags = ["x86_64-linux", "js"]
+slots = 6                                  # keep it below what the person at this machine can spare
+cores = 32
+repo = "/home/builder/gatetrain/repo.git"  # a bare repository the coordinator pushes the commit into (no git-server credentials here)
+workdir = "/home/builder/gatetrain/work"   # made as a worktree of repo on the first run
+gatetrain_bin = "/home/builder/.cargo/bin/gatetrain"
+prepare = "npm ci"                         # before the host's first step; a failure refuses the host for the run
+prepare_key = ["package-lock.json"]        # an unchanged lockfile skips prepare on the next run
+enabled = false                            # set true when the host is set up
+
+[[hosts]]                   # a laptop that may only run platform-free JavaScript steps (requires = ["js"]); it may sleep
+name = "laptop-js"
+kind = "local"
+roles = ["worker"]
+reach = "ssh dev@192.0.2.20"
+tags = ["js"]                              # never x86_64-linux: its platform tag is what its agent reports (aarch64-macos)
+slots = 4
+repo = "/Users/dev/gatetrain/repo.git"
+workdir = "/Users/dev/gatetrain/work"
+gatetrain_bin = "/Users/dev/.local/bin/gatetrain"
+prepare = "npm ci"
+prepare_key = ["package-lock.json"]
+command_prefix = ["caffeinate", "-i"]      # stay awake while a step runs
+enabled = false
+
 [[models]]                  # agent spend, measured per lane and per review
 name = "local-coder"
 kind = "local"

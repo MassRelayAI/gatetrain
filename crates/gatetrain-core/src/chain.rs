@@ -52,6 +52,10 @@ pub struct Step {
     pub cores: Option<u32>,
     /// the step's test runner (`vitest`, `node`, `cargo`, `playwright`, `pytest`); only with it can `--retry-flakes` read the step's result lines. No runner = never retried
     pub runner: Option<String>,
+    /// host tags this step needs (docs/multi-host.md): with `--hosts` it runs only on a host whose tags include all of them; without, the
+    /// local host's tags must. No `requires` = the coordinator's platform tag
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +194,34 @@ pub struct StepRec {
     pub key: Option<String>,
     pub shards: i64,
     pub log_ref: String,
+    /// the host that ran the step (a multi-host run); None = the run's own host
+    pub host: Option<String>,
+    /// that host's tool fingerprint (a multi-host run)
+    pub fingerprint: Option<String>,
+}
+
+/// One host a multi-host run considered (the `run_hosts` table).
+#[derive(Debug, Clone)]
+pub struct HostRec {
+    pub host: String,
+    /// `coordinator` or `worker`
+    pub role: String,
+    pub sha: Option<String>,
+    pub fingerprint: Option<String>,
+    pub tags: Vec<String>,
+    pub slots: i64,
+    pub accepted: bool,
+    pub reason: Option<String>,
+}
+
+/// One scheduling decision of a multi-host run (the `host_events` table): placed, stolen, lost, removed, refused, unplaceable.
+#[derive(Debug, Clone)]
+pub struct HostEvent {
+    pub at: String,
+    pub host: String,
+    pub step: Option<String>,
+    pub event: String,
+    pub reason: String,
 }
 
 /// One shard of a sharded step.
@@ -225,6 +257,10 @@ pub struct RunRec {
     pub stamp: Option<(String, String)>,
     /// steps that were re-run once (`--retry-flakes`), in the order they finished; empty otherwise
     pub retries: Vec<RetryRec>,
+    /// a multi-host run: every host it considered; empty for a local run
+    pub hosts: Vec<HostRec>,
+    /// a multi-host run: every placement, steal, loss and removal, in order; empty for a local run
+    pub host_events: Vec<HostEvent>,
 }
 
 pub struct Outcome {
@@ -326,7 +362,7 @@ fn subst(t: &str, i: u32, n: u32) -> String {
 }
 
 /// How many shards a step really has: `shards = 1` is one ordinary run (its placeholders still read 1 of 1).
-fn nshards(step: &Step) -> u32 {
+pub(crate) fn nshards(step: &Step) -> u32 {
     step.shards.unwrap_or(1)
 }
 
@@ -472,16 +508,31 @@ fn spawn_part(step: &Step, idx: usize, part: Part, cwd: &Path, out: &Path, tx: &
     });
 }
 
-fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
     let mut argv = vec!["git".to_string()];
     argv.extend(args.iter().map(|s| s.to_string()));
     let o = LocalRunner.run_argv(cwd, &argv).ok()?;
     (o.code == 0).then(|| o.stdout.trim().to_string())
 }
 
-fn clean_host(v: &str) -> Option<String> {
+pub(crate) fn clean_host(v: &str) -> Option<String> {
     let v = v.trim();
     (!v.is_empty() && !v.contains(char::is_whitespace)).then(|| v.to_string())
+}
+
+/// `git status --porcelain --untracked-files=all` of `cwd`, leaving out `exclude` when it is inside (the out folder is not part of the
+/// tree a run proves). None = git failed.
+pub fn tree_status(cwd: &Path, exclude: &Path) -> Option<String> {
+    let cwd_abs = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let ex = exclude.canonicalize().unwrap_or_else(|_| exclude.to_path_buf());
+    let mut args: Vec<String> = vec!["status".into(), "--porcelain".into(), "--untracked-files=all".into(), "--".into(), ".".into()];
+    if let Ok(rel) = ex.strip_prefix(&cwd_abs) {
+        if !rel.as_os_str().is_empty() {
+            args.push(format!(":(exclude){}", rel.to_string_lossy().replace('\\', "/")));
+        }
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    git_out(cwd, &args)
 }
 
 /// The machine's name from the OS, not the environment (`HOSTNAME` is a shell variable that is usually not exported): the kernel's
@@ -513,7 +564,7 @@ pub fn host_name() -> String {
     host_with(&|k| std::env::var(k).ok(), &os_hostname)
 }
 
-fn round1(x: f64) -> f64 {
+pub(crate) fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
 }
 
@@ -728,6 +779,8 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                                         key: Some(k),
                                         shards: i64::from(nshards(step)),
                                         log_ref: format!("{}.full", step.name),
+                                        host: None,
+                                        fingerprint: None,
                                     });
                                     hit = true;
                                     continue;
@@ -884,6 +937,8 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 key: keys[d.idx].clone(),
                 shards: i64::from(nshards(step)),
                 log_ref: if retrying[d.idx].is_some() { format!("{name}.full#retried") } else { format!("{name}.full") },
+                host: None,
+                fingerprint: None,
             });
             let was_retried = retrying[d.idx].take().map(|mut r| {
                 r.final_rc = rc;
@@ -971,11 +1026,13 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         skips,
         stamp: stamp_text,
         retries,
+        hosts: Vec::new(),
+        host_events: Vec::new(),
     };
     Ok(Outcome { reds, stamp, record })
 }
 
-fn tier_name(t: Tier) -> &'static str {
+pub(crate) fn tier_name(t: Tier) -> &'static str {
     if t == Tier::Fast {
         "fast"
     } else {
@@ -1063,7 +1120,7 @@ pub fn digest_of(steps_text: &str) -> String {
 }
 
 /// `RED_SUMMARY` lists reds in steps-file order, so two runs of the same failure print the same line (RED_NOW keeps completion order).
-fn summary_in_file_order(plan: &Plan, reds: &[(String, i64)]) -> String {
+pub(crate) fn summary_in_file_order(plan: &Plan, reds: &[(String, i64)]) -> String {
     let mut v: Vec<(usize, &(String, i64))> = reds.iter().map(|r| (plan.steps.iter().position(|s| s.name == r.0).unwrap_or(usize::MAX), r)).collect();
     v.sort_by_key(|(i, _)| *i);
     v.iter().map(|(_, (n, rc))| format!("{n}(rc={rc})")).collect::<Vec<_>>().join(" ")

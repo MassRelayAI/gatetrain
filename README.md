@@ -12,6 +12,7 @@
   <a href="#how-it-works">How it works</a> &middot;
   <a href="#the-basic-workflow">Workflow</a> &middot;
   <a href="docs/chain.md">Chain</a> &middot;
+  <a href="docs/multi-host.md">Multi-host</a> &middot;
   <a href="#profiles-from-zero-cost-to-cloud">Profiles</a> &middot;
   <a href="docs/lessons.md">Lessons</a> &middot;
   <a href="#roadmap">Roadmap</a>
@@ -116,6 +117,7 @@ Commands:
   memory     Memory in the host model: record a step peak, or ask the admission rule
   running    Is a chain running? Reads the host lock, never the process table (exit 0 when held)
   tick       One bounded pass: doctor and `tidy --auto` per host, ingest finished logs, advance every open batch, one advice line, the storm line (3 to 6 lines; exit 1 when a batch needs a person)
+  agent      The worker side of a multi-host chain, started by the coordinator over ssh (docs/multi-host.md): hello, run, clean
 ```
 
 The three that change your disk have one shape. `check` only reads. `tidy` is a dry run until you ask:
@@ -782,12 +784,13 @@ Done:
 - [x] E2: shards (`shards`, `shard_check`, `shard_env`, `STEP_SHARD`); ledger v5
 - [x] E3 (batch side): one evidence rule, shadow before hits, the evidence file at launch
 - [x] E5: the launched pre-flight (state `preflighting`), a light run refused on a proving host, batch pipelining
+- [x] GT-10: multi-host chains (`chain --hosts`, `gatetrain agent`): tags and slots, exact commit and tool fingerprint per host, longest-first packing with work stealing, lost steps re-run elsewhere, one merged stamp; ledger v9 ([multi-host](docs/multi-host.md))
 - [x] E10: `gatetrain tick`, one bounded pass that advances the batches through `batch advance` and prints 3 to 6 lines; the ledger lock; the cause-storm line
 
 Next, in the order of [engine v2](docs/design/engine-v2.md) (a design; nothing below is built):
 
 - [ ] E6, E7, E8: `probe` (measure a disk), the sampler, `advise` (read-only advice from the ledger)
-- [ ] E9: multi-host: a detached holder, `reach = "wsl"`, the fast tier off the proof host
+- [ ] E9 (rest of multi-host): a detached holder, `reach = "wsl"`, the fast tier off the proof host, Windows workers
 - [ ] T9 and the disk floor
 - [ ] Decision-log anchors: the tick verifies the whole log every pass (`floor.log-append-only`); the tail check from the last anchor and `verify --anchors` wait for the anchors themselves
 

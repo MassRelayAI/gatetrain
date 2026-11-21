@@ -120,7 +120,8 @@ fn spawn_wait(mut c: Command, input: Option<&str>, timeout: Option<f64>) -> Resu
     Ok(Some(Output { code: status.code().unwrap_or(-1), stdout: text(&o), stderr: text(&e) }))
 }
 
-pub(crate) fn kill_tree(child: &mut std::process::Child) {
+/// Kill a child and its whole process tree (Windows: taskkill /T; elsewhere the tree collected with pgrep -P first).
+pub fn kill_tree(child: &mut std::process::Child) {
     if cfg!(windows) {
         // the shell's own children (powershell, du) die with it
         let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &child.id().to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status();
