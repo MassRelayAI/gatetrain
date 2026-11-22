@@ -164,8 +164,9 @@ pub fn step_def(step: &Step, prefix: &str) -> String {
     Sha256::digest(v.to_string().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Read and verify one result file: it must parse, be version 1, name `want` (when given), carry a verifying seal and (with `db`) agree with the ledger.
-fn read_result(path: &Path, want: Option<&str>, db: Option<&Path>) -> Result<RunResult, String> {
+/// Read and verify one result file: it must parse, be version 1, name `want` (when given), carry a verifying seal and (with `db`) agree with the ledger. The second value is the
+/// ledger's own row number of the run (0 without a ledger): the order of runs is the ledger's, never the file's.
+fn read_result(path: &Path, want: Option<&str>, db: Option<&Path>) -> Result<(RunResult, i64), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("no previous result {}: {e}", path.display()))?;
     let r: RunResult = serde_json::from_str(&text).map_err(|e| format!("{} is not a result file: {e}", path.display()))?;
     if r.v != 1 {
@@ -177,19 +178,24 @@ fn read_result(path: &Path, want: Option<&str>, db: Option<&Path>) -> Result<Run
     if r.seal != r.compute_seal() {
         return Err(format!("{}: its seal does not verify (the file was edited or is from another version)", path.display()));
     }
-    if let Some(db) = db {
-        check_ledger(db, &r)?;
-    }
-    Ok(r)
+    let order = match db {
+        Some(db) => check_ledger(db, &r)?,
+        None => 0,
+    };
+    Ok((r, order))
 }
 
 /// Read the previous result: `prev` is a path to a result file, or a commit: then every `result-<sha>-*.json` of `out` that verifies is read (a tier run and a
-/// whole run of one commit each leave one) and the results of one environment (mode, fingerprints, clean, whole) are merged step by step, a green result
-/// with fewer carried runs first. Refused (Err) when no file verifies.
+/// whole run of one commit each leave one) and the results of one environment (mode, fingerprints, clean, whole) are merged step by step. The newest run in the
+/// LEDGER's order is the base; with a ledger, a step whose newest ledger row (any run of the commit) is red is red here. Refused (Err) when no file verifies.
 pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>, tiers: &str, db: Option<&Path>) -> Result<RunResult, String> {
     let p = Path::new(prev);
     if p.is_file() {
-        return read_result(p, None, db);
+        let (mut r, _) = read_result(p, None, db)?;
+        if let Some(db) = db {
+            apply_ledger(db, &mut r)?;
+        }
+        return Ok(r);
     }
     let full = sha_of(prev).ok_or_else(|| format!("--since {prev:?} is neither a result file nor a commit of this repository"))?;
     let own = result_path(out, &full, tiers);
@@ -201,21 +207,18 @@ pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>
         .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("result-{full}-")) && n.to_string_lossy().ends_with(".json")))
         .collect();
     files.sort();
-    if let Some(i) = files.iter().position(|f| *f == own) {
-        files.swap(0, i); // this run's own tiers first: they are the base
-    }
     let mut first_err = format!("no previous result {}", own.display());
-    let mut ok: Vec<RunResult> = vec![];
+    let mut ok: Vec<(i64, RunResult)> = vec![];
     for f in &files {
         match read_result(f, Some(&full), db) {
-            Ok(r) => ok.push(r),
+            Ok(x) => ok.push((x.1, x.0)),
             Err(e) => first_err = e,
         }
     }
-    // the newest run (by its sealed `at`) is the base; an older run of the same environment only fills in steps the newest never ran. A step the newest run has keeps the newest
-    // result, green or red: an older green never overrides it
-    ok.sort_by(|a, b| b.at.cmp(&a.at));
-    let mut it = ok.into_iter();
+    // the newest run (by the LEDGER's row order; the file's own `at` is only a tie-break without a ledger, anyone can re-seal it) is the base; an older run of the same
+    // environment only fills in steps the newest never ran. A step the newest run has keeps the newest result, green or red: an older green never overrides it
+    ok.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.at.cmp(&a.1.at)));
+    let mut it = ok.into_iter().map(|x| x.1);
     let Some(mut base) = it.next() else { return Err(first_err) };
     for o in it {
         if (o.mode.as_str(), o.toolchain.as_str(), o.env.as_str(), o.dirty, o.partial) != (base.mode.as_str(), base.toolchain.as_str(), base.env.as_str(), base.dirty, base.partial) {
@@ -227,17 +230,20 @@ pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>
             }
         }
     }
+    if let Some(db) = db {
+        apply_ledger(db, &mut base)?;
+    }
     base.tiers = tiers.to_string();
     Ok(base)
 }
 
-/// With `--db`: the ledger must hold this run, for this commit, with this log digest and the same exit code for every step the result lists.
-fn check_ledger(db: &Path, r: &RunResult) -> Result<(), String> {
+/// With `--db`: the ledger must hold this run, for this commit, with this log digest and the same exit code for every step the result lists. Returns the run's ledger row number.
+fn check_ledger(db: &Path, r: &RunResult) -> Result<i64, String> {
     let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("cannot read ledger {}: {e}", db.display()))?;
-    let row: Option<(Option<String>, Option<String>)> = c
-        .query_row("SELECT commit_sha, log_sha256 FROM runs WHERE id = ?", [&r.run_id], |x| Ok((x.get(0)?, x.get(1)?)))
+    let row: Option<(i64, Option<String>, Option<String>)> = c
+        .query_row("SELECT rowid, commit_sha, log_sha256 FROM runs WHERE id = ?", [&r.run_id], |x| Ok((x.get(0)?, x.get(1)?, x.get(2)?)))
         .ok();
-    let Some((sha, log)) = row else { return Err(format!("run {} is not in the ledger {}", r.run_id, db.display())) };
+    let Some((rowid, sha, log)) = row else { return Err(format!("run {} is not in the ledger {}", r.run_id, db.display())) };
     if sha.as_deref() != Some(r.sha.as_str()) || log.as_deref() != Some(r.log_sha256.as_str()) {
         return Err(format!("the ledger's row for run {} disagrees with the result file (commit or log digest)", r.run_id));
     }
@@ -245,6 +251,21 @@ fn check_ledger(db: &Path, r: &RunResult) -> Result<(), String> {
         let rc: Option<i64> = c.query_row("SELECT exit_code FROM steps WHERE run_id = ? AND name = ?", [&r.run_id, &s.name], |x| x.get(0)).ok();
         if rc != s.rc {
             return Err(format!("the ledger has step {} of run {} at rc {rc:?}, the result file says {:?}", s.name, r.run_id, s.rc));
+        }
+    }
+    Ok(rowid)
+}
+
+/// The ledger decides which result of a step is the newest: the last row, in the ledger's own order, of any run of this commit that ran the step. When that row is not green the
+/// step is red here, whatever an older result file (replayed and re-sealed with a newer `at`) says.
+fn apply_ledger(db: &Path, r: &mut RunResult) -> Result<(), String> {
+    let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("cannot read ledger {}: {e}", db.display()))?;
+    for s in &mut r.steps {
+        let rc: Option<i64> = c
+            .query_row("SELECT s.exit_code FROM steps s JOIN runs u ON u.id = s.run_id WHERE u.commit_sha = ? AND s.name = ? ORDER BY u.rowid DESC LIMIT 1", [&r.sha, &s.name], |x| x.get(0))
+            .ok();
+        if let Some(rc) = rc.filter(|rc| *rc != 0) {
+            s.rc = Some(rc);
         }
     }
     Ok(())

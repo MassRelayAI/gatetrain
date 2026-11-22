@@ -77,3 +77,30 @@ fn p4_a_need_of_a_running_step_is_never_reused() {
     let (rc, out) = chain(r.path(), w.path(), body, &["--tier", "slow", "--since", &bad]);
     assert_ne!(rc, 0, "FALSE GREEN: build was reused for BAD while e2e read GOOD's output: {out}");
 }
+
+/// P6 (replay): an old green result file is restored and re-sealed with a far-future `at`; the ledger's own order says the later run was red, so the step must run again.
+#[test]
+fn p6_a_replayed_old_green_re_sealed_with_a_newer_at_does_not_outrank_a_later_red_in_the_ledger() {
+    let (r, w, flagdir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    git(r.path(), &["init", "-q"]);
+    std::fs::create_dir_all(r.path().join("a")).unwrap();
+    std::fs::write(r.path().join("a/x.txt"), "1").unwrap();
+    git(r.path(), &["add", "a/x.txt"]);
+    git(r.path(), &["commit", "-q", "-m", "init"]);
+    let sha = git(r.path(), &["rev-parse", "HEAD"]);
+    let flag = flagdir.path().join("ok");
+    std::fs::write(&flag, "x").unwrap();
+    let body = format!("[[step]]\nname = 'build'\ntier = 'fast'\ninputs = ['a/**']\nargv = ['{c}', 'exists', '{f}']\n", c = child(), f = flag.display());
+    assert_eq!(chain(r.path(), w.path(), &body, &[]).0, 0);
+    let file = w.path().join("out").join(format!("result-{sha}-fast.json"));
+    let green = std::fs::read_to_string(&file).unwrap();
+    std::fs::remove_file(&flag).unwrap();
+    assert_ne!(chain(r.path(), w.path(), &body, &[]).0, 0, "the later run of the same commit is red");
+    // the attacker restores the old green (its ledger row exists) and re-seals it as newer
+    let mut res: gatetrain_core::since::RunResult = serde_json::from_str(&green).unwrap();
+    res.at = "9999-12-31T00:00:00+00:00".into();
+    res.seal = res.compute_seal();
+    std::fs::write(&file, serde_json::to_string_pretty(&res).unwrap()).unwrap();
+    let (rc, out) = chain(r.path(), w.path(), &body, &["--since", &sha]);
+    assert_ne!(rc, 0, "FALSE GREEN: a replayed older green outranked the ledger's later red: {out}");
+}
