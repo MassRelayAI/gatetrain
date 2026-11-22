@@ -2795,3 +2795,22 @@ fn the_accept_reused_opt_in_does_not_accept_a_subset_run_or_a_stamp_that_lists_n
     }
     assert!(!stamp_is_partial(&serde_json::json!({"v": 1}), false));
 }
+
+#[test]
+fn the_legacy_bridge_refuses_a_reused_stamp_unless_its_own_opt_in_is_set() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.cfg.legacy_stamp_command = vec!["sh".into(), "-c".into(), "exit 0".into()];
+    fx.cfg.preflight_accept_reused = true; // the pre-flight accepts it; the bridge never opted in
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    let sha = fx.lock.launches.lock().unwrap()[0].sha.clone();
+    fx.pf_log("preflight", GREEN);
+    let v = serde_json::json!({"v": 2, "kind": "preflight", "sha": sha, "digest": fx.pf_digest(), "steps": [{"name": "a", "rc": 0}], "partial": true, "partial_reason": "reused", "reused": ["a"]});
+    std::fs::write(fx.pf_stamp_path(&sha), v.to_string()).unwrap();
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "preflight.legacy-stamp");
+    assert!(because.contains("[legacy] accept_reused"), "{because}");
+    fx.cfg.legacy_accept_reused = true;
+    fx.step("b1", "preflighted");
+}

@@ -115,6 +115,8 @@ pub struct BatchConfig {
     pub legacy_stamp_command: Vec<String>,
     /// `[preflight] accept_reused` (default false): a chain stamp from an incremental run (`chain --since`, `"reused"` non-empty) proves the pre-flight. Off: such a stamp is partial and refused.
     pub preflight_accept_reused: bool,
+    /// `[legacy] accept_reused` (default false): `legacy_stamp_command` also runs for a stamp from an incremental run. Off: such a stamp is refused for the bridge even under `[preflight] accept_reused`.
+    pub legacy_accept_reused: bool,
     /// `[lanes] accept_reused` (default false): the same for a lane stamp.
     pub lane_accept_reused: bool,
     /// `[chain] storm_reds` (default 20): when one cause explains at least this many reds of a running chain, `tick` reports it and names
@@ -202,6 +204,7 @@ impl Default for BatchConfig {
             tidy_auto: false,
             legacy_stamp_command: vec![],
             preflight_accept_reused: false,
+            legacy_accept_reused: false,
             lane_accept_reused: false,
             storm_reds: 20,
             tick_enabled: false,
@@ -360,6 +363,7 @@ impl BatchConfig {
             }
         }
         c.tidy_auto = v.get("disk").and_then(|d| d.get("tidy_auto")).and_then(|b| b.as_bool()).unwrap_or(false);
+        c.legacy_accept_reused = v.get("legacy").and_then(|l| l.get("accept_reused")).and_then(|b| b.as_bool()).unwrap_or(false);
         c.legacy_stamp_command = argv(v.get("preflight").and_then(|p| p.get("legacy_stamp_command")));
         if let Some(p) = v.get("pipeline") {
             if let Some(n) = p.get("max_ahead").and_then(|n| n.as_integer()) {

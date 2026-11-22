@@ -2543,6 +2543,10 @@ impl<'a> Engine<'a> {
         if !self.cfg.legacy_stamp_command.is_empty() {
             // the bridge for a launcher that still demands the repository's old stamp: runs once the chain stamp is read, idempotent by contract
             let stamp = self.abs(&wd, self.cfg.preflight_stamp_dir.as_deref().unwrap_or_default()).join(format!("stamp-{sha}.json"));
+            let reused_stamp = std::fs::read_to_string(&stamp).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| stamp_is_partial(&v, false) && !stamp_is_partial(&v, true));
+            if reused_stamp && !self.cfg.legacy_accept_reused {
+                return self.refuse(id, "preflight.legacy-stamp", "the chain stamp is from an incremental run (reused steps); [legacy] accept_reused = true lets legacy_stamp_command take it".to_string());
+            }
             let cmd: Vec<String> = self.cfg.legacy_stamp_command.iter().map(|a| a.replace("{sha}", &sha).replace("{results}", &stamp.to_string_lossy())).collect();
             let (rc, err) = match self.plugin(id, "T3o", "legacy stamp", " ([timeouts] plugin_min)", &cmd, &wd, &self.env(id, f, &sha, &run, &log.to_string_lossy()), self.plugin_min())? {
                 Ok(x) => x,

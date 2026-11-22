@@ -58,10 +58,15 @@ impl Run {
 }
 
 fn chain(repo: &Path, work: &Path, body: &str, extra: &[&str]) -> Run {
+    let dbp = work.join("auto.db");
+    let mut extra: Vec<&str> = extra.to_vec();
+    if !extra.contains(&"--db") {
+        extra.extend(["--db", dbp.to_str().unwrap()]);
+    }
     let f = work.join("steps.toml");
     std::fs::write(&f, format!("cwd = '{}'\n\n{body}", repo.display())).unwrap();
     let out = work.join("out");
-    let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", out.to_str().unwrap()]).args(extra).current_dir(work).output().unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", out.to_str().unwrap()]).args(&extra).current_dir(work).output().unwrap();
     let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
     Run { o, out, stdout }
 }
@@ -197,7 +202,7 @@ fn an_environment_variable_in_the_default_set_changes_the_fingerprint() {
     let run = |extra: &[&str], flags: &str| {
         let f = w.path().join("steps.toml");
         std::fs::write(&f, format!("cwd = '{}'\n\n{}", r.path().display(), body())).unwrap();
-        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", w.path().join("out").to_str().unwrap()]).args(extra).env("RUSTFLAGS", flags).current_dir(w.path()).output().unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", w.path().join("out").to_str().unwrap()]).args(extra).args(["--db", w.path().join("e.db").to_str().unwrap()]).env("RUSTFLAGS", flags).current_dir(w.path()).output().unwrap();
         String::from_utf8_lossy(&o.stdout).into_owned()
     };
     run(&["--run-id", "run-1"], "-Cdebuginfo=0");
@@ -232,4 +237,21 @@ fn an_edited_result_file_or_a_ledger_that_disagrees_is_refused() {
     conn.execute("update runs set log_sha256='0' where id='run-1'", []).unwrap();
     let b = chain(r.path(), w.path(), &body(), &["--since", &sha1, "--db", d, "--run-id", "run-4"]);
     assert!(b.stdout.contains("CHAIN_SINCE refused the ledger's row") && !b.has("STEP_REUSED"), "{}", b.stdout);
+}
+
+#[test]
+fn since_without_a_ledger_is_refused_and_everything_runs() {
+    let (r, w) = (repo(), tempfile::tempdir().unwrap());
+    let out = w.path().join("out");
+    let f = w.path().join("steps.toml");
+    std::fs::write(&f, format!("cwd = '{}'\n\n{}", r.path().display(), body())).unwrap();
+    let go = |extra: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", out.to_str().unwrap()]).args(extra).current_dir(w.path()).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    go(&["--run-id", "run-1"]);
+    let sha1 = git(r.path(), &["rev-parse", "HEAD"]);
+    commit_file(r.path(), "docs/n.txt", "n");
+    let o = go(&["--since", &sha1]);
+    assert!(o.contains("CHAIN_SINCE refused no-ledger") && !o.contains("STEP_REUSED"), "{o}");
 }

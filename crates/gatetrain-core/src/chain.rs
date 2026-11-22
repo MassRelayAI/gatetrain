@@ -675,7 +675,10 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let run_id = o.run_id.clone().unwrap_or_else(|| default_run_id(&started_at, sha.as_deref()));
     let prefix = git_out(&cwd, &["rev-parse", "--show-prefix"]).unwrap_or_default();
     let mut reuse: Vec<Option<(String, String, u32)>> = vec![None; plan.steps.len()];
-    if let (Some(s), Some(_)) = (&o.since, &sha) {
+    if let (Some(_), Some(_), None) = (&o.since, &sha, o.since.as_ref().and_then(|s| s.db.as_ref())) {
+        // a result file alone proves nothing: anyone can edit it and recompute its seal. The ledger row is the second witness.
+        say(&format!("CHAIN_SINCE refused no-ledger: --since needs --db (the ledger row backs the result file); {} steps run", selected.len()));
+    } else if let (Some(s), Some(_)) = (&o.since, &sha) {
         let sha_of = |r: &str| git_out(&cwd, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]);
         match crate::since::load_prev(&o.out, &s.prev, &sha_of, &tiers, s.db.as_deref()) {
             Err(why) => say(&format!("CHAIN_SINCE refused {}", why.replace(['\r', '\n'], " "))),

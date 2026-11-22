@@ -30,10 +30,15 @@ fn commit_all(repo: &Path, m: &str) -> String {
     git(repo, &["rev-parse", "HEAD"])
 }
 fn chain(repo: &Path, work: &Path, body: &str, extra: &[&str]) -> (i32, String, PathBuf) {
+    let dbp = work.join("auto.db");
+    let mut extra: Vec<&str> = extra.to_vec();
+    if !extra.contains(&"--db") {
+        extra.extend(["--db", dbp.to_str().unwrap()]);
+    }
     let f = work.join("steps.toml");
     std::fs::write(&f, format!("cwd = '{}'\n\n{body}", repo.display())).unwrap();
     let out = work.join("out");
-    let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", out.to_str().unwrap()]).args(extra).current_dir(work).output().unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", out.to_str().unwrap()]).args(&extra).current_dir(work).output().unwrap();
     (o.status.code().unwrap(), String::from_utf8_lossy(&o.stdout).into_owned(), out)
 }
 
