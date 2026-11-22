@@ -2,9 +2,13 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.4.1
+
+- `gatetrain chain --tier <fast|slow>`: a complete run of a tier. It executes the closure of its steps (every step they need, from any tier, runs in the same run; those are listed as `ran_for_closure`), so each tier stamp stands alone. The stamp is `v2`, `partial`, reason `tier`, named `stamp-<sha>-<tiers>.json`, and names the tiers it covers; the pre-flight gate accepts a set of tier stamps that covers every tier on one commit and steps-file digest. A red run deletes the older green stamp of the same commit and tiers. Not with `--only`, `--skip`, `--hosts` or `--mode full` (docs/since.md).
+- `--since` fixes: it reads every verified result of the commit and takes each step from the newest run in the LEDGER's order, so an older green (or a replayed, re-sealed one) never overrides a newer red; a step is never reused while a step that needs it runs.
+
 ## 0.4.0
 
-- `gatetrain chain --tier <fast|slow>`: a complete run of a tier (not partial), stamp `stamp-<sha>-<tier>.json` naming its tiers; `--since` reuses within the same tier; the pre-flight gate accepts a union of tier stamps that covers every tier (docs/since.md).
 - `gatetrain chain --since <sha>` (a stamp with reused steps is v2 and partial, accepted only under `accept_reused`; with `--since-max-age`, `--full`, `--toolchain-probe`, `--env-key`): incremental re-run that carries a previous green result only under strict rules, labelled in the log, ledger and stamp (docs/since.md). Every run now also writes `result-<sha>-<tiers>.json` in `--out`; stamps gain per-step `freshness` and `reused`/`fresh` lists.
 
 ## 0.3.0
