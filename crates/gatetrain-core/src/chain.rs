@@ -683,6 +683,43 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     say(&format!("CHAIN_OUT {}", out_abs.to_string_lossy().trim_start_matches(r"\\?\")));
     // incremental re-run: which steps carry the previous run's green result (docs/since.md); every other step runs
     let tiers = crate::since::tiers_of(plan, &selected);
+    let plan_tiers = crate::since::tiers_of(plan, &(0..plan.steps.len()).collect::<Vec<_>>());
+    let tier_only = !o.tiers.is_empty() && plan_tiers != tiers;
+    let stamp_name = |sha: &str| if tier_only { format!("stamp-{sha}-{tiers}.json") } else { format!("stamp-{sha}.json") };
+    // a tier run whose steps need a step of another tier may run only on a green stamp of that tier for this very commit and steps file, written before this run
+    // started (its output is what the needing step reads); the new stamp records which stamp it depended on, so the union gate can prove the order
+    let mut depends_on: Vec<serde_json::Value> = Vec::new();
+    let mut dep_reused = false;
+    if tier_only {
+        let Some(sha) = &sha else { return Err("--tier needs a git repository".into()) };
+        let mut other: Vec<(&str, &str)> = Vec::new();
+        for &i in &selected {
+            for n in &plan.steps[i].needs {
+                if let Some(j) = plan.steps.iter().position(|s| &s.name == n).filter(|j| !selected.contains(j)) {
+                    let t = tier_name(plan.steps[j].tier);
+                    if !other.iter().any(|(ot, _)| *ot == t) {
+                        other.push((t, &plan.steps[i].name));
+                    }
+                }
+            }
+        }
+        for (t, needing) in other {
+            let f = o.out.join(format!("stamp-{sha}-{t}.json"));
+            let bad = |why: &str| format!("--tier {tiers}: step {needing:?} needs a step of the {t} tier, so a green {t}-tier stamp for this commit must exist first ({why}); run --tier {t} on {sha} first");
+            let text = std::fs::read_to_string(&f).map_err(|_| bad(&format!("{} is missing", f.display())))?;
+            let v: serde_json::Value = serde_json::from_str(&text).map_err(|_| bad("its stamp is not JSON"))?;
+            let ok = v["sha"].as_str() == Some(sha.as_str())
+                && v["digest"].as_str() == Some(digest)
+                && matches!(v["partial_reason"].as_str(), Some("tier" | "reused"))
+                && v["tiers"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str() == Some(t)))
+                && v["at"].as_str().is_some_and(|at| at < started_at.as_str());
+            if !ok {
+                return Err(bad("its stamp is for another commit or steps file, is incremental, or was written after this run started"));
+            }
+            dep_reused |= v["partial_reason"].as_str() == Some("reused");
+            depends_on.push(serde_json::json!({"tier": t, "file": f.file_name().map(|n| n.to_string_lossy().into_owned()), "hash": digest_of(&text)}));
+        }
+    }
     let run_id = o.run_id.clone().unwrap_or_else(|| default_run_id(&started_at, sha.as_deref()));
     let prefix = git_out(&cwd, &["rev-parse", "--show-prefix"]).unwrap_or_default();
     let mut reuse: Vec<Option<(String, String, u32)>> = vec![None; plan.steps.len()];
@@ -1105,6 +1142,10 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     }
     let mut stamp_text: Option<(String, String)> = None;
     let stamp = if !reds.is_empty() {
+        // a red run on this commit invalidates the older green stamp of the same tiers: it no longer describes the tree (a subset run proves and disproves nothing about it)
+        if let (Some(sha), true) = (&sha, o.only.is_empty() && o.skip.is_empty()) {
+            let _ = std::fs::remove_file(o.out.join(stamp_name(sha)));
+        }
         Err("the run is red".to_string())
     } else if !o.stamp {
         Err("this run writes no stamp (one step of a multi-host run: only its coordinator stamps)".to_string())
@@ -1150,16 +1191,28 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             // the tiers this stamp covers: a consumer that needs a full pre-flight needs every tier of the steps file covered, by this stamp or a union of tier stamps
             let covered: Vec<&str> = tiers.split('+').collect();
             body["tiers"] = serde_json::json!(covered);
-            let plan_tiers = crate::since::tiers_of(plan, &(0..plan.steps.len()).collect::<Vec<_>>());
-            let tier_only = !o.tiers.is_empty() && plan_tiers != tiers;
             if tier_only {
                 body["plan_tiers"] = serde_json::json!(plan_tiers.split('+').collect::<Vec<_>>());
+                // a tier stamp proves its tiers only: partial for every consumer that does not do the union check
+                body["v"] = 2.into();
+                body["partial"] = true.into();
+                if body["partial_reason"].is_null() {
+                    body["partial_reason"] = "tier".into();
+                }
+                body["depends_on"] = depends_on.clone().into();
+                if dep_reused {
+                    // built on an incremental stamp: it is incremental too
+                    body["partial_reason"] = "reused".into();
+                    if let Some(r) = body["reused"].as_array_mut() {
+                        r.push("depends-on-reused-tier".into());
+                    }
+                }
             }
             if !retries.is_empty() {
                 body["retried"] = retries.iter().map(|r| serde_json::json!({"name": r.name, "first_rc": r.first_rc, "final_rc": r.final_rc, "class": r.class, "via": r.via, "test": r.test})).collect();
             }
             let text = serde_json::to_string_pretty(&body).unwrap_or_default() + "\n";
-            let p = o.out.join(if tier_only { format!("stamp-{sha}-{tiers}.json") } else { format!("stamp-{sha}.json") });
+            let p = o.out.join(stamp_name(sha));
             std::fs::write(&p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
             // a stamp's own digest is the sha-256 of the file's bytes (engine v2 section 5.4)
             stamp_text = Some((digest_of(&text), text));

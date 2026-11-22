@@ -75,3 +75,12 @@ The stamp names the tiers it covers (`"tiers"`, and `"plan_tiers"` when the run 
 tiers, is `stamp-<sha>-<tiers>.json`, so a fast and a slow run on one commit never overwrite each other. The pre-flight gate accepts a single
 full stamp, or the union of tier stamps on one commit and one steps-file digest that together cover every tier of the steps file (not for
 `legacy_stamp_command`, which needs the single stamp).
+
+### Tier order and invalidation
+
+A tier run whose steps need a step of another tier runs only when a green stamp of that tier exists for the same commit and steps-file digest, written before the
+run started (`stamp-<sha>-<tier>.json`); otherwise it is refused. The new stamp records `depends_on` (the tier and the sha-256 of that stamp). A tier stamp is
+`"v": 2, "partial": true, "partial_reason": "tier"`, so every consumer that does not do the union check (lane stamp, single pre-flight stamp, evidence) refuses
+it. The pre-flight gate accepts a set of tier stamps only when every tier is covered, on one commit and digest, and every `depends_on` resolves to a stamp in the
+set, which proves the order fast, then slow (running the fast tier again changes its stamp and breaks the slow stamp's dependency). A tier stamp built on an
+incremental stamp is itself marked `reused`. A red run deletes the older green stamp of the same commit and tiers.

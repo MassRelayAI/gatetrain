@@ -73,17 +73,24 @@ fn chain(repo: &Path, work: &Path, extra: &[&str]) -> Run {
 fn a_tier_run_is_complete_for_its_tier_names_its_tiers_and_does_not_collide_with_the_other_tier() {
     let (r, w) = (repo(), tempfile::tempdir().unwrap());
     let sha = git(r.path(), &["rev-parse", "HEAD"]);
+    // the slow tier needs the fast tier (S needs B): with no fast stamp for this commit it is refused
+    let early = chain(r.path(), w.path(), &["--tier", "slow", "--run-id", "s0"]);
+    assert_eq!(early.code(), 2, "{}{}", early.stdout, early.stderr);
+    assert!(early.stderr.contains("fast-tier stamp"), "{}", early.stderr);
+    assert!(!w.path().join("out").join(format!("stamp-{sha}-slow.json")).exists());
     let fast = chain(r.path(), w.path(), &["--tier", "fast", "--run-id", "f1"]);
     assert_eq!(fast.code(), 0, "{}{}", fast.stdout, fast.stderr);
     assert!(fast.has("STEP_EXIT A 0") && !fast.stdout.contains("STEP_START S"), "only the fast steps run: {}", fast.stdout);
     let st = fast.stamp(&format!("stamp-{sha}-fast.json"));
-    assert_eq!((st["tiers"].clone(), st["partial"].clone()), (serde_json::json!(["fast"]), serde_json::Value::Null));
+    assert_eq!((st["tiers"].clone(), st["partial"].clone(), st["partial_reason"].clone()), (serde_json::json!(["fast"]), serde_json::json!(true), serde_json::json!("tier")));
     assert_eq!(st["plan_tiers"], serde_json::json!(["fast", "slow"]));
     let slow = chain(r.path(), w.path(), &["--tier", "slow", "--run-id", "s1"]);
     assert_eq!(slow.code(), 0, "{}{}", slow.stdout, slow.stderr);
     assert!(slow.has("STEP_EXIT S 0") && slow.has("STEP_EXIT T 0") && !slow.stdout.contains("STEP_START A"), "{}", slow.stdout);
     let st = slow.stamp(&format!("stamp-{sha}-slow.json"));
-    assert_eq!((st["tiers"].clone(), st["partial"].clone()), (serde_json::json!(["slow"]), serde_json::Value::Null));
+    assert_eq!((st["tiers"].clone(), st["partial"].clone(), st["partial_reason"].clone()), (serde_json::json!(["slow"]), serde_json::json!(true), serde_json::json!("tier")));
+    let fast_hash = gatetrain_core::chain::digest_of(&std::fs::read_to_string(w.path().join("out").join(format!("stamp-{sha}-fast.json"))).unwrap());
+    assert_eq!(st["depends_on"][0]["hash"], serde_json::json!(fast_hash), "the slow stamp names the fast stamp it ran on");
     assert!(w.path().join("out").join(format!("stamp-{sha}-fast.json")).exists(), "the slow run did not overwrite the fast stamp");
     assert!(!w.path().join("out").join(format!("stamp-{sha}.json")).exists(), "no single full stamp from two tier runs");
     // both tiers named together are a whole run: the ordinary stamp
@@ -96,12 +103,13 @@ fn since_reuses_from_a_previous_run_of_the_same_tier_and_a_different_tier_set_ru
     let (r, w) = (repo(), tempfile::tempdir().unwrap());
     let sha1 = git(r.path(), &["rev-parse", "HEAD"]);
     assert_eq!(chain(r.path(), w.path(), &["--tier", "fast", "--run-id", "f1"]).code(), 0);
-    commit_file(r.path(), "b/y.txt", "2");
+    let sha2 = commit_file(r.path(), "b/y.txt", "2");
     let again = chain(r.path(), w.path(), &["--tier", "fast", "--since", &sha1, "--run-id", "f2"]);
     assert!(again.stdout.contains(&format!("STEP_REUSED A f1 {sha1}")) && !again.has("STEP_REUSED B"), "{}", again.stdout);
     // the slow tier has no previous slow run: refused, everything runs
     let slow = chain(r.path(), w.path(), &["--tier", "slow", "--since", &sha1, "--run-id", "s1"]);
     assert!(!slow.has("STEP_REUSED") && slow.has("CHAIN_SINCE refused"), "{}", slow.stdout);
+    assert_eq!(slow.stamp(&format!("stamp-{sha2}-slow.json"))["partial_reason"], "reused", "built on an incremental fast stamp: incremental too");
     // a previous fast run does not feed a fast+slow run
     let all = chain(r.path(), w.path(), &["--since", &sha1, "--run-id", "all1"]);
     assert!(!all.has("STEP_REUSED") && all.stdout.contains("no previous result"), "{}", all.stdout);
@@ -114,4 +122,26 @@ fn a_tier_cannot_be_combined_with_only_skip_or_a_full_mode_and_must_exist() {
         let run = chain(r.path(), w.path(), &extra);
         assert_eq!(run.code(), 2, "{extra:?}: {}{}", run.stdout, run.stderr);
     }
+}
+
+#[test]
+fn a_red_run_deletes_the_older_green_stamp_of_the_same_tiers() {
+    let (r, w) = (repo(), tempfile::tempdir().unwrap());
+    let fd = tempfile::tempdir().unwrap();
+    let flag = fd.path().join("ok");
+    std::fs::write(&flag, "x").unwrap();
+    let sha = git(r.path(), &["rev-parse", "HEAD"]);
+    let body = format!("[[step]]\nname = 'A'\ntier = 'fast'\nargv = ['{}', 'exists', '{}']\n", child(), flag.display());
+    let go = |extra: &[&str]| {
+        let f = w.path().join("steps.toml");
+        std::fs::write(&f, format!("cwd = '{}'\n\n{body}", r.path().display())).unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", w.path().join("out").to_str().unwrap()]).args(extra).current_dir(w.path()).output().unwrap();
+        o.status.code().unwrap()
+    };
+    assert_eq!(go(&[]), 0);
+    let stamp = w.path().join("out").join(format!("stamp-{sha}.json"));
+    assert!(stamp.exists());
+    std::fs::remove_file(&flag).unwrap();
+    assert_eq!(go(&[]), 1, "the same commit is now red");
+    assert!(!stamp.exists(), "the older green stamp no longer describes the tree");
 }
