@@ -655,6 +655,14 @@ fn from_state(tr: &str) -> &'static str {
     }
 }
 
+/// A stamp is partial when it says so. The one exception: a stamp from an incremental run (`partial_reason` = "reused" and a non-empty `reused` list), accepted only under `accept_reused`.
+pub fn stamp_is_partial(v: &Value, accept_reused: bool) -> bool {
+    if v["partial"].as_bool() != Some(true) {
+        return false;
+    }
+    !(accept_reused && v["partial_reason"].as_str() == Some("reused") && v["reused"].as_array().is_some_and(|r| !r.is_empty()))
+}
+
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(9)]
 }
@@ -1856,7 +1864,7 @@ impl<'a> Engine<'a> {
         if v["sha"].as_str() != Some(sha) {
             return Some(format!("the chain stamp {} names another commit", file.display()));
         }
-        if v["partial"].as_bool() == Some(true) {
+        if stamp_is_partial(&v, self.cfg.preflight_accept_reused) {
             return Some(format!("the chain stamp {} is partial (a run of some steps only)", file.display()));
         }
         if let Some(want) = self.cfg.preflight_steps_file.as_deref() {
@@ -1925,7 +1933,7 @@ impl<'a> Engine<'a> {
         for l in f.facts.get("lanes").and_then(|l| l.as_array()).cloned().unwrap_or_default() {
             let tip = l["tip"].as_str().unwrap_or_default();
             // a partial stamp (a run of some steps) proves only those steps: it is no lane stamp
-            let ok = std::fs::read_to_string(dir.join(format!("stamp-{tip}.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["sha"].as_str() == Some(tip) && v["partial"].as_bool() != Some(true));
+            let ok = std::fs::read_to_string(dir.join(format!("stamp-{tip}.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["sha"].as_str() == Some(tip) && !stamp_is_partial(&v, self.cfg.lane_accept_reused));
             if !ok {
                 missing.push(format!("{} ({})", l["ref"].as_str().unwrap_or("?"), short(tip)));
             }

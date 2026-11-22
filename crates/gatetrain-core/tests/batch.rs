@@ -2765,3 +2765,33 @@ fn rev5_a_health_check_that_always_times_out_is_refused_past_the_health_timeout(
     let o = fx.adv_at("b1", &LATER).unwrap();
     assert!(matches!(&o, Outcome::Refused { rule, .. } if rule == "deploy.health-timeout"), "an hour past a 30 min health timeout, a hung health check: {o:?}");
 }
+
+#[test]
+fn a_stamp_from_an_incremental_run_is_refused_unless_accept_reused_is_set() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    let sha = fx.lock.launches.lock().unwrap()[0].sha.clone();
+    fx.pf_log("preflight", GREEN);
+    // what `chain --since` writes when it carried a step: v2, partial, reason "reused", the reused list
+    let v = serde_json::json!({"v": 2, "kind": "preflight", "sha": sha, "digest": fx.pf_digest(), "steps": [{"name": "a", "rc": 0, "freshness": "reused"}], "partial": true, "partial_reason": "reused", "reused": ["a"]});
+    std::fs::write(fx.pf_stamp_path(&sha), v.to_string()).unwrap();
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "preflight.stamp-for-sha");
+    assert!(because.contains("partial"), "{because}");
+    // the opt-in accepts exactly that stamp
+    fx.cfg.preflight_accept_reused = true;
+    fx.step("b1", "preflighted");
+}
+
+#[test]
+fn the_accept_reused_opt_in_does_not_accept_a_subset_run_or_a_stamp_that_lists_nothing_reused() {
+    use gatetrain_core::batch::stamp_is_partial;
+    let reused = serde_json::json!({"partial": true, "partial_reason": "reused", "reused": ["a"]});
+    assert!(stamp_is_partial(&reused, false) && !stamp_is_partial(&reused, true));
+    for v in [serde_json::json!({"partial": true, "partial_reason": "subset", "reused": ["a"]}), serde_json::json!({"partial": true}), serde_json::json!({"partial": true, "partial_reason": "reused", "reused": []})] {
+        assert!(stamp_is_partial(&v, true), "{v}");
+    }
+    assert!(!stamp_is_partial(&serde_json::json!({"v": 1}), false));
+}

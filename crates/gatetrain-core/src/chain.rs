@@ -677,13 +677,15 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let mut reuse: Vec<Option<(String, String, u32)>> = vec![None; plan.steps.len()];
     if let (Some(s), Some(_)) = (&o.since, &sha) {
         let sha_of = |r: &str| git_out(&cwd, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]);
-        match crate::since::load_prev(&o.out, &s.prev, &sha_of, &tiers) {
-            Err(why) => say(&format!("CHAIN_SINCE none {why}")),
+        match crate::since::load_prev(&o.out, &s.prev, &sha_of, &tiers, s.db.as_deref()) {
+            Err(why) => say(&format!("CHAIN_SINCE refused {}", why.replace(['\r', '\n'], " "))),
             Ok(prev) => {
-                let changed = |p: &str, specs: &[String]| crate::since::git_changed(&cwd, p, specs);
+                let head = sha.clone().unwrap_or_default();
+                let changed = |p: &str, specs: &[String]| crate::since::git_changed(&cwd, p, &head, specs);
                 let dirty = |specs: &[String]| crate::since::git_dirty(&cwd, specs);
                 let cur = crate::since::Cur { mode: &o.mode, tiers: &tiers, toolchain: &o.toolchain, env: &o.env_fp };
-                let g = crate::since::Git { changed: &changed, dirty: &dirty };
+                let tracked = |specs: &[String]| crate::since::git_tracked(&cwd, specs);
+                let g = crate::since::Git { changed: &changed, dirty: &dirty, tracked: &tracked };
                 let ds = crate::since::decide(plan, &selected, &prefix, &prev, &cur, s, &g);
                 let n = ds.iter().enumerate().filter(|(i, d)| selected.contains(i) && matches!(d, crate::since::Decision::Reuse { .. })).count();
                 say(&format!("CHAIN_SINCE {} reused={n} run={}", prev.sha, selected.len() - n));
@@ -1063,6 +1065,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     origin_run: orun,
                     origin_sha: osha,
                     age,
+                    unclean: s.inputs.is_empty() || crate::since::git_dirty(&cwd, &s.inputs) != Some(false),
                 })
             })
             .collect();
@@ -1077,8 +1080,11 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             dirty,
             partial: !o.only.is_empty() || !o.skip.is_empty(),
             steps,
+            log_sha256: log_sha256.clone(),
+            seal: String::new(),
         };
         let p = crate::since::result_path(&o.out, sha, &tiers);
+        let res = crate::since::RunResult { seal: res.compute_seal(), ..res };
         if let Err(e) = std::fs::write(&p, serde_json::to_string_pretty(&res).unwrap_or_default() + "\n") {
             eprintln!("chain: cannot write {}: {e}", p.display());
         }
@@ -1120,6 +1126,12 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             if !o.only.is_empty() || !o.skip.is_empty() {
                 // a run of some steps proves only those: the lane-stamp and pre-flight rules refuse it
                 body["partial"] = true.into();
+            }
+            if !reused.is_empty() {
+                // an incremental run is no full proof: v2 and partial, so every consumer refuses it unless it opts in (`accept_reused`)
+                body["v"] = 2.into();
+                body["partial"] = true.into();
+                body["partial_reason"] = if o.only.is_empty() && o.skip.is_empty() { "reused" } else { "subset" }.into();
             }
             if !retries.is_empty() {
                 body["retried"] = retries.iter().map(|r| serde_json::json!({"name": r.name, "first_rc": r.first_rc, "final_rc": r.final_rc, "class": r.class, "via": r.via, "test": r.test})).collect();

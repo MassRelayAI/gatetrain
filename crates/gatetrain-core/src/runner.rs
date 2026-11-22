@@ -325,8 +325,12 @@ pub mod fd_seam {
 fn reset_signals_unix() {
     // SAFETY: async-signal-safe calls on our own process, between fork and exec
     unsafe {
-        // the real-time signals too (glibc refuses the two it keeps for itself, which is harmless)
-        for sig in 1..=libc::SIGRTMAX() {
+        // the highest signal number: the real-time range on Linux, NSIG on the others (macOS has no real-time signals and no `SIGRTMAX`)
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let top = libc::SIGRTMAX();
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let top = 31;
+        for sig in 1..=top {
             if sig != libc::SIGKILL && sig != libc::SIGSTOP {
                 libc::signal(sig, libc::SIG_DFL);
             }

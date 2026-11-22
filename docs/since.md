@@ -10,7 +10,7 @@ gatetrain chain --steps steps.toml --out out --since 9e7eba8 [--since-max-age 5]
 
 Every `chain` run writes `out/result-<sha>-<tiers>.json` (green or red): per step its exit code, a hash of its definition, whether it ran
 `fresh` or was `reused`, and where it really ran (`origin_run`, `origin_sha`, `age`). `--since` takes a commit (the file is looked up in
-`--out`) or the path of a result file. No previous result is not an error: `CHAIN_SINCE none <why>` and every step runs.
+`--out`) or the path of a result file. No previous result is not an error: `CHAIN_SINCE refused <why>` and every step runs.
 
 ## When a step runs again
 
@@ -38,5 +38,30 @@ Anything else is reused. Each decision is logged: `STEP_RERUN <step> <why>`, `ST
 
 A reused step prints `STEP_START`, `STEP_REUSED`, `STEP_TIME 0.0s`, `STEP_EXIT 0`; its `.full` says `reused-from <run-id> <sha>`; its ledger row has
 `cached = 1` and `cached_from = "reused-from <run-id> <sha>"`. The stamp lists, per step, `freshness` (`fresh`, `reused` or `cached`) and
-`reused_from {run, sha, age}`, plus top-level `reused` and `fresh` lists, so a consumer that wants every step fresh refuses a stamp whose
-`reused` list is not empty. Stamp rules are unchanged: a partial or dirty run writes none. Not available with `--hosts`.
+`reused_from {run, sha, age}`, plus top-level `reused` and `fresh` lists (see Consumers below for how a stamp with reused steps is marked partial).
+
+## What `inputs` must be
+
+Reuse is only as sound as `inputs`: it must be the step's whole read set (sources, configs, fixtures, scripts it calls). git cannot see a file
+it ignores, or the target of a symlink, so these also re-run a step: inputs that match no tracked file; a tracked symlink in the inputs that
+points outside them; ignored, untracked or modified files under the inputs now, or when the step last ran (a step whose inputs hold a
+`node_modules` or `target` folder is therefore always re-run; list the sources instead). Listing too little is the declarer's error.
+
+## Fingerprints
+
+With no `--toolchain-probe` the toolchain fingerprint covers `rustc -Vv`, `cargo -V`, `node -v`, `git --version`, the platform and the gatetrain
+version; with no `--env-key` the environment fingerprint covers `RUSTFLAGS`, `RUSTUP_TOOLCHAIN`, `CARGO_BUILD_TARGET`,
+`CARGO_ENCODED_RUSTFLAGS`, `NODE_ENV`, `NODE_OPTIONS`, `CC`, `CXX`, `CI` (values hashed). Lockfile and toolchain-pin changes are caught by diff.
+
+## The result file is checked
+
+A result file is refused (`CHAIN_SINCE refused <why>`, every step runs) when it names another commit than `--since` resolved to, when its
+`seal` (sha-256 over its content and the run's log digest) does not verify, or, with `--db`, when the ledger has no row for its run or the row's
+commit, log digest or a step's exit code disagrees.
+
+## Consumers
+
+A stamp with reused steps is `"v": 2`, `"partial": true`, `"partial_reason": "reused"` with a non-empty `"reused"` list, so every consumer that
+refuses partial stamps (lane stamp, pre-flight stamp, evidence) refuses it. `[preflight] accept_reused = true` and `[lanes] accept_reused = true`
+accept exactly that stamp (never a `--only`/`--skip` one). A run with nothing reused writes the ordinary v1 stamp.
+Not available with `--hosts`.

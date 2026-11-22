@@ -83,20 +83,26 @@ pub struct ChainArgs {
     /// with --since: run every step (nothing reused)
     #[arg(long, requires = "since")]
     pub(crate) full: bool,
-    /// a shell line whose output is part of the toolchain fingerprint (repeatable); reuse only crosses runs with an equal fingerprint. Example: --toolchain-probe "rustc -V"
+    /// a shell line whose output is part of the toolchain fingerprint (repeatable; default: rustc -Vv, cargo -V, node -v, git --version); reuse only crosses runs with an equal fingerprint. Example: --toolchain-probe "rustc -V"
     #[arg(long = "toolchain-probe")]
     pub(crate) toolchain_probe: Vec<String>,
-    /// an environment variable whose value is part of the environment fingerprint (comma list; the value is hashed, never printed)
+    /// an environment variable whose value is part of the environment fingerprint (comma list; default: RUSTFLAGS, RUSTUP_TOOLCHAIN, CARGO_BUILD_TARGET, NODE_ENV, NODE_OPTIONS, CC, CXX, CI; the value is hashed, never printed)
     #[arg(long, value_delimiter = ',')]
     pub(crate) env_key: Vec<String>,
 }
 
+/// Probes used when no `--toolchain-probe` is given: the compilers and runtimes most steps depend on (a missing tool prints a fixed word, so the probe never fails).
+const DEFAULT_PROBES: &[&str] = &["rustc -Vv 2>&1 || echo no-rustc", "cargo -V 2>&1 || echo no-cargo", "node -v 2>&1 || echo no-node", "git --version 2>&1 || echo no-git"];
+/// Variables hashed into the environment fingerprint when no `--env-key` is given: the ones that change what a build or a test does.
+const DEFAULT_ENV: &[&str] = &["RUSTFLAGS", "RUSTUP_TOOLCHAIN", "CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "NODE_ENV", "NODE_OPTIONS", "CC", "CXX", "CI"];
+
 /// (toolchain, environment) fingerprints: sha-256 over gatetrain's version, the platform and the probes' output; over the listed variables' values.
 fn fingerprints(a: &ChainArgs, cwd: &std::path::Path) -> Result<(String, String), String> {
     use sha2::{Digest, Sha256};
-    let fp = gatetrain_core::multihost::fingerprint(cwd, &a.toolchain_probe)?;
+    let probes: Vec<String> = if a.toolchain_probe.is_empty() { DEFAULT_PROBES.iter().map(|s| s.to_string()).collect() } else { a.toolchain_probe.clone() };
+    let fp = gatetrain_core::multihost::fingerprint(cwd, &probes)?;
     let tc = Sha256::digest(format!("{}|{}-{}", fp.hash, std::env::consts::ARCH, std::env::consts::OS).as_bytes());
-    let mut keys = a.env_key.clone();
+    let mut keys: Vec<String> = if a.env_key.is_empty() { DEFAULT_ENV.iter().map(|s| s.to_string()).collect() } else { a.env_key.clone() };
     keys.sort();
     let env: String = keys.iter().map(|k| format!("{k}={}\n", std::env::var(k).unwrap_or_default())).collect();
     let hex = |d: &[u8]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
@@ -179,7 +185,7 @@ pub fn run(a: ChainArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let since = a.since.clone().map(|prev| gatetrain_core::since::SinceOpts { prev, max_age: a.since_max_age, full: a.full });
+    let since = a.since.clone().map(|prev| gatetrain_core::since::SinceOpts { prev, max_age: a.since_max_age, full: a.full, db: a.db.clone() });
     let (db, run_id) = (a.db, a.run_id);
     let out_dir = a.out.clone();
     let o = Opts { run_id: run_id.clone(), toolchain, env_fp, since, par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores, retry_flakes: a.retry_flakes, quarantine_ref: a.quarantine_ref, stamp: true };

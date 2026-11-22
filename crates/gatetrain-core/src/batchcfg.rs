@@ -113,6 +113,10 @@ pub struct BatchConfig {
     pub tidy_auto: bool,
     /// `[preflight] legacy_stamp_command`: runs once after a green launched pre-flight, with `{sha}` and `{results}`.
     pub legacy_stamp_command: Vec<String>,
+    /// `[preflight] accept_reused` (default false): a chain stamp from an incremental run (`chain --since`, `"reused"` non-empty) proves the pre-flight. Off: such a stamp is partial and refused.
+    pub preflight_accept_reused: bool,
+    /// `[lanes] accept_reused` (default false): the same for a lane stamp.
+    pub lane_accept_reused: bool,
     /// `[chain] storm_reds` (default 20): when one cause explains at least this many reds of a running chain, `tick` reports it and names
     /// the stop command (engine-v2 section 8). It only reports; nothing is stopped.
     pub storm_reds: usize,
@@ -197,6 +201,8 @@ impl Default for BatchConfig {
             close_protected_container_prefixes: vec![],
             tidy_auto: false,
             legacy_stamp_command: vec![],
+            preflight_accept_reused: false,
+            lane_accept_reused: false,
             storm_reds: 20,
             tick_enabled: false,
             stuck_minutes: 60.0,
@@ -294,6 +300,7 @@ impl BatchConfig {
             c.max_full_runs_per_batch = Some(n.max(0) as usize);
         }
         if let Some(l) = v.get("lanes") {
+            c.lane_accept_reused = l.get("accept_reused").and_then(|b| b.as_bool()).unwrap_or(false);
             c.require_lane_stamp = l.get("require_stamp").and_then(|b| b.as_bool()).unwrap_or(false);
             c.lane_stamp_dir = l.get("stamp_dir").and_then(|d| d.as_str()).filter(|d| !d.is_empty()).map(String::from);
             if c.require_lane_stamp && c.lane_stamp_dir.is_none() {
@@ -330,6 +337,7 @@ impl BatchConfig {
         if let Some(p) = v.get("preflight") {
             c.preflight_chain_command = argv(p.get("chain_command"));
             c.preflight_steps_file = strv(Some(p), "steps_file");
+            c.preflight_accept_reused = p.get("accept_reused").and_then(|b| b.as_bool()).unwrap_or(false);
             c.preflight_steps = argv(p.get("steps"));
             c.preflight_stamp_dir = strv(Some(p), "stamp_dir");
             if !c.preflight_chain_command.is_empty() && c.preflight_stamp_dir.is_none() {

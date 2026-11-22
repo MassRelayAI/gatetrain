@@ -45,6 +45,8 @@ pub struct SinceOpts {
     pub max_age: u32,
     /// `--full`: run everything
     pub full: bool,
+    /// `--db`: the ledger the previous run was recorded in; its row must agree with the result file
+    pub db: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -62,6 +64,9 @@ pub struct StepResult {
     pub origin_sha: String,
     /// how many runs the result has been carried through (0 = fresh)
     pub age: u32,
+    /// the declared inputs held ignored, untracked or modified files when the run ended: git cannot vouch for them, so the step is never reused from this result
+    #[serde(default)]
+    pub unclean: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +80,20 @@ pub struct RunResult {
     pub env: String,
     pub dirty: bool,
     pub partial: bool,
+    /// sha-256 of the run's log (the ledger keeps the same value)
+    #[serde(default)]
+    pub log_sha256: String,
+    /// sha-256 over the fields above: a result edited afterwards no longer verifies
+    #[serde(default)]
+    pub seal: String,
     pub steps: Vec<StepResult>,
+}
+
+impl RunResult {
+    pub fn compute_seal(&self) -> String {
+        let v = serde_json::json!([self.v, self.run_id, self.sha, self.mode, self.tiers, self.toolchain, self.env, self.dirty, self.partial, self.log_sha256, self.steps]);
+        Sha256::digest(v.to_string().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +118,14 @@ pub struct Git<'a> {
     pub changed: &'a ChangedFn<'a>,
     /// whether any of these pathspecs has uncommitted or untracked changes; None = git could not say
     pub dirty: &'a dyn Fn(&[String]) -> Option<bool>,
+    /// the tracked files under the pathspecs: how many, and the tracked symlinks among them as (path, target); None = git could not say
+    pub tracked: &'a dyn Fn(&[String]) -> Option<Tracked>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Tracked {
+    pub files: usize,
+    pub links: Vec<(String, String)>,
 }
 
 pub fn tiers_of(plan: &Plan, selected: &[usize]) -> String {
@@ -136,21 +162,50 @@ pub fn step_def(step: &Step, prefix: &str) -> String {
     Sha256::digest(v.to_string().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Read the previous result: `prev` is a path to a result file, or a commit looked up in `out`.
-pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>, tiers: &str) -> Result<RunResult, String> {
+/// Read the previous result: `prev` is a path to a result file, or a commit looked up in `out`. Refused (Err) when the file is not what
+/// it claims: another commit, a seal that does not verify, or (with `db`) a ledger row that disagrees.
+pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>, tiers: &str, db: Option<&Path>) -> Result<RunResult, String> {
     let p = Path::new(prev);
-    let path = if p.is_file() {
-        p.to_path_buf()
+    let (path, want) = if p.is_file() {
+        (p.to_path_buf(), None)
     } else {
         let full = sha_of(prev).ok_or_else(|| format!("--since {prev:?} is neither a result file nor a commit of this repository"))?;
-        result_path(out, &full, tiers)
+        (result_path(out, &full, tiers), Some(full))
     };
     let text = std::fs::read_to_string(&path).map_err(|e| format!("no previous result {}: {e}", path.display()))?;
     let r: RunResult = serde_json::from_str(&text).map_err(|e| format!("{} is not a result file: {e}", path.display()))?;
     if r.v != 1 {
         return Err(format!("{}: result version {} is not understood", path.display(), r.v));
     }
+    if let Some(w) = want.filter(|w| *w != r.sha) {
+        return Err(format!("{} names commit {} but --since resolved to {}", path.display(), short(&r.sha), short(&w)));
+    }
+    if r.seal != r.compute_seal() {
+        return Err(format!("{}: its seal does not verify (the file was edited or is from another version)", path.display()));
+    }
+    if let Some(db) = db {
+        check_ledger(db, &r)?;
+    }
     Ok(r)
+}
+
+/// With `--db`: the ledger must hold this run, for this commit, with this log digest and the same exit code for every step the result lists.
+fn check_ledger(db: &Path, r: &RunResult) -> Result<(), String> {
+    let c = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("cannot read ledger {}: {e}", db.display()))?;
+    let row: Option<(Option<String>, Option<String>)> = c
+        .query_row("SELECT commit_sha, log_sha256 FROM runs WHERE id = ?", [&r.run_id], |x| Ok((x.get(0)?, x.get(1)?)))
+        .ok();
+    let Some((sha, log)) = row else { return Err(format!("run {} is not in the ledger {}", r.run_id, db.display())) };
+    if sha.as_deref() != Some(r.sha.as_str()) || log.as_deref() != Some(r.log_sha256.as_str()) {
+        return Err(format!("the ledger's row for run {} disagrees with the result file (commit or log digest)", r.run_id));
+    }
+    for s in &r.steps {
+        let rc: Option<i64> = c.query_row("SELECT exit_code FROM steps WHERE run_id = ? AND name = ?", [&r.run_id, &s.name], |x| x.get(0)).ok();
+        if rc != s.rc {
+            return Err(format!("the ledger has step {} of run {} at rc {rc:?}, the result file says {:?}", s.name, r.run_id, s.rc));
+        }
+    }
+    Ok(())
 }
 
 /// Why nothing at all may be reused from `prev` (None = the run-level rules pass).
@@ -249,9 +304,21 @@ fn step_decision(s: &Step, prefix: &str, prev: &RunResult, o: &SinceOpts, git: &
         Some(f) if !f.is_empty() => return run(&format!("its inputs changed ({})", f[0])),
         Some(_) => {}
     }
+    if p.unclean {
+        return run("its inputs held ignored, untracked or modified files when it last ran");
+    }
+    match (git.tracked)(&s.inputs) {
+        None => return run("git cannot list its inputs"),
+        Some(t) if t.files == 0 => return run("its inputs match no tracked file"),
+        Some(t) => {
+            if let Some((l, tg)) = t.links.iter().find(|(l, tg)| link_escapes(l, tg, &s.inputs)) {
+                return run(&format!("tracked symlink {l} points outside its inputs ({tg})"));
+            }
+        }
+    }
     match (git.dirty)(&s.inputs) {
         None => return run("git cannot say whether its inputs are clean"),
-        Some(true) => return run("its inputs are dirty"),
+        Some(true) => return run("its inputs are dirty (modified, untracked or ignored files)"),
         Some(false) => {}
     }
     Decision::Reuse { run: p.origin_run.clone(), sha: p.origin_sha.clone(), age: p.age + 1 }
@@ -262,8 +329,8 @@ fn short(s: &str) -> &str {
 }
 
 /// The real git behind [`Git`], run in the plan's directory.
-pub fn git_changed(cwd: &Path, prev_sha: &str, specs: &[String]) -> Option<Vec<String>> {
-    let mut a: Vec<&str> = vec!["diff", "--name-only", prev_sha, "HEAD", "--"];
+pub fn git_changed(cwd: &Path, prev_sha: &str, to: &str, specs: &[String]) -> Option<Vec<String>> {
+    let mut a: Vec<&str> = vec!["diff", "--name-only", prev_sha, to, "--"];
     if specs.is_empty() {
         a.push(":/");
     }
@@ -271,8 +338,62 @@ pub fn git_changed(cwd: &Path, prev_sha: &str, specs: &[String]) -> Option<Vec<S
     git_out(cwd, &a).map(|t| t.lines().map(str::to_string).collect())
 }
 
+/// The directory part of each pathspec before its first glob character: what the step declares it reads (empty = the whole tree).
+fn input_roots(specs: &[String]) -> Vec<String> {
+    specs
+        .iter()
+        .map(|s| {
+            let s = s.trim_start_matches("./");
+            let cut = s.find(['*', '?', '[']).unwrap_or(s.len());
+            let head = &s[..cut];
+            // a literal file or the part of a glob before its last `/`
+            if cut == s.len() { s.to_string() } else { head[..head.rfind('/').map_or(0, |i| i + 1)].to_string() }
+        })
+        .collect()
+}
+
+/// Whether a tracked symlink at `link` (relative to the plan's directory) pointing at `target` reaches outside every input root.
+pub fn link_escapes(link: &str, target: &str, specs: &[String]) -> bool {
+    if target.starts_with('/') {
+        return true;
+    }
+    let mut parts: Vec<&str> = link.split('/').collect();
+    parts.pop();
+    for c in target.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return true;
+                }
+            }
+            c => parts.push(c),
+        }
+    }
+    let resolved = parts.join("/");
+    !input_roots(specs).iter().any(|r| r.is_empty() || resolved == r.trim_end_matches('/') || resolved.starts_with(&format!("{}/", r.trim_end_matches('/'))))
+}
+
+/// Tracked files under the pathspecs and the tracked symlinks among them with their targets.
+pub fn git_tracked(cwd: &Path, specs: &[String]) -> Option<Tracked> {
+    let mut a: Vec<&str> = vec!["ls-files", "-s", "--"];
+    a.extend(specs.iter().map(String::as_str));
+    let ls = git_out(cwd, &a)?;
+    let mut t = Tracked::default();
+    for l in ls.lines() {
+        let Some((meta, path)) = l.split_once('\t') else { continue };
+        t.files += 1;
+        let mut m = meta.split_whitespace();
+        if let (Some("120000"), Some(blob)) = (m.next(), m.next()) {
+            let target = git_out(cwd, &["cat-file", "blob", blob])?;
+            t.links.push((path.to_string(), target));
+        }
+    }
+    Some(t)
+}
+
 pub fn git_dirty(cwd: &Path, specs: &[String]) -> Option<bool> {
-    let mut a: Vec<&str> = vec!["status", "--porcelain", "--untracked-files=all", "--"];
+    let mut a: Vec<&str> = vec!["status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--"];
     a.extend(specs.iter().map(String::as_str));
     git_out(cwd, &a).map(|t| !t.is_empty())
 }
@@ -299,6 +420,8 @@ mod tests {
             env: "env".into(),
             dirty: false,
             partial: false,
+            log_sha256: String::new(),
+            seal: String::new(),
             steps: p
                 .steps
                 .iter()
@@ -311,6 +434,7 @@ mod tests {
                     origin_run: "r1".into(),
                     origin_sha: "aaaaaaaa".into(),
                     age: 0,
+                    unclean: false,
                 })
                 .collect(),
         }
@@ -321,7 +445,7 @@ mod tests {
     }
 
     fn opts() -> SinceOpts {
-        SinceOpts { prev: "aaaaaaaa".into(), max_age: 5, full: false }
+        SinceOpts { prev: "aaaaaaaa".into(), max_age: 5, full: false, db: None }
     }
 
     /// `touched`: the paths git says differ between the commits.
@@ -329,7 +453,8 @@ mod tests {
         let t: Vec<String> = touched.iter().map(|s| s.to_string()).collect();
         let changed = move |_: &str, specs: &[String]| Some(t.iter().filter(|f| specs.is_empty() || specs.iter().any(|s| f.starts_with(s.trim_end_matches("**")))).cloned().collect::<Vec<_>>());
         let dirty = |_: &[String]| Some(false);
-        let g = Git { changed: &changed, dirty: &dirty };
+        let tracked = |_: &[String]| Some(Tracked { files: 1, links: vec![] });
+        let g = Git { changed: &changed, dirty: &dirty, tracked: &tracked };
         let sel: Vec<usize> = (0..p.steps.len()).collect();
         decide(p, &sel, "", prev, c, o, &g)
     }
@@ -428,14 +553,67 @@ mod tests {
     fn git_failure_or_dirty_inputs_run_never_reuse() {
         let p = plan();
         let prev = prev_for(&p);
+        let trk = |_: &[String]| Some(Tracked { files: 1, links: vec![] });
         let none = |_: &str, _: &[String]| None;
         let clean = |_: &[String]| Some(false);
         let sel: Vec<usize> = (0..4).collect();
-        let d = decide(&p, &sel, "", &prev, &cur(), &opts(), &Git { changed: &none, dirty: &clean });
+        let d = decide(&p, &sel, "", &prev, &cur(), &opts(), &Git { changed: &none, dirty: &clean, tracked: &trk });
         assert!(d.iter().all(|d| !reused(d)));
         let same = |_: &str, _: &[String]| Some(vec![]);
         let dirty = |_: &[String]| Some(true);
-        let d = decide(&p, &sel, "", &prev, &cur(), &opts(), &Git { changed: &same, dirty: &dirty });
+        let d = decide(&p, &sel, "", &prev, &cur(), &opts(), &Git { changed: &same, dirty: &dirty, tracked: &trk });
         assert!(d.iter().all(|d| !reused(d)));
+    }
+
+    #[test]
+    fn inputs_matching_no_tracked_file_or_holding_unclean_files_or_a_symlink_out_run() {
+        let p = plan();
+        let sel: Vec<usize> = (0..4).collect();
+        let same = |_: &str, _: &[String]| Some(vec![]);
+        let clean = |_: &[String]| Some(false);
+        let none = |_: &[String]| Some(Tracked { files: 0, links: vec![] });
+        let d = decide(&p, &sel, "", &prev_for(&p), &cur(), &opts(), &Git { changed: &same, dirty: &clean, tracked: &none });
+        assert!(matches!(&d[0], Decision::Run(w) if w.contains("match no tracked file")), "{:?}", d[0]);
+        let link = |_: &[String]| Some(Tracked { files: 2, links: vec![("src/l".into(), "../shared".into())] });
+        let d = decide(&p, &sel, "", &prev_for(&p), &cur(), &opts(), &Git { changed: &same, dirty: &clean, tracked: &link });
+        assert!(matches!(&d[0], Decision::Run(w) if w.contains("symlink")), "{:?}", d[0]);
+        let mut prev = prev_for(&p);
+        prev.steps[0].unclean = true;
+        let ok = |_: &[String]| Some(Tracked { files: 1, links: vec![] });
+        let d = decide(&p, &sel, "", &prev, &cur(), &opts(), &Git { changed: &same, dirty: &clean, tracked: &ok });
+        assert!(matches!(&d[0], Decision::Run(w) if w.contains("ignored")), "{:?}", d[0]);
+    }
+
+    #[test]
+    fn a_symlink_inside_the_inputs_is_fine_one_pointing_out_is_not() {
+        let specs = vec!["a/**".to_string()];
+        assert!(!link_escapes("a/l", "x/y", &specs));
+        assert!(!link_escapes("a/b/l", "../c", &specs));
+        assert!(link_escapes("a/l", "../shared", &specs));
+        assert!(link_escapes("a/l", "/etc/hosts", &specs));
+        assert!(!link_escapes("a/l", "../anything", &["**".to_string()]));
+    }
+
+    #[test]
+    fn a_result_file_that_was_edited_or_is_for_another_commit_is_refused() {
+        let p = plan();
+        let d = std::env::temp_dir().join(format!("gt-since-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let mut r = prev_for(&p);
+        r.seal = r.compute_seal();
+        let f = result_path(&d, &r.sha, "fast+slow");
+        std::fs::write(&f, serde_json::to_string(&r).unwrap()).unwrap();
+        let sha_of = |s: &str| Some(s.to_string());
+        assert!(load_prev(&d, "aaaaaaaa", &sha_of, "fast+slow", None).is_ok());
+        r.steps[0].rc = Some(0);
+        r.steps[1].def = "tampered".into();
+        std::fs::write(&f, serde_json::to_string(&r).unwrap()).unwrap();
+        assert!(load_prev(&d, "aaaaaaaa", &sha_of, "fast+slow", None).unwrap_err().contains("seal"));
+        r.seal = r.compute_seal();
+        std::fs::write(&f, serde_json::to_string(&r).unwrap()).unwrap();
+        std::fs::copy(&f, result_path(&d, "bbbbbbbb", "fast+slow")).unwrap();
+        let other2 = |_: &str| Some("bbbbbbbb".to_string());
+        assert!(load_prev(&d, "x", &other2, "fast+slow", None).unwrap_err().contains("resolved to"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

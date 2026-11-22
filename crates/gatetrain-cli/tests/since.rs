@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn child() -> String {
+    // the child sits next to the test binary's target folder; newer cargo keeps test binaries in a deeper build folder, so look upward
     let exe = std::env::current_exe().unwrap();
-    let dir = exe.parent().unwrap().parent().unwrap();
-    let p: PathBuf = dir.join(format!("gt-testchild{}", std::env::consts::EXE_SUFFIX));
-    assert!(p.exists(), "{} is not built: run `cargo test --workspace`", p.display());
-    p.to_string_lossy().into_owned()
+    let name = format!("gt-testchild{}", std::env::consts::EXE_SUFFIX);
+    let p = exe.ancestors().skip(1).take(6).map(|d| d.join(&name)).find(|p| p.is_file());
+    p.unwrap_or_else(|| panic!("{name} is not built: run `cargo test --workspace`")).to_string_lossy().into_owned()
 }
 
 fn step(name: &str, tier: &str, extra: &str, args: &[&str]) -> String {
@@ -73,13 +73,13 @@ fn body() -> String {
 #[test]
 fn a_reused_step_is_labelled_and_a_step_whose_input_changed_runs() {
     let (r, w) = (repo(), tempfile::tempdir().unwrap());
-    let first = chain(r.path(), w.path(), &body(), &["--run-id", "run-1"]);
+    let db = w.path().join("l.db");
+    let first = chain(r.path(), w.path(), &body(), &["--run-id", "run-1", "--db", db.to_str().unwrap()]);
     assert_eq!(first.code(), 0, "{}", first.stdout);
     assert!(!first.has("STEP_REUSED"), "no --since, no reuse");
     let sha1 = git(r.path(), &["rev-parse", "HEAD"]);
     commit_file(r.path(), "b/y.txt", "2");
     let sha2 = git(r.path(), &["rev-parse", "HEAD"]);
-    let db = w.path().join("l.db");
     let second = chain(r.path(), w.path(), &body(), &["--since", &sha1, "--run-id", "run-2", "--db", db.to_str().unwrap()]);
     assert_eq!(second.code(), 0, "{}", second.stdout);
     assert!(second.stdout.contains(&format!("STEP_REUSED A run-1 {sha1}")), "A is carried and labelled with where it really ran: {}", second.stdout);
@@ -159,7 +159,7 @@ fn full_runs_everything_and_a_partial_previous_run_is_refused() {
     assert!(!full.has("STEP_REUSED") && full.stdout.contains("STEP_RERUN A --full"), "{}", full.stdout);
     let w2 = tempfile::tempdir().unwrap();
     let r2 = repo();
-    let partial = chain(r2.path(), w2.path(), &body(), &["--only", "A,B", "--mode", "preflight"]);
+    let partial = chain(r2.path(), w2.path(), &body(), &["--skip", "Z", "--mode", "preflight"]);
     assert_eq!(partial.code(), 0, "{}", partial.stdout);
     let sha = git(r2.path(), &["rev-parse", "HEAD"]);
     commit_file(r2.path(), "docs/n.txt", "n");
@@ -173,5 +173,63 @@ fn a_missing_previous_result_runs_everything_and_says_so() {
     let sha = git(r.path(), &["rev-parse", "HEAD"]);
     let run = chain(r.path(), w.path(), &body(), &["--since", &sha]);
     assert_eq!(run.code(), 0, "{}", run.stdout);
-    assert!(run.has("CHAIN_SINCE none") && !run.has("STEP_REUSED"), "{}", run.stdout);
+    assert!(run.has("CHAIN_SINCE refused") && !run.has("STEP_REUSED"), "{}", run.stdout);
+}
+
+#[test]
+fn a_stamp_with_reused_steps_is_v2_and_partial_and_a_full_run_stays_v1() {
+    let (r, w) = (repo(), tempfile::tempdir().unwrap());
+    let first = chain(r.path(), w.path(), &body(), &["--run-id", "run-1"]);
+    let sha1 = git(r.path(), &["rev-parse", "HEAD"]);
+    assert_eq!((first.stamp(&sha1)["v"].clone(), first.stamp(&sha1)["partial"].clone()), (serde_json::json!(1), serde_json::Value::Null));
+    let sha2 = commit_file(r.path(), "b/y.txt", "2");
+    let second = chain(r.path(), w.path(), &body(), &["--since", &sha1, "--run-id", "run-2"]);
+    let st = second.stamp(&sha2);
+    assert_eq!((st["v"].clone(), st["partial"].clone(), st["partial_reason"].clone()), (serde_json::json!(2), serde_json::json!(true), serde_json::json!("reused")));
+    // nothing reused (--full): an ordinary full stamp
+    let third = chain(r.path(), w.path(), &body(), &["--since", &sha1, "--full", "--run-id", "run-3"]);
+    assert_eq!((third.stamp(&sha2)["v"].clone(), third.stamp(&sha2)["partial"].clone()), (serde_json::json!(1), serde_json::Value::Null));
+}
+
+#[test]
+fn an_environment_variable_in_the_default_set_changes_the_fingerprint() {
+    let (r, w) = (repo(), tempfile::tempdir().unwrap());
+    let run = |extra: &[&str], flags: &str| {
+        let f = w.path().join("steps.toml");
+        std::fs::write(&f, format!("cwd = '{}'\n\n{}", r.path().display(), body())).unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_gatetrain")).args(["chain", "--steps", f.to_str().unwrap(), "--out", w.path().join("out").to_str().unwrap()]).args(extra).env("RUSTFLAGS", flags).current_dir(w.path()).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    run(&["--run-id", "run-1"], "-Cdebuginfo=0");
+    let sha1 = git(r.path(), &["rev-parse", "HEAD"]);
+    commit_file(r.path(), "docs/n.txt", "n");
+    assert!(run(&["--since", &sha1], "-Cdebuginfo=0").contains("STEP_REUSED A"));
+    let other = run(&["--since", &sha1], "-Copt-level=3");
+    assert!(!other.contains("STEP_REUSED") && other.contains("the environment fingerprint differs"), "{other}");
+}
+
+#[test]
+fn an_edited_result_file_or_a_ledger_that_disagrees_is_refused() {
+    let (r, w) = (repo(), tempfile::tempdir().unwrap());
+    let db = w.path().join("l.db");
+    let d = db.to_str().unwrap();
+    chain(r.path(), w.path(), &body(), &["--run-id", "run-1", "--db", d]);
+    let sha1 = git(r.path(), &["rev-parse", "HEAD"]);
+    commit_file(r.path(), "docs/n.txt", "n");
+    let file = w.path().join("out").join(format!("result-{sha1}-fast+slow.json"));
+    let good = std::fs::read_to_string(&file).unwrap();
+    // an untouched result with its ledger row: reused
+    assert!(chain(r.path(), w.path(), &body(), &["--since", &sha1, "--db", d, "--run-id", "run-2"]).has("STEP_REUSED A"));
+    // a step's rc edited in the file (a red turned green): the seal fails
+    let mut v: serde_json::Value = serde_json::from_str(&good).unwrap();
+    v["steps"][0]["rc"] = serde_json::json!(1);
+    std::fs::write(&file, v.to_string()).unwrap();
+    let a = chain(r.path(), w.path(), &body(), &["--since", &sha1, "--run-id", "run-3"]);
+    assert!(a.has("CHAIN_SINCE refused") && a.stdout.contains("seal") && !a.has("STEP_REUSED"), "{}", a.stdout);
+    // a file whose run is not in the ledger (or whose ledger row disagrees)
+    std::fs::write(&file, &good).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("update runs set log_sha256='0' where id='run-1'", []).unwrap();
+    let b = chain(r.path(), w.path(), &body(), &["--since", &sha1, "--db", d, "--run-id", "run-4"]);
+    assert!(b.stdout.contains("CHAIN_SINCE refused the ledger's row") && !b.has("STEP_REUSED"), "{}", b.stdout);
 }
