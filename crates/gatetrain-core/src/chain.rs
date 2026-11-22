@@ -610,12 +610,25 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     }
     std::fs::create_dir_all(&o.out).map_err(|e| format!("cannot create {}: {e}", o.out.display()))?;
     let cwd = PathBuf::from(plan.cwd.clone().unwrap_or_else(|| ".".into()));
-    let selected: Vec<usize> = (0..plan.steps.len())
+    let proof: Vec<usize> = (0..plan.steps.len())
         .filter(|&i| {
             let n = &plan.steps[i].name;
             (o.only.is_empty() || o.only.contains(n)) && !o.skip.contains(n) && (o.tiers.is_empty() || o.tiers.iter().any(|t| t == tier_name(plan.steps[i].tier)))
         })
         .collect();
+    // `--tier`: the run executes the CLOSURE of its steps, every step they need from any tier, so each tier stamp stands alone (the pulled-in steps are not that tier's proof)
+    let mut selected = proof.clone();
+    if !o.tiers.is_empty() {
+        loop {
+            let more: Vec<usize> = selected.iter().flat_map(|&i| plan.steps[i].needs.iter().filter_map(|n| plan.steps.iter().position(|s| &s.name == n))).filter(|j| !selected.contains(j)).collect();
+            if more.is_empty() {
+                break;
+            }
+            selected.extend(more);
+        }
+        selected.sort_unstable();
+        selected.dedup();
+    }
     let par = o.par.max(1);
     // D446: the quarantine rows live today, read ONCE from a trusted ref (`git show <ref>:<path>`), never from the working tree under test.
     // The ref must name a commit other than the checkout's own HEAD (the change under test must not be able to quarantine its own failure),
@@ -682,44 +695,10 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     // where the per-step `.full` files are, so `diagnose` can find them from the log alone (an unknown line to every reader)
     say(&format!("CHAIN_OUT {}", out_abs.to_string_lossy().trim_start_matches(r"\\?\")));
     // incremental re-run: which steps carry the previous run's green result (docs/since.md); every other step runs
-    let tiers = crate::since::tiers_of(plan, &selected);
+    let tiers = crate::since::tiers_of(plan, &proof);
     let plan_tiers = crate::since::tiers_of(plan, &(0..plan.steps.len()).collect::<Vec<_>>());
     let tier_only = !o.tiers.is_empty() && plan_tiers != tiers;
     let stamp_name = |sha: &str| if tier_only { format!("stamp-{sha}-{tiers}.json") } else { format!("stamp-{sha}.json") };
-    // a tier run whose steps need a step of another tier may run only on a green stamp of that tier for this very commit and steps file, written before this run
-    // started (its output is what the needing step reads); the new stamp records which stamp it depended on, so the union gate can prove the order
-    let mut depends_on: Vec<serde_json::Value> = Vec::new();
-    let mut dep_reused = false;
-    if tier_only {
-        let Some(sha) = &sha else { return Err("--tier needs a git repository".into()) };
-        let mut other: Vec<(&str, &str)> = Vec::new();
-        for &i in &selected {
-            for n in &plan.steps[i].needs {
-                if let Some(j) = plan.steps.iter().position(|s| &s.name == n).filter(|j| !selected.contains(j)) {
-                    let t = tier_name(plan.steps[j].tier);
-                    if !other.iter().any(|(ot, _)| *ot == t) {
-                        other.push((t, &plan.steps[i].name));
-                    }
-                }
-            }
-        }
-        for (t, needing) in other {
-            let f = o.out.join(format!("stamp-{sha}-{t}.json"));
-            let bad = |why: &str| format!("--tier {tiers}: step {needing:?} needs a step of the {t} tier, so a green {t}-tier stamp for this commit must exist first ({why}); run --tier {t} on {sha} first");
-            let text = std::fs::read_to_string(&f).map_err(|_| bad(&format!("{} is missing", f.display())))?;
-            let v: serde_json::Value = serde_json::from_str(&text).map_err(|_| bad("its stamp is not JSON"))?;
-            let ok = v["sha"].as_str() == Some(sha.as_str())
-                && v["digest"].as_str() == Some(digest)
-                && matches!(v["partial_reason"].as_str(), Some("tier" | "reused"))
-                && v["tiers"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str() == Some(t)))
-                && v["at"].as_str().is_some_and(|at| at < started_at.as_str());
-            if !ok {
-                return Err(bad("its stamp is for another commit or steps file, is incremental, or was written after this run started"));
-            }
-            dep_reused |= v["partial_reason"].as_str() == Some("reused");
-            depends_on.push(serde_json::json!({"tier": t, "file": f.file_name().map(|n| n.to_string_lossy().into_owned()), "hash": digest_of(&text)}));
-        }
-    }
     let run_id = o.run_id.clone().unwrap_or_else(|| default_run_id(&started_at, sha.as_deref()));
     let prefix = git_out(&cwd, &["rev-parse", "--show-prefix"]).unwrap_or_default();
     let mut reuse: Vec<Option<(String, String, u32)>> = vec![None; plan.steps.len()];
@@ -734,7 +713,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 let head = sha.clone().unwrap_or_default();
                 let changed = |p: &str, specs: &[String]| crate::since::git_changed(&cwd, p, &head, specs);
                 let dirty = |specs: &[String]| crate::since::git_dirty(&cwd, specs);
-                let cur = crate::since::Cur { mode: &o.mode, tiers: &tiers, toolchain: &o.toolchain, env: &o.env_fp };
+                let cur = crate::since::Cur { mode: &o.mode, toolchain: &o.toolchain, env: &o.env_fp };
                 let tracked = |specs: &[String]| crate::since::git_tracked(&cwd, specs);
                 let g = crate::since::Git { changed: &changed, dirty: &dirty, tracked: &tracked };
                 let ds = crate::since::decide(plan, &selected, &prefix, &prev, &cur, s, &g);
@@ -1154,20 +1133,24 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
         if !before.is_empty() || !after.is_empty() {
             Err("the tree is dirty (git status --porcelain is not empty): no stamp written".to_string())
         } else {
-            let steps: Vec<serde_json::Value> = times
+            let steps: Vec<(usize, serde_json::Value)> = times
                 .iter()
                 .map(|&(i, rc, secs)| {
                     let rec = recs.iter().find(|r| r.name == plan.steps[i].name);
                     let was_reused = reused.contains(&i);
                     let from = reuse[i].clone().filter(|_| was_reused);
-                    serde_json::json!({
+                    (i, serde_json::json!({
                         "name": plan.steps[i].name, "tier": tier_name(plan.steps[i].tier), "rc": rc, "seconds": round1(secs),
                         "key": rec.and_then(|r| r.key.clone()), "cached_from": rec.and_then(|r| r.cached_from.clone()).filter(|_| !was_reused), "shards": nshards(&plan.steps[i]),
                         "freshness": if was_reused { "reused" } else if rec.is_some_and(|r| r.cached) { "cached" } else { "fresh" },
                         "reused_from": from.map(|(run, sha, age)| serde_json::json!({"run": run, "sha": sha, "age": age})),
-                    })
+                    }))
                 })
                 .collect();
+            // only the steps of the selected tiers are this stamp's proof; the steps pulled in as needs from another tier ran for the closure
+            let steps_all = steps;
+            let steps: Vec<serde_json::Value> = steps_all.iter().filter(|(i, _)| proof.contains(i)).map(|(_, v)| v.clone()).collect();
+            let ran_for_closure: Vec<serde_json::Value> = steps_all.iter().filter(|(i, _)| !proof.contains(i)).map(|(_, v)| v.clone()).collect();
             let mut body = serde_json::json!({
                 "v": 1, "kind": o.mode, "sha": sha, "host": host, "at": Ts::now_utc().iso(), "mode": o.mode, "par": par,
                 "total_seconds": round1(t_run.elapsed().as_secs_f64()),
@@ -1177,6 +1160,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 "reused": reused.iter().map(|&i| plan.steps[i].name.clone()).collect::<Vec<_>>(),
                 "fresh": times.iter().filter(|(i, _, _)| !reused.contains(i) && !cached.contains(i)).map(|(i, _, _)| plan.steps[*i].name.clone()).collect::<Vec<_>>(),
                 "run_id": run_id,
+                "ran_for_closure": ran_for_closure,
             });
             if !o.only.is_empty() || !o.skip.is_empty() {
                 // a run of some steps proves only those: the lane-stamp and pre-flight rules refuse it
@@ -1198,14 +1182,6 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 body["partial"] = true.into();
                 if body["partial_reason"].is_null() {
                     body["partial_reason"] = "tier".into();
-                }
-                body["depends_on"] = depends_on.clone().into();
-                if dep_reused {
-                    // built on an incremental stamp: it is incremental too
-                    body["partial_reason"] = "reused".into();
-                    if let Some(r) = body["reused"].as_array_mut() {
-                        r.push("depends-on-reused-tier".into());
-                    }
                 }
             }
             if !retries.is_empty() {

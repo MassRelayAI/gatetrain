@@ -2816,7 +2816,7 @@ fn the_legacy_bridge_refuses_a_reused_stamp_unless_its_own_opt_in_is_set() {
 }
 
 #[test]
-fn the_preflight_gate_takes_a_union_of_tier_stamps_only_when_together_they_cover_every_tier_in_a_proven_order() {
+fn the_preflight_gate_takes_a_union_of_self_contained_tier_stamps_only_when_together_they_cover_every_tier() {
     let mut fx = Fx::new("");
     fx.launched_preflight();
     std::fs::write(fx.cfg.preflight_steps_file.as_ref().unwrap(), "[[step]]\nname = \"a\"\ntier = \"fast\"\nrun = \"true\"\n[[step]]\nname = \"b\"\ntier = \"slow\"\nneeds = [\"a\"]\nrun = \"true\"\n").unwrap();
@@ -2825,26 +2825,22 @@ fn the_preflight_gate_takes_a_union_of_tier_stamps_only_when_together_they_cover
     let sha = fx.lock.launches.lock().unwrap()[0].sha.clone();
     fx.pf_log("preflight", GREEN);
     let dir = PathBuf::from(fx.cfg.preflight_stamp_dir.as_ref().unwrap());
-    // a tier stamp is partial (reason "tier") for every consumer that does not do the union check; `deps` are the hashes of the stamps it ran on
-    let tier_stamp = |tier: &str, digest: &str, at: &str, deps: &[String]| -> String {
-        let d: Vec<_> = deps.iter().map(|h| serde_json::json!({"tier": "fast", "hash": h})).collect();
-        let v = serde_json::json!({"v": 2, "sha": sha, "digest": digest, "at": at, "steps": [{"name": "a", "rc": 0}], "tiers": [tier], "plan_tiers": ["fast", "slow"], "partial": true, "partial_reason": "tier", "depends_on": d});
-        let text = v.to_string();
-        std::fs::write(dir.join(format!("stamp-{sha}-{tier}.json")), &text).unwrap();
-        sha256_hex(text.as_bytes())
+    // a tier stamp is partial (reason "tier") for every consumer that does not do the union check; it ran the closure of its steps, so it needs nothing else
+    let tier_stamp = |tier: &str, digest: &str, other_sha: &str| {
+        let v = serde_json::json!({"v": 2, "sha": other_sha, "digest": digest, "steps": [{"name": "a", "rc": 0}], "tiers": [tier], "plan_tiers": ["fast", "slow"], "partial": true, "partial_reason": "tier", "ran_for_closure": []});
+        std::fs::write(dir.join(format!("stamp-{sha}-{tier}.json")), v.to_string()).unwrap();
     };
     let d = fx.pf_digest();
-    let fast1 = tier_stamp("fast", &d, "1", &[]);
+    tier_stamp("fast", &d, &sha);
     let (rule, because) = fx.refused("b1");
     assert_eq!(rule, "preflight.stamp-for-sha");
     assert!(because.contains("slow"), "{because}");
-    // a slow stamp of another steps file does not count
-    tier_stamp("slow", &"0".repeat(64), "2", std::slice::from_ref(&fast1));
+    // a slow stamp of another steps file, then one that names another commit, do not count
+    tier_stamp("slow", &"0".repeat(64), &sha);
     assert_eq!(fx.refused("b1").0, "preflight.stamp-for-sha");
-    // a slow stamp that depended on a fast stamp that is no longer there (the fast tier ran again after it): the order is not proven
-    tier_stamp("slow", &d, "2", &["0".repeat(64)]);
-    assert!(fx.refused("b1").1.contains("slow"), "a slow stamp with an unresolved dependency does not count");
-    // both tiers, same sha and steps file, the slow one on this very fast stamp: proven
-    tier_stamp("slow", &d, "2", &[fast1]);
+    tier_stamp("slow", &d, &"2".repeat(40));
+    assert_eq!(fx.refused("b1").0, "preflight.stamp-for-sha");
+    // both tiers, same commit and steps file: proven
+    tier_stamp("slow", &d, &sha);
     fx.step("b1", "preflighted");
 }

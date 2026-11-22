@@ -1867,8 +1867,8 @@ impl<'a> Engine<'a> {
         let need: Vec<String> = crate::since::tiers_of(&plan, &all).split('+').map(String::from).collect();
         let have = evidence::file_digest(&steps);
         let prefix = format!("stamp-{sha}-");
-        // every acceptable tier stamp of this commit and steps file: (own hash, hashes it depends on, tiers)
-        let mut cands: Vec<(String, Vec<String>, Vec<String>)> = vec![];
+        // every acceptable tier stamp of this commit and steps file; each stands alone (a tier run executes the closure of its steps), so the union is only the tiers they cover
+        let mut covered: Vec<String> = vec![];
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if !name.starts_with(&prefix) || !name.ends_with(".json") {
@@ -1879,20 +1879,8 @@ impl<'a> Engine<'a> {
             if v["sha"].as_str() != Some(sha) || (!tier_stamp && stamp_is_partial(&v, self.cfg.preflight_accept_reused)) || have.is_none() || v["digest"].as_str() != have.as_deref() {
                 continue;
             }
-            let Some(hash) = evidence::file_digest(&e.path()) else { continue };
-            let strs = |k: &str, f: &str| -> Vec<String> { v[k].as_array().into_iter().flatten().filter_map(|x| if f.is_empty() { x.as_str().map(String::from) } else { x[f].as_str().map(String::from) }).collect() };
-            cands.push((hash, strs("depends_on", "hash"), strs("tiers", "")));
+            covered.extend(v["tiers"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(String::from)));
         }
-        // a stamp counts only when every stamp it depended on is in the set (the order fast -> slow is proven by the hashes); drop the others until stable
-        loop {
-            let hashes: Vec<String> = cands.iter().map(|c| c.0.clone()).collect();
-            let before = cands.len();
-            cands.retain(|c| c.1.iter().all(|d| hashes.contains(d)));
-            if cands.len() == before {
-                break;
-            }
-        }
-        let covered: Vec<String> = cands.iter().flat_map(|c| c.2.clone()).collect();
         let lacking: Vec<&String> = need.iter().filter(|t| !covered.contains(t)).collect();
         if lacking.is_empty() {
             None

@@ -105,7 +105,6 @@ pub enum Decision {
 /// What the run being planned is.
 pub struct Cur<'a> {
     pub mode: &'a str,
-    pub tiers: &'a str,
     pub toolchain: &'a str,
     pub env: &'a str,
 }
@@ -162,23 +161,15 @@ pub fn step_def(step: &Step, prefix: &str) -> String {
     Sha256::digest(v.to_string().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Read the previous result: `prev` is a path to a result file, or a commit looked up in `out`. Refused (Err) when the file is not what
-/// it claims: another commit, a seal that does not verify, or (with `db`) a ledger row that disagrees.
-pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>, tiers: &str, db: Option<&Path>) -> Result<RunResult, String> {
-    let p = Path::new(prev);
-    let (path, want) = if p.is_file() {
-        (p.to_path_buf(), None)
-    } else {
-        let full = sha_of(prev).ok_or_else(|| format!("--since {prev:?} is neither a result file nor a commit of this repository"))?;
-        (result_path(out, &full, tiers), Some(full))
-    };
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("no previous result {}: {e}", path.display()))?;
+/// Read and verify one result file: it must parse, be version 1, name `want` (when given), carry a verifying seal and (with `db`) agree with the ledger.
+fn read_result(path: &Path, want: Option<&str>, db: Option<&Path>) -> Result<RunResult, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("no previous result {}: {e}", path.display()))?;
     let r: RunResult = serde_json::from_str(&text).map_err(|e| format!("{} is not a result file: {e}", path.display()))?;
     if r.v != 1 {
         return Err(format!("{}: result version {} is not understood", path.display(), r.v));
     }
     if let Some(w) = want.filter(|w| *w != r.sha) {
-        return Err(format!("{} names commit {} but --since resolved to {}", path.display(), short(&r.sha), short(&w)));
+        return Err(format!("{} names commit {} but --since resolved to {}", path.display(), short(&r.sha), short(w)));
     }
     if r.seal != r.compute_seal() {
         return Err(format!("{}: its seal does not verify (the file was edited or is from another version)", path.display()));
@@ -187,6 +178,53 @@ pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>
         check_ledger(db, &r)?;
     }
     Ok(r)
+}
+
+/// Read the previous result: `prev` is a path to a result file, or a commit: then every `result-<sha>-*.json` of `out` that verifies is read (a tier run and a
+/// whole run of one commit each leave one) and the results of one environment (mode, fingerprints, clean, whole) are merged step by step, a green result
+/// with fewer carried runs first. Refused (Err) when no file verifies.
+pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>, tiers: &str, db: Option<&Path>) -> Result<RunResult, String> {
+    let p = Path::new(prev);
+    if p.is_file() {
+        return read_result(p, None, db);
+    }
+    let full = sha_of(prev).ok_or_else(|| format!("--since {prev:?} is neither a result file nor a commit of this repository"))?;
+    let own = result_path(out, &full, tiers);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(out)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("result-{full}-")) && n.to_string_lossy().ends_with(".json")))
+        .collect();
+    files.sort();
+    if let Some(i) = files.iter().position(|f| *f == own) {
+        files.swap(0, i); // this run's own tiers first: they are the base
+    }
+    let mut first_err = format!("no previous result {}", own.display());
+    let mut ok: Vec<RunResult> = vec![];
+    for f in &files {
+        match read_result(f, Some(&full), db) {
+            Ok(r) => ok.push(r),
+            Err(e) => first_err = e,
+        }
+    }
+    let mut it = ok.into_iter();
+    let Some(mut base) = it.next() else { return Err(first_err) };
+    for o in it {
+        if (o.mode.as_str(), o.toolchain.as_str(), o.env.as_str(), o.dirty, o.partial) != (base.mode.as_str(), base.toolchain.as_str(), base.env.as_str(), base.dirty, base.partial) {
+            continue;
+        }
+        for s in o.steps {
+            match base.steps.iter_mut().find(|b| b.name == s.name) {
+                None => base.steps.push(s),
+                Some(b) if (b.rc != Some(0) && s.rc == Some(0)) || (s.rc == Some(0) && s.age < b.age) => *b = s,
+                Some(_) => {}
+            }
+        }
+    }
+    base.tiers = tiers.to_string();
+    Ok(base)
 }
 
 /// With `--db`: the ledger must hold this run, for this commit, with this log digest and the same exit code for every step the result lists.
@@ -210,9 +248,6 @@ fn check_ledger(db: &Path, r: &RunResult) -> Result<(), String> {
 
 /// Why nothing at all may be reused from `prev` (None = the run-level rules pass).
 pub fn run_level_refusal(prev: &RunResult, cur: &Cur, git: &Git) -> Option<String> {
-    if prev.tiers != cur.tiers {
-        return Some(format!("the previous run covered {} and this one {}", prev.tiers, cur.tiers));
-    }
     if prev.mode != cur.mode {
         return Some(format!("the previous run's mode was {} and this one's is {}", prev.mode, cur.mode));
     }
@@ -441,7 +476,7 @@ mod tests {
     }
 
     fn cur() -> Cur<'static> {
-        Cur { mode: "preflight", tiers: "fast+slow", toolchain: "tc", env: "env" }
+        Cur { mode: "preflight", toolchain: "tc", env: "env" }
     }
 
     fn opts() -> SinceOpts {
@@ -512,11 +547,8 @@ mod tests {
     }
 
     #[test]
-    fn another_tier_mode_a_partial_or_dirty_previous_run_is_refused() {
+    fn another_mode_a_partial_or_dirty_previous_run_is_refused() {
         let p = plan();
-        let mut prev = prev_for(&p);
-        prev.tiers = "fast".into();
-        assert!(go(&p, &prev, &cur(), &opts(), &[]).iter().all(|d| !reused(d)));
         let mut prev = prev_for(&p);
         prev.mode = "full".into();
         assert!(go(&p, &prev, &cur(), &opts(), &[]).iter().all(|d| !reused(d)));

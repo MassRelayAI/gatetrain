@@ -23,7 +23,7 @@ pub struct ChainArgs {
     #[arg(long, value_delimiter = ',')]
     pub(crate) only: Vec<String>,
     /// run every step of these tiers (`fast`, `slow`; repeatable or a comma list) as a COMPLETE run of them: not partial, so `--since` can reuse from an earlier run of the same tiers. The stamp names the
-    /// tiers it covers and, for a subset of the plan's tiers, is `stamp-<sha>-<tiers>.json`; a pre-flight gate accepts the union of tier stamps on one sha. A need in another tier is not run or waited for. Not with --only/--skip/--hosts/--mode full
+    /// tiers it covers and, for a subset of the plan's tiers, is `stamp-<sha>-<tiers>.json`; a pre-flight gate accepts the union of tier stamps on one sha. The steps a tier needs from another tier run in the same run (its closure) and are listed as ran_for_closure. Not with --only/--skip/--hosts/--mode full
     #[arg(long, value_delimiter = ',', conflicts_with_all = ["only", "skip", "hosts"])]
     pub(crate) tier: Vec<String>,
     /// leave these steps out (comma list)

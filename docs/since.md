@@ -69,18 +69,19 @@ Not available with `--hosts`.
 ## Tiers: `chain --tier`
 
 `gatetrain chain --tier fast` (repeatable or `--tier fast,slow`) runs every step of those tiers as a COMPLETE run of them: it is not partial, so `--since`
-can reuse from an earlier complete run of the same tiers (a different tier set refuses reuse and runs everything). It cannot be combined with `--only`,
-`--skip`, `--hosts` or `--mode full`. A step needing a step of another tier does not wait for it and does not run it (the same as `--only`).
+can reuse from an earlier run of the same commit (results are taken step by step, whatever the tier set). It cannot be combined with `--only`,
+`--skip`, `--hosts` or `--mode full`. The steps it needs from another tier run in the same run (the closure; see below).
 The stamp names the tiers it covers (`"tiers"`, and `"plan_tiers"` when the run covers fewer tiers than the steps file has) and, for a subset of the plan's
 tiers, is `stamp-<sha>-<tiers>.json`, so a fast and a slow run on one commit never overwrite each other. The pre-flight gate accepts a single
 full stamp, or the union of tier stamps on one commit and one steps-file digest that together cover every tier of the steps file (not for
 `legacy_stamp_command`, which needs the single stamp).
 
-### Tier order and invalidation
+### Closure, self-contained stamps, invalidation
 
-A tier run whose steps need a step of another tier runs only when a green stamp of that tier exists for the same commit and steps-file digest, written before the
-run started (`stamp-<sha>-<tier>.json`); otherwise it is refused. The new stamp records `depends_on` (the tier and the sha-256 of that stamp). A tier stamp is
-`"v": 2, "partial": true, "partial_reason": "tier"`, so every consumer that does not do the union check (lane stamp, single pre-flight stamp, evidence) refuses
-it. The pre-flight gate accepts a set of tier stamps only when every tier is covered, on one commit and digest, and every `depends_on` resolves to a stamp in the
-set, which proves the order fast, then slow (running the fast tier again changes its stamp and breaks the slow stamp's dependency). A tier stamp built on an
-incremental stamp is itself marked `reused`. A red run deletes the older green stamp of the same commit and tiers.
+A tier run executes the closure of its steps: every step a selected step needs, from any tier, runs in the same run (or is reused under the normal `--since` rules
+for the same commit: same inputs, same definition, same fingerprints, so its outputs are equivalent). Only the selected tier's steps are that stamp's proof (`steps`);
+the pulled-in steps are listed as `ran_for_closure`. Each tier stamp therefore stands alone: nothing on disk from another run is trusted. `--since <sha>` reads every
+verified `result-<sha>-*.json` of that commit and takes each step from the freshest green one, so a slow run after a fast run on one commit reuses the fast steps it needs.
+A tier stamp is `"v": 2, "partial": true, "partial_reason": "tier"`, so every consumer that does not do the union check (lane stamp, single pre-flight stamp, evidence)
+refuses it. The pre-flight gate accepts a set of tier stamps on one commit and steps-file digest that together cover every tier. A tier stamp built with reused steps is
+marked `reused` and needs `accept_reused`. A red run deletes the older green stamp of the same commit and tiers.

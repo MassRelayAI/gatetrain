@@ -70,27 +70,30 @@ fn chain(repo: &Path, work: &Path, extra: &[&str]) -> Run {
 }
 
 #[test]
-fn a_tier_run_is_complete_for_its_tier_names_its_tiers_and_does_not_collide_with_the_other_tier() {
+fn every_tier_stamp_stands_alone_is_partial_for_old_consumers_and_names_the_steps_it_ran_for_its_closure() {
     let (r, w) = (repo(), tempfile::tempdir().unwrap());
     let sha = git(r.path(), &["rev-parse", "HEAD"]);
-    // the slow tier needs the fast tier (S needs B): with no fast stamp for this commit it is refused
-    let early = chain(r.path(), w.path(), &["--tier", "slow", "--run-id", "s0"]);
-    assert_eq!(early.code(), 2, "{}{}", early.stdout, early.stderr);
-    assert!(early.stderr.contains("fast-tier stamp"), "{}", early.stderr);
-    assert!(!w.path().join("out").join(format!("stamp-{sha}-slow.json")).exists());
+    // the drive's order, fast then slow, on one commit
     let fast = chain(r.path(), w.path(), &["--tier", "fast", "--run-id", "f1"]);
     assert_eq!(fast.code(), 0, "{}{}", fast.stdout, fast.stderr);
     assert!(fast.has("STEP_EXIT A 0") && !fast.stdout.contains("STEP_START S"), "only the fast steps run: {}", fast.stdout);
     let st = fast.stamp(&format!("stamp-{sha}-fast.json"));
     assert_eq!((st["tiers"].clone(), st["partial"].clone(), st["partial_reason"].clone()), (serde_json::json!(["fast"]), serde_json::json!(true), serde_json::json!("tier")));
     assert_eq!(st["plan_tiers"], serde_json::json!(["fast", "slow"]));
+    assert_eq!(st["ran_for_closure"], serde_json::json!([]));
+    assert!(st.get("depends_on").is_none());
+    // the slow tier needs B (fast): it runs B itself, in the same run, and does not count it as slow proof
     let slow = chain(r.path(), w.path(), &["--tier", "slow", "--run-id", "s1"]);
     assert_eq!(slow.code(), 0, "{}{}", slow.stdout, slow.stderr);
-    assert!(slow.has("STEP_EXIT S 0") && slow.has("STEP_EXIT T 0") && !slow.stdout.contains("STEP_START A"), "{}", slow.stdout);
+    assert!(slow.has("STEP_EXIT B 0") && slow.has("STEP_EXIT S 0") && slow.has("STEP_EXIT T 0") && !slow.stdout.contains("STEP_START A"), "{}", slow.stdout);
     let st = slow.stamp(&format!("stamp-{sha}-slow.json"));
     assert_eq!((st["tiers"].clone(), st["partial"].clone(), st["partial_reason"].clone()), (serde_json::json!(["slow"]), serde_json::json!(true), serde_json::json!("tier")));
-    let fast_hash = gatetrain_core::chain::digest_of(&std::fs::read_to_string(w.path().join("out").join(format!("stamp-{sha}-fast.json"))).unwrap());
-    assert_eq!(st["depends_on"][0]["hash"], serde_json::json!(fast_hash), "the slow stamp names the fast stamp it ran on");
+    let names = |k: &str| {
+        let mut v = st[k].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        v.sort();
+        v
+    };
+    assert_eq!((names("steps"), names("ran_for_closure")), (vec!["S".to_string(), "T".to_string()], vec!["B".to_string()]));
     assert!(w.path().join("out").join(format!("stamp-{sha}-fast.json")).exists(), "the slow run did not overwrite the fast stamp");
     assert!(!w.path().join("out").join(format!("stamp-{sha}.json")).exists(), "no single full stamp from two tier runs");
     // both tiers named together are a whole run: the ordinary stamp
@@ -99,20 +102,24 @@ fn a_tier_run_is_complete_for_its_tier_names_its_tiers_and_does_not_collide_with
 }
 
 #[test]
-fn since_reuses_from_a_previous_run_of_the_same_tier_and_a_different_tier_set_runs_everything() {
+fn a_slow_run_after_a_fast_run_on_the_same_commit_reuses_the_fast_steps_it_needs_under_since() {
     let (r, w) = (repo(), tempfile::tempdir().unwrap());
     let sha1 = git(r.path(), &["rev-parse", "HEAD"]);
     assert_eq!(chain(r.path(), w.path(), &["--tier", "fast", "--run-id", "f1"]).code(), 0);
-    let sha2 = commit_file(r.path(), "b/y.txt", "2");
-    let again = chain(r.path(), w.path(), &["--tier", "fast", "--since", &sha1, "--run-id", "f2"]);
-    assert!(again.stdout.contains(&format!("STEP_REUSED A f1 {sha1}")) && !again.has("STEP_REUSED B"), "{}", again.stdout);
-    // the slow tier has no previous slow run: refused, everything runs
+    // a commit that touches no step input: B (needed by S) is unchanged, so the slow run takes it from the fast run: no double work
+    commit_file(r.path(), "docs/n.txt", "n");
     let slow = chain(r.path(), w.path(), &["--tier", "slow", "--since", &sha1, "--run-id", "s1"]);
-    assert!(!slow.has("STEP_REUSED") && slow.has("CHAIN_SINCE refused"), "{}", slow.stdout);
-    assert_eq!(slow.stamp(&format!("stamp-{sha2}-slow.json"))["partial_reason"], "reused", "built on an incremental fast stamp: incremental too");
-    // a previous fast run does not feed a fast+slow run
-    let all = chain(r.path(), w.path(), &["--since", &sha1, "--run-id", "all1"]);
-    assert!(!all.has("STEP_REUSED") && all.stdout.contains("no previous result"), "{}", all.stdout);
+    assert_eq!(slow.code(), 0, "{}{}", slow.stdout, slow.stderr);
+    assert!(slow.stdout.contains(&format!("STEP_REUSED B f1 {sha1}")), "{}", slow.stdout);
+    assert!(slow.has("STEP_EXIT S 0") && !slow.has("STEP_REUSED S"), "S is new work: {}", slow.stdout);
+    // the same fast tier again reuses its own
+    let again = chain(r.path(), w.path(), &["--tier", "fast", "--since", &sha1, "--run-id", "f2"]);
+    assert!(again.stdout.contains(&format!("STEP_REUSED A f1 {sha1}")), "{}", again.stdout);
+    // a changed input of B re-runs B, and S with it
+    let sha2 = commit_file(r.path(), "b/y.txt", "2");
+    let _ = sha2;
+    let slow2 = chain(r.path(), w.path(), &["--tier", "slow", "--since", &sha1, "--run-id", "s2"]);
+    assert!(!slow2.has("STEP_REUSED B") && slow2.stdout.contains("STEP_RERUN B its inputs changed"), "{}", slow2.stdout);
 }
 
 #[test]
