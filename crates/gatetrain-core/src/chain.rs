@@ -71,6 +71,8 @@ pub struct Opts {
     pub out: PathBuf,
     pub keep_going: bool,
     pub only: Vec<String>,
+    /// run only the steps of these tiers (`fast`, `slow`) as a COMPLETE run of those tiers: not partial; the stamp names the tiers it covers. Empty = every tier. Refused with `only`/`skip`.
+    pub tiers: Vec<String>,
     pub skip: Vec<String>,
     /// the step cache folder (the caller's choice, one per host); None = no caching
     pub cache: Option<PathBuf>,
@@ -585,6 +587,15 @@ pub(crate) fn round1(x: f64) -> f64 {
 
 /// Run the plan, calling `emit` once per log-format line. Err = config error (a name in only/skip that is no step, an unusable out folder).
 pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> Result<Outcome, String> {
+    if let Some(t) = o.tiers.iter().find(|t| !["fast", "slow"].contains(&t.as_str())) {
+        return Err(format!("--tier {t:?} is no tier (fast or slow)"));
+    }
+    if !o.tiers.is_empty() && (!o.only.is_empty() || !o.skip.is_empty()) {
+        return Err("--tier cannot be combined with --only or --skip: a tier is a complete run of its steps, a subset is partial".into());
+    }
+    if !o.tiers.is_empty() && !plan.steps.iter().any(|s| o.tiers.iter().any(|t| t == tier_name(s.tier))) {
+        return Err(format!("--tier {}: the steps file has no step in it", o.tiers.join(",")));
+    }
     for n in o.only.iter().chain(&o.skip).chain(&o.no_cache_for) {
         if !plan.steps.iter().any(|s| &s.name == n) {
             return Err(format!("--only/--skip/--no-cache-for names {n:?}, which is no step"));
@@ -602,7 +613,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let selected: Vec<usize> = (0..plan.steps.len())
         .filter(|&i| {
             let n = &plan.steps[i].name;
-            (o.only.is_empty() || o.only.contains(n)) && !o.skip.contains(n)
+            (o.only.is_empty() || o.only.contains(n)) && !o.skip.contains(n) && (o.tiers.is_empty() || o.tiers.iter().any(|t| t == tier_name(plan.steps[i].tier)))
         })
         .collect();
     let par = o.par.max(1);
@@ -1136,11 +1147,19 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 body["partial"] = true.into();
                 body["partial_reason"] = if o.only.is_empty() && o.skip.is_empty() { "reused" } else { "subset" }.into();
             }
+            // the tiers this stamp covers: a consumer that needs a full pre-flight needs every tier of the steps file covered, by this stamp or a union of tier stamps
+            let covered: Vec<&str> = tiers.split('+').collect();
+            body["tiers"] = serde_json::json!(covered);
+            let plan_tiers = crate::since::tiers_of(plan, &(0..plan.steps.len()).collect::<Vec<_>>());
+            let tier_only = !o.tiers.is_empty() && plan_tiers != tiers;
+            if tier_only {
+                body["plan_tiers"] = serde_json::json!(plan_tiers.split('+').collect::<Vec<_>>());
+            }
             if !retries.is_empty() {
                 body["retried"] = retries.iter().map(|r| serde_json::json!({"name": r.name, "first_rc": r.first_rc, "final_rc": r.final_rc, "class": r.class, "via": r.via, "test": r.test})).collect();
             }
             let text = serde_json::to_string_pretty(&body).unwrap_or_default() + "\n";
-            let p = o.out.join(format!("stamp-{sha}.json"));
+            let p = o.out.join(if tier_only { format!("stamp-{sha}-{tiers}.json") } else { format!("stamp-{sha}.json") });
             std::fs::write(&p, &text).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
             // a stamp's own digest is the sha-256 of the file's bytes (engine v2 section 5.4)
             stamp_text = Some((digest_of(&text), text));

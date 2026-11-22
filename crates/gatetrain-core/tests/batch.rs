@@ -2814,3 +2814,27 @@ fn the_legacy_bridge_refuses_a_reused_stamp_unless_its_own_opt_in_is_set() {
     fx.cfg.legacy_accept_reused = true;
     fx.step("b1", "preflighted");
 }
+
+#[test]
+fn the_preflight_gate_takes_a_union_of_tier_stamps_only_when_together_they_cover_every_tier() {
+    let mut fx = Fx::new("");
+    fx.launched_preflight();
+    std::fs::write(fx.cfg.preflight_steps_file.as_ref().unwrap(), "[[step]]\nname = \"a\"\ntier = \"fast\"\nrun = \"true\"\n[[step]]\nname = \"b\"\ntier = \"slow\"\nrun = \"true\"\n").unwrap();
+    fx.get_settled("b1");
+    fx.step("b1", "preflighting");
+    let sha = fx.lock.launches.lock().unwrap()[0].sha.clone();
+    fx.pf_log("preflight", GREEN);
+    let dir = PathBuf::from(fx.cfg.preflight_stamp_dir.as_ref().unwrap());
+    let tier_stamp = |tier: &str, digest: &str| {
+        let v = serde_json::json!({"v": 1, "sha": sha, "digest": digest, "steps": [{"name": "a", "rc": 0}], "tiers": [tier], "plan_tiers": ["fast", "slow"]});
+        std::fs::write(dir.join(format!("stamp-{sha}-{tier}.json")), v.to_string()).unwrap();
+    };
+    tier_stamp("fast", &fx.pf_digest());
+    let (rule, because) = fx.refused("b1");
+    assert_eq!(rule, "preflight.stamp-for-sha");
+    assert!(because.contains("slow"), "{because}");
+    tier_stamp("slow", &"0".repeat(64));
+    assert_eq!(fx.refused("b1").0, "preflight.stamp-for-sha");
+    tier_stamp("slow", &fx.pf_digest());
+    fx.step("b1", "preflighted");
+}

@@ -222,6 +222,7 @@ fn run_inner(a: &RunArgs) -> Result<AgentResult, String> {
         out: out.clone(),
         keep_going: false,
         only: vec![a.step.clone()],
+        tiers: vec![],
         skip: vec![],
         cache: None,
         no_cache_for: vec![],

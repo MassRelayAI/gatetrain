@@ -1856,10 +1856,41 @@ impl<'a> Engine<'a> {
         self.chain_stamp_problem(tip, wd).map(|why| format!("no green preflight stamp for {}: {why}", short(tip)))
     }
 
+    /// No single stamp for `sha`: a union of tier stamps (`stamp-<sha>-<tiers>.json`, each a complete run of its tiers, same sha and steps-file digest) proves the
+    /// pre-flight when together they cover every tier of the configured steps file. None = proven.
+    fn union_stamp_problem(&self, dir: &Path, sha: &str, wd: &Path, missing: String) -> Option<String> {
+        let Some(want) = self.cfg.preflight_steps_file.as_deref() else { return Some(missing) };
+        let steps = self.abs(wd, want);
+        let Ok(text) = std::fs::read_to_string(&steps) else { return Some(missing) };
+        let Ok(plan) = crate::chain::load(&text) else { return Some(missing) };
+        let all: Vec<usize> = (0..plan.steps.len()).collect();
+        let need: Vec<String> = crate::since::tiers_of(&plan, &all).split('+').map(String::from).collect();
+        let have = evidence::file_digest(&steps);
+        let prefix = format!("stamp-{sha}-");
+        let mut covered: Vec<String> = vec![];
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&prefix) || !name.ends_with(".json") {
+                continue;
+            }
+            let Some(v) = std::fs::read_to_string(e.path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { continue };
+            if v["sha"].as_str() != Some(sha) || stamp_is_partial(&v, self.cfg.preflight_accept_reused) || have.is_none() || v["digest"].as_str() != have.as_deref() {
+                continue;
+            }
+            covered.extend(v["tiers"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(String::from)));
+        }
+        let lacking: Vec<&String> = need.iter().filter(|t| !covered.contains(t)).collect();
+        if lacking.is_empty() {
+            None
+        } else {
+            Some(format!("{missing}; the tier stamps for this commit cover {:?} but not {:?}", covered, lacking))
+        }
+    }
+
     fn chain_stamp_problem(&self, sha: &str, wd: &Path) -> Option<String> {
         let dir = self.abs(wd, self.cfg.preflight_stamp_dir.as_deref().unwrap_or_default());
         let file = dir.join(format!("stamp-{sha}.json"));
-        let Ok(text) = std::fs::read_to_string(&file) else { return Some(format!("no chain stamp {} (a green run of gatetrain chain writes it)", file.display())) };
+        let Ok(text) = std::fs::read_to_string(&file) else { return self.union_stamp_problem(&dir, sha, wd, format!("no chain stamp {} (a green run of gatetrain chain writes it)", file.display())) };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { return Some(format!("the chain stamp {} is not JSON", file.display())) };
         if v["sha"].as_str() != Some(sha) {
             return Some(format!("the chain stamp {} names another commit", file.display()));
@@ -2543,6 +2574,9 @@ impl<'a> Engine<'a> {
         if !self.cfg.legacy_stamp_command.is_empty() {
             // the bridge for a launcher that still demands the repository's old stamp: runs once the chain stamp is read, idempotent by contract
             let stamp = self.abs(&wd, self.cfg.preflight_stamp_dir.as_deref().unwrap_or_default()).join(format!("stamp-{sha}.json"));
+            if !stamp.exists() {
+                return self.refuse(id, "preflight.legacy-stamp", "the pre-flight was proven by tier stamps and [preflight] legacy_stamp_command needs the single stamp-<sha>.json; run the tiers as one chain".to_string());
+            }
             let reused_stamp = std::fs::read_to_string(&stamp).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| stamp_is_partial(&v, false) && !stamp_is_partial(&v, true));
             if reused_stamp && !self.cfg.legacy_accept_reused {
                 return self.refuse(id, "preflight.legacy-stamp", "the chain stamp is from an incremental run (reused steps); [legacy] accept_reused = true lets legacy_stamp_command take it".to_string());

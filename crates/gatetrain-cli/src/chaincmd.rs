@@ -22,6 +22,10 @@ pub struct ChainArgs {
     /// run only these steps (comma list)
     #[arg(long, value_delimiter = ',')]
     pub(crate) only: Vec<String>,
+    /// run every step of these tiers (`fast`, `slow`; repeatable or a comma list) as a COMPLETE run of them: not partial, so `--since` can reuse from an earlier run of the same tiers. The stamp names the
+    /// tiers it covers and, for a subset of the plan's tiers, is `stamp-<sha>-<tiers>.json`; a pre-flight gate accepts the union of tier stamps on one sha. A need in another tier is not run or waited for. Not with --only/--skip/--hosts/--mode full
+    #[arg(long, value_delimiter = ',', conflicts_with_all = ["only", "skip", "hosts"])]
+    pub(crate) tier: Vec<String>,
     /// leave these steps out (comma list)
     #[arg(long, value_delimiter = ',')]
     pub(crate) skip: Vec<String>,
@@ -144,8 +148,8 @@ pub fn run(a: ChainArgs) -> ExitCode {
         eprintln!("chain: --par must be at least 1");
         return ExitCode::from(2);
     }
-    if a.mode == "full" && (!a.only.is_empty() || !a.skip.is_empty()) {
-        eprintln!("chain: --mode full cannot be combined with --only or --skip: a partial run is not a full one");
+    if a.mode == "full" && (!a.only.is_empty() || !a.skip.is_empty() || !a.tier.is_empty()) {
+        eprintln!("chain: --mode full cannot be combined with --only, --skip or --tier: a partial or single-tier run is not a full one");
         return ExitCode::from(2);
     }
     if a.cores == Some(0) {
@@ -188,7 +192,7 @@ pub fn run(a: ChainArgs) -> ExitCode {
     let since = a.since.clone().map(|prev| gatetrain_core::since::SinceOpts { prev, max_age: a.since_max_age, full: a.full, db: a.db.clone() });
     let (db, run_id) = (a.db, a.run_id);
     let out_dir = a.out.clone();
-    let o = Opts { run_id: run_id.clone(), toolchain, env_fp, since, par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores, retry_flakes: a.retry_flakes, quarantine_ref: a.quarantine_ref, stamp: true };
+    let o = Opts { tiers: a.tier, run_id: run_id.clone(), toolchain, env_fp, since, par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores, retry_flakes: a.retry_flakes, quarantine_ref: a.quarantine_ref, stamp: true };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();
         let _ = writeln!(so, "{l}");

@@ -65,3 +65,13 @@ A stamp with reused steps is `"v": 2`, `"partial": true`, `"partial_reason": "re
 refuses partial stamps (lane stamp, pre-flight stamp, evidence) refuses it. `[preflight] accept_reused = true` and `[lanes] accept_reused = true`
 accept exactly that stamp (never a `--only`/`--skip` one). A run with nothing reused writes the ordinary v1 stamp.
 Not available with `--hosts`.
+
+## Tiers: `chain --tier`
+
+`gatetrain chain --tier fast` (repeatable or `--tier fast,slow`) runs every step of those tiers as a COMPLETE run of them: it is not partial, so `--since`
+can reuse from an earlier complete run of the same tiers (a different tier set refuses reuse and runs everything). It cannot be combined with `--only`,
+`--skip`, `--hosts` or `--mode full`. A step needing a step of another tier does not wait for it and does not run it (the same as `--only`).
+The stamp names the tiers it covers (`"tiers"`, and `"plan_tiers"` when the run covers fewer tiers than the steps file has) and, for a subset of the plan's
+tiers, is `stamp-<sha>-<tiers>.json`, so a fast and a slow run on one commit never overwrite each other. The pre-flight gate accepts a single
+full stamp, or the union of tier stamps on one commit and one steps-file digest that together cover every tier of the steps file (not for
+`legacy_stamp_command`, which needs the single stamp).
