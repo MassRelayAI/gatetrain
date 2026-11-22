@@ -2,6 +2,10 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## Unreleased
+
+- `gatetrain chain --since <sha>` (with `--since-max-age`, `--full`, `--toolchain-probe`, `--env-key`): incremental re-run that carries a previous green result only under strict rules, labelled in the log, ledger and stamp (docs/since.md). Every run now also writes `result-<sha>-<tiers>.json` in `--out`; stamps gain per-step `freshness` and `reused`/`fresh` lists.
+
 ## 0.3.0
 
 - **Behaviour change:** a stamp written by a run with `--only` or `--skip` is now marked `"partial": true` and is no longer accepted

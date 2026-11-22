@@ -72,6 +72,35 @@ pub struct ChainArgs {
     /// tags of this host besides its platform tag (comma list); a step whose `requires` this host lacks is refused in a local run
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
+    /// incremental re-run: start from the previous run at this commit (or a result file from <out>): a step runs again when it was not green there, its declared `inputs`
+    /// or definition changed, it declares no `inputs`, a lockfile or toolchain pin changed, or a step it needs runs; any other step is REUSED (STEP_REUSED, `reused-from <run> <sha>`
+    /// in the ledger, `freshness: "reused"` in the stamp). Reuse needs equal tiers, mode, --toolchain-probe and --env-key fingerprints. Not with --hosts (docs/since.md)
+    #[arg(long, conflicts_with = "hosts")]
+    pub(crate) since: Option<String>,
+    /// with --since: a result carried through more than this many runs is run again
+    #[arg(long, default_value_t = 5, requires = "since")]
+    pub(crate) since_max_age: u32,
+    /// with --since: run every step (nothing reused)
+    #[arg(long, requires = "since")]
+    pub(crate) full: bool,
+    /// a shell line whose output is part of the toolchain fingerprint (repeatable); reuse only crosses runs with an equal fingerprint. Example: --toolchain-probe "rustc -V"
+    #[arg(long = "toolchain-probe")]
+    pub(crate) toolchain_probe: Vec<String>,
+    /// an environment variable whose value is part of the environment fingerprint (comma list; the value is hashed, never printed)
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) env_key: Vec<String>,
+}
+
+/// (toolchain, environment) fingerprints: sha-256 over gatetrain's version, the platform and the probes' output; over the listed variables' values.
+fn fingerprints(a: &ChainArgs, cwd: &std::path::Path) -> Result<(String, String), String> {
+    use sha2::{Digest, Sha256};
+    let fp = gatetrain_core::multihost::fingerprint(cwd, &a.toolchain_probe)?;
+    let tc = Sha256::digest(format!("{}|{}-{}", fp.hash, std::env::consts::ARCH, std::env::consts::OS).as_bytes());
+    let mut keys = a.env_key.clone();
+    keys.sort();
+    let env: String = keys.iter().map(|k| format!("{k}={}\n", std::env::var(k).unwrap_or_default())).collect();
+    let hex = |d: &[u8]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    Ok((hex(&tc), hex(&Sha256::digest(env.as_bytes()))))
 }
 
 /// Read a steps file and resolve its `cwd` against the file's own folder (a relative `cwd` means the same from wherever it is run).
@@ -142,9 +171,18 @@ pub fn run(a: ChainArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    let plan_cwd = std::path::PathBuf::from(plan.cwd.clone().unwrap_or_else(|| ".".into()));
+    let (toolchain, env_fp) = match fingerprints(&a, &plan_cwd) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("chain: --toolchain-probe: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let since = a.since.clone().map(|prev| gatetrain_core::since::SinceOpts { prev, max_age: a.since_max_age, full: a.full });
     let (db, run_id) = (a.db, a.run_id);
     let out_dir = a.out.clone();
-    let o = Opts { par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores, retry_flakes: a.retry_flakes, quarantine_ref: a.quarantine_ref, stamp: true };
+    let o = Opts { run_id: run_id.clone(), toolchain, env_fp, since, par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores, retry_flakes: a.retry_flakes, quarantine_ref: a.quarantine_ref, stamp: true };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();
         let _ = writeln!(so, "{l}");
@@ -188,6 +226,5 @@ pub fn finish(res: Result<gatetrain_core::chain::Outcome, String>, db: Option<Pa
 
 /// `chain-<UTC time to the microsecond>-<commit, 7 chars>`: two runs of one commit never share an id unless they start in the same microsecond.
 pub fn default_run_id(r: &gatetrain_core::chain::RunRec) -> String {
-    let t: String = r.started_at.chars().take_while(|c| *c != '+' && *c != 'Z').filter(char::is_ascii_digit).collect();
-    format!("chain-{t}-{}", r.sha.as_deref().map_or("nosha", |s| &s[..s.len().min(7)]))
+    gatetrain_core::chain::default_run_id(&r.started_at, r.sha.as_deref())
 }

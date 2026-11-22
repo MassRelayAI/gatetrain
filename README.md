@@ -308,6 +308,10 @@ CHAIN_CORES 12
 
 See [`docs/chain.md`](docs/chain.md#scheduling-longest-first-and-cores).
 
+### Incremental re-run (`--since`)
+
+`gatetrain chain --since <sha>` re-runs only the steps a fix can have changed: a step runs when it was not green in the previous run, its declared `inputs` or definition differ, it declares no `inputs`, a lockfile or toolchain pin changed, or a step it needs runs. Every other step carries the previous green result, labelled `STEP_REUSED <step> <run-id> <sha>`, `reused-from` in the ledger and `freshness: "reused"` in the stamp (never silently green). `--full` runs everything. See [`docs/since.md`](docs/since.md).
+
 ### The step cache (pre-flight only)
 
 `gatetrain chain --cache <dir>` skips a step whose inputs have not changed since it last passed. A step opts in with `inputs = ["apps/web/**", "package-lock.json"]` (git pathspecs, relative to the plan's `cwd`) and may add `cache_salt = "..."` to invalidate its entries. A step without `inputs` always runs.

@@ -29,6 +29,7 @@ pub mod pycompat;
 pub mod retry;
 pub mod runner;
 pub mod runs;
+pub mod since;
 pub mod stackcheck;
 pub mod stop;
 pub mod stats;

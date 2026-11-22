@@ -93,6 +93,19 @@ pub struct Opts {
     pub quarantine_ref: Option<String>,
     /// write `stamp-<sha>.json` for a green run on a clean tree (the agent of a multi-host run never does: only the coordinator stamps)
     pub stamp: bool,
+    /// the run's id in the result file and in `reused-from` labels; None = [`default_run_id`]
+    pub run_id: Option<String>,
+    /// fingerprint of the toolchain and of the environment this run claims (a result is reused only across equal ones); "" when none is configured
+    pub toolchain: String,
+    pub env_fp: String,
+    /// incremental re-run (`--since`): None = every step runs as before
+    pub since: Option<crate::since::SinceOpts>,
+}
+
+/// `chain-<UTC time to the microsecond>-<commit, 7 chars>`: two runs of one commit never share an id unless they start in the same microsecond.
+pub fn default_run_id(started_at: &str, sha: Option<&str>) -> String {
+    let t: String = started_at.chars().take_while(|c| *c != '+' && *c != 'Z').filter(char::is_ascii_digit).collect();
+    format!("chain-{t}-{}", sha.map_or("nosha", |s| &s[..s.len().min(7)]))
 }
 
 /// At most this many steps of one run are re-run; a further flaky step stays red.
@@ -657,6 +670,32 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     }
     // where the per-step `.full` files are, so `diagnose` can find them from the log alone (an unknown line to every reader)
     say(&format!("CHAIN_OUT {}", out_abs.to_string_lossy().trim_start_matches(r"\\?\")));
+    // incremental re-run: which steps carry the previous run's green result (docs/since.md); every other step runs
+    let tiers = crate::since::tiers_of(plan, &selected);
+    let run_id = o.run_id.clone().unwrap_or_else(|| default_run_id(&started_at, sha.as_deref()));
+    let prefix = git_out(&cwd, &["rev-parse", "--show-prefix"]).unwrap_or_default();
+    let mut reuse: Vec<Option<(String, String, u32)>> = vec![None; plan.steps.len()];
+    if let (Some(s), Some(_)) = (&o.since, &sha) {
+        let sha_of = |r: &str| git_out(&cwd, &["rev-parse", "--verify", "--quiet", &format!("{r}^{{commit}}")]);
+        match crate::since::load_prev(&o.out, &s.prev, &sha_of, &tiers) {
+            Err(why) => say(&format!("CHAIN_SINCE none {why}")),
+            Ok(prev) => {
+                let changed = |p: &str, specs: &[String]| crate::since::git_changed(&cwd, p, specs);
+                let dirty = |specs: &[String]| crate::since::git_dirty(&cwd, specs);
+                let cur = crate::since::Cur { mode: &o.mode, tiers: &tiers, toolchain: &o.toolchain, env: &o.env_fp };
+                let g = crate::since::Git { changed: &changed, dirty: &dirty };
+                let ds = crate::since::decide(plan, &selected, &prefix, &prev, &cur, s, &g);
+                let n = ds.iter().enumerate().filter(|(i, d)| selected.contains(i) && matches!(d, crate::since::Decision::Reuse { .. })).count();
+                say(&format!("CHAIN_SINCE {} reused={n} run={}", prev.sha, selected.len() - n));
+                for &i in &selected {
+                    match &ds[i] {
+                        crate::since::Decision::Run(why) => say(&format!("STEP_RERUN {} {}", plan.steps[i].name, why.replace(['\r', '\n'], " "))),
+                        crate::since::Decision::Reuse { run, sha, age } => reuse[i] = Some((run.clone(), sha.clone(), *age)),
+                    }
+                }
+            }
+        }
+    }
 
     let n_steps = plan.steps.len();
     let mut sink = (o.samples > 0).then(|| SampleSink::new(&o.out, &host, o.samples));
@@ -666,6 +705,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let mut keys: Vec<Option<String>> = vec![None; n_steps];
     let mut notes: Vec<Option<String>> = vec![None; n_steps];
     let mut cached: Vec<usize> = Vec::new();
+    let mut reused: Vec<usize> = Vec::new();
     let mut sh: Vec<Option<Sh>> = (0..n_steps).map(|_| None).collect();
     let mut step_started: Vec<Option<String>> = vec![None; n_steps];
     let mut recs: Vec<StepRec> = Vec::new();
@@ -750,6 +790,37 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     None => true,
                 });
                 if !ready {
+                    continue;
+                }
+                if let Some((from_run, from_sha, _)) = reuse[i].clone() {
+                    // --since: the previous run's green result, carried and labelled; never counted as a fresh run
+                    let step = &plan.steps[i];
+                    let now = Ts::now_utc().iso();
+                    say(&format!("STEP_START {} {now}", step.name));
+                    say(&format!("STEP_REUSED {} {from_run} {from_sha}", step.name));
+                    say(&format!("STEP_TIME {} 0.0s", step.name));
+                    say(&format!("STEP_EXIT {} 0", step.name));
+                    let label = format!("reused-from {from_run} {from_sha}");
+                    let _ = std::fs::write(o.out.join(format!("{}.full", step.name)), format!("{label}\n"));
+                    state[i] = St::Green;
+                    times.push((i, 0, 0.0));
+                    reused.push(i);
+                    recs.push(StepRec {
+                        name: step.name.clone(),
+                        tier: tier_name(step.tier),
+                        started_at: Some(now.clone()),
+                        ended_at: Some(now),
+                        rc: 0,
+                        secs: 0.0,
+                        cached: true,
+                        cached_from: Some(label),
+                        key: None,
+                        shards: i64::from(nshards(step)),
+                        log_ref: format!("{}.full", step.name),
+                        host: None,
+                        fingerprint: None,
+                    });
+                    hit = true;
                     continue;
                 }
                 if let Some(cdir) = &o.cache {
@@ -974,6 +1045,44 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     let log_sha256: String = log_hash.clone().finalize().iter().map(|b| format!("{b:02x}")).collect();
 
     let ended_at = Ts::now_utc().iso();
+    // the result file: what each step did in this run, green or red, so the next run can start from it (`--since`)
+    if let (Some(sha), Some(before)) = (&sha, &dirty_before) {
+        let dirty = !before.is_empty() || git_out(&cwd, &porcelain).is_none_or(|a| !a.is_empty());
+        let steps: Vec<crate::since::StepResult> = selected
+            .iter()
+            .filter_map(|&i| {
+                let s = &plan.steps[i];
+                let rec = recs.iter().find(|r| r.name == s.name)?;
+                let (orun, osha, age) = reuse[i].clone().filter(|_| reused.contains(&i)).unwrap_or_else(|| (run_id.clone(), sha.clone(), 0));
+                Some(crate::since::StepResult {
+                    name: s.name.clone(),
+                    tier: tier_name(s.tier).into(),
+                    rc: Some(rec.rc),
+                    def: crate::since::step_def(s, &prefix),
+                    freshness: if reused.contains(&i) { "reused" } else { "fresh" }.into(),
+                    origin_run: orun,
+                    origin_sha: osha,
+                    age,
+                })
+            })
+            .collect();
+        let res = crate::since::RunResult {
+            v: 1,
+            run_id: run_id.clone(),
+            sha: sha.clone(),
+            mode: o.mode.clone(),
+            tiers: tiers.clone(),
+            toolchain: o.toolchain.clone(),
+            env: o.env_fp.clone(),
+            dirty,
+            partial: !o.only.is_empty() || !o.skip.is_empty(),
+            steps,
+        };
+        let p = crate::since::result_path(&o.out, sha, &tiers);
+        if let Err(e) = std::fs::write(&p, serde_json::to_string_pretty(&res).unwrap_or_default() + "\n") {
+            eprintln!("chain: cannot write {}: {e}", p.display());
+        }
+    }
     let mut stamp_text: Option<(String, String)> = None;
     let stamp = if !reds.is_empty() {
         Err("the run is red".to_string())
@@ -988,9 +1097,13 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 .iter()
                 .map(|&(i, rc, secs)| {
                     let rec = recs.iter().find(|r| r.name == plan.steps[i].name);
+                    let was_reused = reused.contains(&i);
+                    let from = reuse[i].clone().filter(|_| was_reused);
                     serde_json::json!({
                         "name": plan.steps[i].name, "tier": tier_name(plan.steps[i].tier), "rc": rc, "seconds": round1(secs),
-                        "key": rec.and_then(|r| r.key.clone()), "cached_from": rec.and_then(|r| r.cached_from.clone()), "shards": nshards(&plan.steps[i]),
+                        "key": rec.and_then(|r| r.key.clone()), "cached_from": rec.and_then(|r| r.cached_from.clone()).filter(|_| !was_reused), "shards": nshards(&plan.steps[i]),
+                        "freshness": if was_reused { "reused" } else if rec.is_some_and(|r| r.cached) { "cached" } else { "fresh" },
+                        "reused_from": from.map(|(run, sha, age)| serde_json::json!({"run": run, "sha": sha, "age": age})),
                     })
                 })
                 .collect();
@@ -1000,6 +1113,9 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 "digest": digest, "steps": steps,
                 "cached": cached.iter().map(|&i| plan.steps[i].name.clone()).collect::<Vec<_>>(),
                 "prev": Vec::<String>::new(),
+                "reused": reused.iter().map(|&i| plan.steps[i].name.clone()).collect::<Vec<_>>(),
+                "fresh": times.iter().filter(|(i, _, _)| !reused.contains(i) && !cached.contains(i)).map(|(i, _, _)| plan.steps[*i].name.clone()).collect::<Vec<_>>(),
+                "run_id": run_id,
             });
             if !o.only.is_empty() || !o.skip.is_empty() {
                 // a run of some steps proves only those: the lane-stamp and pre-flight rules refuse it

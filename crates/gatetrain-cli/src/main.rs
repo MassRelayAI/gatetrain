@@ -109,7 +109,7 @@ enum Cmd {
     /// One bounded pass: doctor and `tidy --auto` per host, ingest finished logs, advance every open batch, one advice line, the storm line (3 to 6 lines; exit 1 when a batch needs a person)
     Tick(tickcmd::TickArgs),
     /// Run a steps file: fast then slow tier in parallel, full output per step, log-format lines on stdout, a stamp when green and clean
-    Chain(chaincmd::ChainArgs),
+    Chain(Box<chaincmd::ChainArgs>),
     /// The worker side of a multi-host chain, started by the coordinator over ssh (docs/multi-host.md): hello, run, clean
     Agent {
         #[command(subcommand)]
@@ -595,7 +595,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         }
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
-        Cmd::Chain(a) => Ok(chaincmd::run(a)),
+        Cmd::Chain(a) => Ok(chaincmd::run(*a)),
         Cmd::Agent { cmd } => Ok(agentcmd::run(cmd)),
         Cmd::Tick(a) => tickcmd::run(a),
         Cmd::Probe(a) => probecmd::run(a),
