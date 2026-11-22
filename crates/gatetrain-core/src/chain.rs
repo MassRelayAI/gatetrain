@@ -1110,6 +1110,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
             dirty,
             partial: !o.only.is_empty() || !o.skip.is_empty(),
             steps,
+            at: Ts::now_utc().iso(),
             log_sha256: log_sha256.clone(),
             seal: String::new(),
         };

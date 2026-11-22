@@ -85,3 +85,9 @@ verified `result-<sha>-*.json` of that commit and takes each step from the fresh
 A tier stamp is `"v": 2, "partial": true, "partial_reason": "tier"`, so every consumer that does not do the union check (lane stamp, single pre-flight stamp, evidence)
 refuses it. The pre-flight gate accepts a set of tier stamps on one commit and steps-file digest that together cover every tier. A tier stamp built with reused steps is
 marked `reused` and needs `accept_reused`. A red run deletes the older green stamp of the same commit and tiers.
+
+### Newest result wins; a need of a running step runs
+
+`--since` takes each step from the NEWEST verified result of the commit (the sealed `at`), green or red: an older green never overrides a newer red. A step is
+never reused while a step that needs it runs in the same run, because the running step may read its output from disk; the need runs again with it
+(`STEP_RERUN <step> <dependent> runs and needs it`).

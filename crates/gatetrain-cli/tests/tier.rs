@@ -102,24 +102,21 @@ fn every_tier_stamp_stands_alone_is_partial_for_old_consumers_and_names_the_step
 }
 
 #[test]
-fn a_slow_run_after_a_fast_run_on_the_same_commit_reuses_the_fast_steps_it_needs_under_since() {
+fn a_need_runs_again_with_the_step_that_reads_it_and_a_whole_tier_rerun_reuses_everything() {
     let (r, w) = (repo(), tempfile::tempdir().unwrap());
     let sha1 = git(r.path(), &["rev-parse", "HEAD"]);
     assert_eq!(chain(r.path(), w.path(), &["--tier", "fast", "--run-id", "f1"]).code(), 0);
-    // a commit that touches no step input: B (needed by S) is unchanged, so the slow run takes it from the fast run: no double work
-    commit_file(r.path(), "docs/n.txt", "n");
+    // a commit that touches no step input; the slow tier has no earlier run, so S runs, and B (its need) runs with it: its output may be read from disk
+    let sha2 = commit_file(r.path(), "docs/n.txt", "n");
     let slow = chain(r.path(), w.path(), &["--tier", "slow", "--since", &sha1, "--run-id", "s1"]);
     assert_eq!(slow.code(), 0, "{}{}", slow.stdout, slow.stderr);
-    assert!(slow.stdout.contains(&format!("STEP_REUSED B f1 {sha1}")), "{}", slow.stdout);
-    assert!(slow.has("STEP_EXIT S 0") && !slow.has("STEP_REUSED S"), "S is new work: {}", slow.stdout);
-    // the same fast tier again reuses its own
-    let again = chain(r.path(), w.path(), &["--tier", "fast", "--since", &sha1, "--run-id", "f2"]);
-    assert!(again.stdout.contains(&format!("STEP_REUSED A f1 {sha1}")), "{}", again.stdout);
-    // a changed input of B re-runs B, and S with it
-    let sha2 = commit_file(r.path(), "b/y.txt", "2");
-    let _ = sha2;
-    let slow2 = chain(r.path(), w.path(), &["--tier", "slow", "--since", &sha1, "--run-id", "s2"]);
-    assert!(!slow2.has("STEP_REUSED B") && slow2.stdout.contains("STEP_RERUN B its inputs changed"), "{}", slow2.stdout);
+    assert!(!slow.has("STEP_REUSED B") && slow.stdout.contains("STEP_RERUN B S runs and needs it"), "{}", slow.stdout);
+    // the same tier again on the same commit: nothing it reads changed, everything is reused
+    let again = chain(r.path(), w.path(), &["--tier", "slow", "--since", &sha2, "--run-id", "s2"]);
+    assert!(again.has("STEP_REUSED S") && again.has("STEP_REUSED T") && again.has("STEP_REUSED B"), "{}", again.stdout);
+    // the fast tier reuses its own earlier results
+    let fast = chain(r.path(), w.path(), &["--tier", "fast", "--since", &sha1, "--run-id", "f2"]);
+    assert!(fast.stdout.contains(&format!("STEP_REUSED A f1 {sha1}")), "{}", fast.stdout);
 }
 
 #[test]

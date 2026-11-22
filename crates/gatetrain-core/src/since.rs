@@ -80,6 +80,9 @@ pub struct RunResult {
     pub env: String,
     pub dirty: bool,
     pub partial: bool,
+    /// when the run ended (ISO 8601, UTC): the newest result of a commit wins
+    #[serde(default)]
+    pub at: String,
     /// sha-256 of the run's log (the ledger keeps the same value)
     #[serde(default)]
     pub log_sha256: String,
@@ -91,7 +94,7 @@ pub struct RunResult {
 
 impl RunResult {
     pub fn compute_seal(&self) -> String {
-        let v = serde_json::json!([self.v, self.run_id, self.sha, self.mode, self.tiers, self.toolchain, self.env, self.dirty, self.partial, self.log_sha256, self.steps]);
+        let v = serde_json::json!([self.v, self.run_id, self.sha, self.mode, self.tiers, self.toolchain, self.env, self.dirty, self.partial, self.at, self.log_sha256, self.steps]);
         Sha256::digest(v.to_string().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
     }
 }
@@ -209,6 +212,9 @@ pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>
             Err(e) => first_err = e,
         }
     }
+    // the newest run (by its sealed `at`) is the base; an older run of the same environment only fills in steps the newest never ran. A step the newest run has keeps the newest
+    // result, green or red: an older green never overrides it
+    ok.sort_by(|a, b| b.at.cmp(&a.at));
     let mut it = ok.into_iter();
     let Some(mut base) = it.next() else { return Err(first_err) };
     for o in it {
@@ -216,10 +222,8 @@ pub fn load_prev(out: &Path, prev: &str, sha_of: &dyn Fn(&str) -> Option<String>
             continue;
         }
         for s in o.steps {
-            match base.steps.iter_mut().find(|b| b.name == s.name) {
-                None => base.steps.push(s),
-                Some(b) if (b.rc != Some(0) && s.rc == Some(0)) || (s.rc == Some(0) && s.age < b.age) => *b = s,
-                Some(_) => {}
+            if !base.steps.iter().any(|b| b.name == s.name) {
+                base.steps.push(s);
             }
         }
     }
@@ -308,6 +312,18 @@ pub fn decide(plan: &Plan, selected: &[usize], prefix: &str, prev: &RunResult, c
             if let Some(n) = bad {
                 d[i] = Decision::Run(format!("needs {n}, which runs"));
                 changed = true;
+            }
+        }
+        // and a step that runs pulls in everything it needs: its output may be read from disk, so a need is never taken from an earlier run while a step reading it runs
+        for &i in selected {
+            if !matches!(d[i], Decision::Run(_)) {
+                continue;
+            }
+            for n in &plan.steps[i].needs {
+                if let Some(j) = plan.steps.iter().position(|s| &s.name == n).filter(|j| selected.contains(j) && matches!(d[*j], Decision::Reuse { .. })) {
+                    d[j] = Decision::Run(format!("{} runs and needs it", plan.steps[i].name));
+                    changed = true;
+                }
             }
         }
         if !changed {
@@ -455,6 +471,7 @@ mod tests {
             env: "env".into(),
             dirty: false,
             partial: false,
+            at: String::new(),
             log_sha256: String::new(),
             seal: String::new(),
             steps: p
@@ -571,6 +588,17 @@ mod tests {
         assert!(matches!(&go(&p, &prev, &cur(), &opts(), &[])[0], Decision::Run(w) if w.contains("older than 5")));
         prev.steps[0].age = 4;
         assert!(reused(&go(&p, &prev, &cur(), &opts(), &[])[0]), "age 4 carried once more is 5, still allowed");
+    }
+
+    #[test]
+    fn a_need_is_never_reused_while_a_step_that_reads_it_runs() {
+        let p = plan();
+        let mut prev = prev_for(&p);
+        prev.steps[2].def = "changed".into(); // e2e runs; it needs unit, whose own inputs did not change
+        let d = go(&p, &prev, &cur(), &opts(), &[]);
+        assert!(matches!(&d[2], Decision::Run(_)));
+        assert!(matches!(&d[1], Decision::Run(w) if w.contains("e2e runs and needs it")), "{:?}", d[1]);
+        assert!(reused(&d[0]), "an unrelated step stays reused");
     }
 
     #[test]
