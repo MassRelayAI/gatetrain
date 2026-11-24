@@ -33,7 +33,8 @@ stuck probe can slow a run down but never wedge it.
 The guard reads the `[guard]` table of a hosts file, the same file `gatetrain tidy --config` reads (tidy ignores the table). The file is
 re-read before every check: **an edit takes effect at the next step**, without a restart, and is printed as
 `GUARD_CONFIG changed: <key>: <old> -> <new>; ...`. An edit that does not parse keeps the previous settings and prints `GUARD_CONFIG invalid
-(...)` once. A file that does not parse at the start is a config error (exit 2): a typo never passes silently (unknown keys are refused).
+(...)` once. A file that does not parse at the start is a config error (exit 2) naming the line (`[guard] line 7: unknown field ...`): a typo never
+passes silently (unknown keys are refused). `max_hold_s` is at most 86400.
 
 ```toml
 [guard]
@@ -87,7 +88,8 @@ A flag keeps winning after a reload. The guard covers a local run; with `--hosts
 - `gatetrain guard wait [--label NAME] [--state FILE]`: returns at once on a quiet host and prints nothing; while held prints
   `NAME GUARD_HOLD ...` and waits; after `max_hold_s` returns. Exit 0 always (2 on a config error): put it before each step of a shell
   loop. `--state` carries the probe counts, the last probe time and the hold start from one wait to the next, so `fails` in a row and
-  `probe_every_s` hold across processes.
+  `probe_every_s` hold across processes. After `max_hold_s` the waits return at once until the trouble clears: a shell loop
+  goes on at its own parallelism (only `gatetrain chain` drops to par 1).
 - `gatetrain guard monitor [--once]`: a `GUARD_MONITOR` line every `monitor_every_s`, plus hold and release lines, until killed.
 - `gatetrain guard status`: one check; exit 0 admit, 1 hold.
 - `gatetrain guard env`: `[guard.caps]` as `GUARD_SCOPE=0|1`, `GUARD_CPU_QUOTA=`, `GUARD_MEMORY_MAX=`, `GUARD_MEMORY_HIGH=`, `GUARD_NICE=`,

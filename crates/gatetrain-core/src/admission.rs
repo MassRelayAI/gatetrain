@@ -128,17 +128,27 @@ struct FileTop {
 
 /// Parse the `[guard]` table of a hosts file (other tables are ignored). No table = the defaults (monitor only).
 pub fn parse(text: &str) -> Result<Settings, String> {
-    let top: FileTop = toml::from_str(text).map_err(|e| format!("[guard]: {}", e.message()))?;
+    let top: FileTop = toml::from_str(text).map_err(|e| match e.span() {
+        // the line of the offending key or value, so a person can fix the file at once
+        Some(sp) => format!("[guard] line {}: {}", text[..sp.start.min(text.len())].matches('\n').count() + 1, e.message()),
+        None => format!("[guard]: {}", e.message()),
+    })?;
     let s = top.guard.unwrap_or_default();
     validate(&s)?;
     Ok(s)
 }
+
+/// The longest hold that may be configured: a shell launcher's `guard wait` sits outside any per-step timeout.
+pub const MAX_HOLD_CEILING_S: f64 = 86400.0;
 
 fn validate(s: &Settings) -> Result<(), String> {
     for (k, v) in [("every_s", s.every_s), ("max_hold_s", s.max_hold_s), ("monitor_every_s", s.monitor_every_s), ("probe_every_s", s.probe_every_s)] {
         if !(v.is_finite() && v > 0.0) {
             return Err(format!("[guard] {k} must be a positive number, got {v}"));
         }
+    }
+    if s.max_hold_s > MAX_HOLD_CEILING_S {
+        return Err(format!("[guard] max_hold_s must be at most {MAX_HOLD_CEILING_S} (a day), got {}", s.max_hold_s));
     }
     for d in &s.disk {
         if d.path.is_empty() || !(d.min_free_gb.is_finite() && d.min_free_gb >= 0.0) {
@@ -914,6 +924,23 @@ scope = false
 ";
         crate::config::validate_text(t).unwrap();
         assert_eq!(parse(t).unwrap().disk[0].min_free_gb, 10.0);
+    }
+
+    #[test]
+    fn a_typo_names_its_line_and_max_hold_has_a_ceiling() {
+        let e = parse("profile = 'mixed'
+
+[guard]
+max_hold_s = 60
+[[guard.disk]]
+path = '/'
+min_free_gbb = 10
+").unwrap_err();
+        assert!(e.contains("line 7") && e.contains("min_free_gbb"), "{e}");
+        let e = parse("[guard]
+max_hold_s = 999999
+").unwrap_err();
+        assert!(e.contains("max_hold_s") && e.contains("86400"), "{e}");
     }
 
     #[test]
