@@ -76,7 +76,8 @@ fn normal_high_load_and_cpu_and_io_pressure_do_not_hold() {
     let proc = fake_proc(w.path(), 2.0, 80.0, 99.0, 999.0);
     let cfg = w.path().join("hosts.toml");
     std::fs::write(&cfg, format!("[guard]\nmax_psi_mem_full = 20\nmonitor_every_s = 0.1\n[[guard.disk]]\npath = '{}'\nmin_free_gb = 0\n", dir_str(w.path()).replace('\\', "/"))).unwrap();
-    let o = chain(w.path(), &["--guard-config", &dir_str(&cfg), "--guard-proc", &dir_str(&proc)]);
+    // --max-hold bounds a wrong hold (a broken guard must go red in seconds, not wait 30 minutes)
+    let o = chain(w.path(), &["--guard-config", &dir_str(&cfg), "--guard-proc", &dir_str(&proc), "--max-hold", "2"]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(!text(&o).contains("GUARD_HOLD"), "load 999, cpu 99, io 80 only monitor:\n{}", text(&o));
     assert!(text(&o).lines().any(|l| l.starts_with("GUARD_MONITOR ") && l.contains("load1=999") && l.contains("io_full10=80")), "{}", text(&o));
@@ -90,7 +91,7 @@ fn a_near_full_disk_holds_and_an_edit_to_the_hosts_file_releases_it() {
     let cfg = w.path().join("hosts.toml");
     let path = dir_str(w.path()).replace('\\', "/");
     // a floor far above the real free space: this disk is "near full" for the guard
-    let full = format!("profile = 'mixed'\n[guard]\nevery_s = 0.2\nmax_hold_s = 600\n[[guard.disk]]\npath = '{path}'\nmin_free_gb = 1000000\n");
+    let full = format!("profile = 'mixed'\n[guard]\nevery_s = 0.2\nmax_hold_s = 20\n[[guard.disk]]\npath = '{path}'\nmin_free_gb = 1000000\n");
     std::fs::write(&cfg, &full).unwrap();
     let cfg2 = cfg.clone();
     let editor = std::thread::spawn(move || {

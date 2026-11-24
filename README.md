@@ -308,6 +308,33 @@ CHAIN_CORES 12
 
 See [`docs/chain.md`](docs/chain.md#scheduling-longest-first-and-cores).
 
+### The admission guard (sharing a host with something that matters)
+
+A chain on a host that also serves something (a production site, a database) can starve it. The guard sits in front of every NEW step and
+HOLDS it, never fails or kills anything, while a disk is near full, a protected service is slow (`max_ms`), answers 5xx or not at all
+(`fails` probes in a row), or memory pressure is severe. Everything else (load, CPU and IO pressure, disk use) is only monitored unless you
+set a threshold. After `max_hold_s` the run goes on one step at a time. Every knob lives in the `[guard]` table of the hosts file `tidy`
+reads, is re-read before every check (an edit applies at the next step: `GUARD_CONFIG changed: <diff>`), and a flag overrides it.
+
+| knob (`[guard]`) | flag | default | holds? |
+|---|---|---|---|
+| `[[guard.disk]] path, min_free_gb` | `--min-free-disk PATH=GB` | none | yes, below the floor |
+| `[[guard.probe]] url, max_ms, fails` | `--probe URL --probe-max-ms N --probe-fails N` | max_ms 2000, fails 3 | yes, slow/5xx/silent N in a row |
+| `max_psi_mem_full` | `--max-psi-mem` | unset | when set |
+| `max_psi_io_full`, `max_psi_cpu_some`, `max_load` | `--max-psi-io`, `--max-psi-cpu`, `--max-load` | unset | when set; else monitor only |
+| `every_s`, `max_hold_s`, `monitor_every_s`, `probe_every_s` | `--guard-every`, `--max-hold`, `--monitor-every`, `--probe-every` | 5, 1800, 300, 30 | - |
+| `[guard.caps]` scope, cpu_quota, memory_max, memory_high, nice, ionice_idle, container_cpus, container_memory | `gatetrain guard env` prints them | all off | no: a launcher applies them |
+
+```text
+$ gatetrain chain --steps steps.toml --out out --par 12 --guard-config hosts.toml
+GUARD_ON config=hosts.toml hold: disk=[/>=10GB] probe=[https://service.example/<=2000ms*3] psi_mem_full>20 ...
+GUARD_MONITOR at=... disk=[/=48.2GB(98%used)] psi mem_full10=0 io_full10=0.4 cpu_some10=31 load1=52 probe=[https://service.example/=180ms/200]
+GUARD_HOLD probe https://service.example/ bad 3x in a row (last 2730ms/200, max 2000ms)
+GUARD_RELEASE held=95.0s
+```
+
+`gatetrain guard wait|monitor|status|env` gives the same guard to a shell loop. See [`docs/admission.md`](docs/admission.md).
+
 ### Incremental re-run (`--since`)
 
 `gatetrain chain --since <sha>` re-runs only the steps a fix can have changed: a step runs when it was not green in the previous run, its declared `inputs` or definition differ, it declares no `inputs`, a lockfile or toolchain pin changed, or a step it needs runs. Every other step carries the previous green result, labelled `STEP_REUSED <step> <run-id> <sha>`, `reused-from` in the ledger and `freshness: "reused"` in the stamp (never silently green). `--full` runs everything. See [`docs/since.md`](docs/since.md).

@@ -24,6 +24,7 @@ Steps may run in parallel and their lines may interleave: lines are matched to a
 | `RED_NOW <step> rc=<n> at <ISO time> (<note>)` | printed the moment a step fails, so a watcher can react before the run ends |
 | `RED_SUMMARY: <step>(rc=<n>) ...` or `RED_SUMMARY: none` | once, at the end: every red, or `none`. After a retry the line ends `; retried: <step>(<class>) ...` (for example `none; retried: a(quarantine)`): the retried steps were NOT first-try greens, and a reader that compares the whole line with `none` must read the suffix |
 | `GATES_DONE` | once, last: the run finished (green or red) |
+| `GUARD_ON ...`, `GUARD_MONITOR ...`, `GUARD_HOLD <reasons>`, `GUARD_RELEASE held=<s>s`, `GUARD_HOLD_TIMEOUT ...`, `GUARD_CONFIG changed: <diff>` | optional, only with the admission guard ([admission.md](admission.md)): when new steps were held and why; a hold changes no step's result. Readers that do not know the lines skip them |
 
 Rules gatetrain applies:
 
