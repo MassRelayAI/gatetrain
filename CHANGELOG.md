@@ -2,6 +2,13 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.4.4
+
+- `tidy`: a naming report. `[tidy.naming]` (`roots`, `exempt`) makes a dry run and `--apply` end with a block that flags worktrees not named
+  `<repo>-wt-<lane>`, folders with a bare `wt-`, `kk-`, `tmp-` or `tmp_` prefix and main clones whose folder differs from their remote's name. Flag only:
+  nothing is renamed and the exit code does not change.
+- Tests on a real fixture for the live-lane and uncommitted-work keeps (`tests/tidy_hosts.rs`).
+
 ## 0.4.3
 
 - The admission guard names the LINE of a `[guard]` key or value that does not parse (`[guard] line 7: unknown field ...`), so a launcher that refuses
