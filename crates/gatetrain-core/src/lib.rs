@@ -1,4 +1,5 @@
 //! gatetrain core. No terminal and no argument parsing here (design 9.1).
+pub mod admission;
 pub mod advise;
 pub mod analysis;
 pub mod batch;

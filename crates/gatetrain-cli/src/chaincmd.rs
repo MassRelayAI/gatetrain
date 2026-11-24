@@ -90,6 +90,9 @@ pub struct ChainArgs {
     /// a shell line whose output is part of the toolchain fingerprint (repeatable; default: rustc -Vv, cargo -V, node -v, git --version); reuse only crosses runs with an equal fingerprint. Example: --toolchain-probe "rustc -V"
     #[arg(long = "toolchain-probe")]
     pub(crate) toolchain_probe: Vec<String>,
+    /// the admission guard (docs/admission.md): hold new steps while the host or a protected service is in trouble; a hold is never a red
+    #[command(flatten)]
+    pub(crate) guard: crate::guardcmd::GuardFlags,
     /// an environment variable whose value is part of the environment fingerprint (comma list; default: RUSTFLAGS, RUSTUP_TOOLCHAIN, CARGO_BUILD_TARGET, NODE_ENV, NODE_OPTIONS, CC, CXX, CI; the value is hashed, never printed)
     #[arg(long, value_delimiter = ',')]
     pub(crate) env_key: Vec<String>,
@@ -162,6 +165,10 @@ pub fn run(a: ChainArgs) -> ExitCode {
         (_, Some(db)) => expected_from(db, &plan),
         _ => None,
     };
+    if a.hosts.is_some() && a.guard.spec().enabled() {
+        eprintln!("chain: the admission guard (--guard-config, --min-free-disk, --probe, --max-*) guards a local run; with --hosts run `gatetrain guard wait` on each host");
+        return ExitCode::from(2);
+    }
     if let Some(hf) = a.hosts.clone() {
         match crate::mhcmd::workers_of(&hf, &a.workers) {
             Err(e) => {
@@ -189,10 +196,11 @@ pub fn run(a: ChainArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let guard_spec = a.guard.spec();
     let since = a.since.clone().map(|prev| gatetrain_core::since::SinceOpts { prev, max_age: a.since_max_age, full: a.full, db: a.db.clone() });
     let (db, run_id) = (a.db, a.run_id);
     let out_dir = a.out.clone();
-    let o = Opts { tiers: a.tier, run_id: run_id.clone(), toolchain, env_fp, since, par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores, retry_flakes: a.retry_flakes, quarantine_ref: a.quarantine_ref, stamp: true };
+    let o = Opts { tiers: a.tier, run_id: run_id.clone(), toolchain, env_fp, since, par: a.par, out: a.out, keep_going: a.keep_going, only: a.only, skip: a.skip, cache: a.cache, no_cache_for: a.no_cache_for, mode: a.mode, host: a.host, samples: if std::env::var_os("GATETRAIN_SAMPLED").is_some() { 0 } else { a.samples }, expected, cores, retry_flakes: a.retry_flakes, quarantine_ref: a.quarantine_ref, stamp: true, guard: Some(guard_spec) };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();
         let _ = writeln!(so, "{l}");

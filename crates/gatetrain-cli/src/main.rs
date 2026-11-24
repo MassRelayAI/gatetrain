@@ -9,6 +9,7 @@ use gatetrain_core::{analysis, config, declog, diagnose, history, ledger::Ledger
 mod advisecmd;
 mod agentcmd;
 mod chaincmd;
+mod guardcmd;
 mod probecmd;
 mod holdcmd;
 mod metricscmd;
@@ -110,6 +111,11 @@ enum Cmd {
     Tick(tickcmd::TickArgs),
     /// Run a steps file: fast then slow tier in parallel, full output per step, log-format lines on stdout, a stamp when green and clean
     Chain(Box<chaincmd::ChainArgs>),
+    /// The admission guard on its own (docs/admission.md): `wait` before a step starts, `monitor` lines, one `status`, the opt-in caps as `env`
+    Guard {
+        #[command(subcommand)]
+        cmd: guardcmd::GuardCmd,
+    },
     /// The worker side of a multi-host chain, started by the coordinator over ssh (docs/multi-host.md): hello, run, clean
     Agent {
         #[command(subcommand)]
@@ -597,6 +603,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
         Cmd::Chain(a) => Ok(chaincmd::run(*a)),
         Cmd::Agent { cmd } => Ok(agentcmd::run(cmd)),
+        Cmd::Guard { cmd } => Ok(guardcmd::run(cmd)),
         Cmd::Tick(a) => tickcmd::run(a),
         Cmd::Probe(a) => probecmd::run(a),
         Cmd::Advise(a) => advisecmd::run(a),

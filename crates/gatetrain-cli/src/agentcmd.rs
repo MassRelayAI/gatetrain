@@ -238,6 +238,7 @@ fn run_inner(a: &RunArgs) -> Result<AgentResult, String> {
         toolchain: String::new(),
         env_fp: String::new(),
         since: None,
+        guard: None,
     };
     let mut emit = |l: &str| {
         let mut so = std::io::stdout().lock();

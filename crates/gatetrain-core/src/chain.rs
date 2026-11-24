@@ -102,6 +102,8 @@ pub struct Opts {
     pub env_fp: String,
     /// incremental re-run (`--since`): None = every step runs as before
     pub since: Option<crate::since::SinceOpts>,
+    /// the admission guard (`crate::admission`): None = every ready step starts as before
+    pub guard: Option<crate::admission::Spec>,
 }
 
 /// `chain-<UTC time to the microsecond>-<commit, 7 chars>`: two runs of one commit never share an id unless they start in the same microsecond.
@@ -694,6 +696,14 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
     }
     // where the per-step `.full` files are, so `diagnose` can find them from the log alone (an unknown line to every reader)
     say(&format!("CHAIN_OUT {}", out_abs.to_string_lossy().trim_start_matches(r"\\?\")));
+    // the admission guard: checked before new steps start; a hold starts nothing new (a buffer, never a red)
+    let mut guard = match o.guard.as_ref().filter(|g| g.enabled()) {
+        Some(spec) => Some(crate::admission::Guard::new(spec.clone())?),
+        None => None,
+    };
+    if let Some(g) = &guard {
+        say(&g.describe());
+    }
     // incremental re-run: which steps carry the previous run's green result (docs/since.md); every other step runs
     let tiers = crate::since::tiers_of(plan, &proof);
     let plan_tiers = crate::since::tiers_of(plan, &(0..plan.steps.len()).collect::<Vec<_>>());
@@ -798,15 +808,21 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     }
                 }
             }
+            // the admission guard decides how many may run now: par (open), 0 (hold), 1 (held past max_hold_s)
+            let cap = match guard.as_mut().map(|g| g.check(Instant::now(), &mut say)) {
+                None | Some(crate::admission::Gate::Open) => par,
+                Some(crate::admission::Gate::Hold) => 0,
+                Some(crate::admission::Gate::Par1) => 1,
+            };
             // start what is ready, in file order: first the shards still queued for a slot, then new steps
             let mut hit = false;
             for &i in &mine {
-                if running >= par {
+                if running >= cap {
                     break;
                 }
                 if state[i] == St::Running {
                     if let Some(s) = sh[i].as_mut() {
-                        while running < par && s.next <= s.n {
+                        while running < cap && s.next <= s.n {
                             launch_shard(&plan.steps[i], i, s, &cwd, &o.out, &tx, &mut say);
                             running += 1;
                         }
@@ -922,7 +938,7 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                     let list: String = (1..=n).map(|k| format!("{}\n", part_file(&plan.steps[i], Part::Shard(k)))).collect();
                     let _ = std::fs::write(o.out.join(format!("{}.full", plan.steps[i].name)), format!("{n} shards, each in its own file:\n{list}"));
                     let mut s = Sh { next: 1, n, started: Instant::now(), shard_start: vec![None; n as usize], ended: vec![None; n as usize], red_noted: false, checking: false, pin: pin[i].clone() };
-                    while running < par && s.next <= s.n {
+                    while running < cap && s.next <= s.n {
                         launch_shard(&plan.steps[i], i, &mut s, &cwd, &o.out, &tx, &mut say);
                         running += 1;
                     }
@@ -936,20 +952,32 @@ pub fn run(plan: &Plan, digest: &str, o: &Opts, emit: &mut dyn FnMut(&str)) -> R
                 continue; // a cached step is green already: settle skips and start its dependents
             }
             if running == 0 {
+                // held with nothing running: wait for the host, then check again (a step still pending is ready: skips are settled)
+                if cap == 0 && mine.iter().any(|&i| state[i] == St::Pending) {
+                    std::thread::sleep(guard.as_ref().map_or(Duration::from_secs(1), |g| g.wait()));
+                    continue;
+                }
                 break;
             }
-            let wait = sink.as_ref().map_or(Duration::from_secs(3600 * 24 * 366), |s| s.every);
+            let mut wait = sink.as_ref().map_or(Duration::from_secs(3600 * 24 * 366), |s| s.every);
+            if let Some(g) = &guard {
+                wait = wait.min(g.wait());
+            }
             let d = loop {
                 match rx.recv_timeout(wait) {
-                    Ok(d) => break d,
+                    Ok(d) => break Some(d),
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         if let Some(s) = sink.as_mut() {
                             s.tick(state.iter().filter(|x| **x == St::Running).count());
+                        }
+                        if guard.is_some() {
+                            break None; // back to the top: the guard checks again (a hold may have ended; the monitor line may be due)
                         }
                     }
                     Err(e) => return Err(format!("chain: lost a worker: {e}")),
                 }
             };
+            let Some(d) = d else { continue };
             if let Some(s) = sink.as_mut() {
                 s.maybe(state.iter().filter(|x| **x == St::Running).count());
             }
