@@ -2,6 +2,11 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.4.3
+
+- The admission guard names the LINE of a `[guard]` key or value that does not parse (`[guard] line 7: unknown field ...`), so a launcher that refuses
+  to start on a broken config can say where to fix it. `max_hold_s` is at most 86400 (a day): `gatetrain guard wait` sits outside any step timeout.
+
 ## 0.4.2
 
 - The admission guard (docs/admission.md): `gatetrain chain --guard-config <hosts.toml>` (and `--min-free-disk PATH=GB`, `--probe URL`,
