@@ -645,6 +645,21 @@ Every `--apply` and `--auto` action appends one line to the tidy log (`log`, def
 - **A worktree removal never follows a link out of the worktree.** Before anything is removed the worktree's links are listed. A link whose target is inside the worktree (an npm workspace link, a relative symlink) goes with it. A link whose target is outside it (another checkout's `node_modules`, say) is unlinked first, as a link, by `unlink` on Linux and macOS or `rmdir` (directory junction) / `del` (file link) on Windows, and is never walked or deleted through. The removal is then a plain recursive remove of what is left, and afterwards every link target is checked to still exist: a missing one stops the run as a guard violation. A listing that cannot be trusted refuses the item. On Windows a junction is read from the reparse-point attribute and removed with `rmdir` on the junction itself, which removes only the junction.
 - **A `keep_lanes` entry that matches nothing** is a fact about the config, not about the host. `check` always shows it. `tidy` (with `--apply` or `--auto`) shows it the first time, remembers the set of such entries in `<log>.notified`, and does not show it again, nor count it as a crossed threshold, until the set changes. A dry run reads that file and never writes it. Disk and budget thresholds are never hidden.
 
+### The naming report
+
+Tidy never renames anything, but it can flag folders that break the naming convention. Configure roots to scan and folder names to exempt:
+
+```toml
+[tidy.naming]
+roots  = ["/srv/repos"]       # every direct child folder is checked (local hosts only)
+exempt = ["legacy-checkout"]  # folder names (case-insensitive) that are never flagged
+```
+
+A dry run and `--apply` end with a `naming report` block listing each folder that breaks a rule: (a) a git worktree not named
+`<repo>-wt-<lane>`, `<repo>` being the folder name of its main clone; (b) a folder starting with a bare `wt-`, `kk-`, `tmp-` or `tmp_` (git or not);
+(c) a main clone whose folder name differs from the last part of its remote url without `.git` (the `origin` remote, else the first one).
+It is a report only: the exit code is unchanged and nothing is renamed or removed.
+
 ### Protected paths
 
 `protect` is a list of paths or globs. The default is empty.

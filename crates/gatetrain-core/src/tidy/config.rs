@@ -84,6 +84,10 @@ pub struct TidyCfg {
     /// every probe of ONE item (a worktree, a target, a recycle-bin entry) shares this many seconds; an item that runs out is skipped
     /// and reported, never sized by guess (0 = no budget)
     pub item_budget_s: f64,
+    /// `[tidy.naming] roots`: folders scanned by the naming report (empty = no report)
+    pub naming_roots: Vec<String>,
+    /// `[tidy.naming] exempt`: folder names the naming report never flags
+    pub naming_exempt: Vec<String>,
 }
 
 impl Default for TidyCfg {
@@ -123,14 +127,16 @@ impl Default for TidyCfg {
             idle_walk_depth: 12.0,
             link_list_timeout_s: 300.0,
             item_budget_s: 600.0,
+            naming_roots: vec![],
+            naming_exempt: vec![],
         }
     }
 }
 
-const KNOWN: [&str; 34] = [
+const KNOWN: [&str; 35] = [
     "chain_checkout_max_age_days",
     "cache_days", "container_prefix", "evidence_dirs", "idle_walk_depth", "image_archive", "image_keep_patterns", "image_patterns", "item_budget_s", "keep_branches", "keep_lanes", "keep_paths", "link_canary",
-    "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "orphan_targets", "protect", "protect_containers", "remove_timeout_s", "root_checkout", "scratch_dir",
+    "link_canary_count", "link_list_timeout_s", "log", "main_branch", "main_checkout", "main_volatile_paths", "min_idle_min", "naming", "orphan_targets", "protect", "protect_containers", "remove_timeout_s", "root_checkout", "scratch_dir",
     "size_timeout_s", "target_roots", "targets", "trash_days", "trash_dir", "unattended", "worktree_min_idle_days", "worktree_prefix",
 ];
 
@@ -223,6 +229,20 @@ pub fn build_cfg(cfg: &Config, host: &Host) -> Result<TidyCfg, ConfigError> {
             "idle_walk_depth" => t.idle_walk_depth = number(k, v)?,
             "link_list_timeout_s" => t.link_list_timeout_s = number(k, v)?,
             "item_budget_s" => t.item_budget_s = number(k, v)?,
+            "naming" => {
+                let Value::Table(m) = v else { return err(format!("tidy.naming: must be a table with roots and exempt, got {}", repr(v))) };
+                let mut bad: Vec<&String> = m.keys().filter(|k| k.as_str() != "roots" && k.as_str() != "exempt").collect();
+                bad.sort();
+                if !bad.is_empty() {
+                    return err(format!("tidy.naming: unknown key(s) {}; allowed [\"exempt\", \"roots\"]", repr_list(&bad)));
+                }
+                if let Some(x) = m.get("roots") {
+                    t.naming_roots = str_list("naming.roots", x)?;
+                }
+                if let Some(x) = m.get("exempt") {
+                    t.naming_exempt = str_list("naming.exempt", x)?;
+                }
+            }
             "link_canary_count" => match v {
                 Value::Integer(i) => t.link_canary_count = Some(*i),
                 other => return err(format!("tidy.link_canary_count: must be an integer, got {}", repr(other))),

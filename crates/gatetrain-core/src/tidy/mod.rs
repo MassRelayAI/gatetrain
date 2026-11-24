@@ -6,6 +6,7 @@ pub mod cmd;
 pub mod close;
 pub mod config;
 pub mod inventory;
+pub mod naming;
 pub mod ops;
 pub mod report;
 

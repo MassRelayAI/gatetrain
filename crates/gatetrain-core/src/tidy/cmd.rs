@@ -207,6 +207,7 @@ pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<
         if !apply && !auto {
             let _ = once_per_config_change(&t, &mut inv, false);
             o.say(format_check(&inv));
+            naming_block(&mut o, h, &t);
             o.say(format!("dry run: {} action(s) in classes {}; add --apply to execute", plan.len(), classes.join(",")));
             if !inv.breaches.is_empty() {
                 rc = 1;
@@ -246,6 +247,7 @@ pub fn cmd_tidy(config_path: &str, host: Option<&str>, apply: bool, cls: Option<
         if let Some(b) = after.breaches.first() {
             o.say(format!("{}: THRESHOLD: {}", h.name, b));
         }
+        naming_block(&mut o, h, &t);
         if failed > 0 || !after.breaches.is_empty() {
             rc = 1;
         }
@@ -301,4 +303,16 @@ pub fn cmd_restore_image(config_path: &str, host: Option<&str>, tar: &str, mk: R
         Ok(c) => o.exit(1, format!("docker load failed (exit {}) for {tar}", c.rc.map_or("none".into(), |x| x.to_string()))),
         Err(_) => o.exit(1, "docker load could not run"),
     }
+}
+
+/// The naming report (flag only, never changes the exit code), for a local host with `[tidy.naming] roots`.
+fn naming_block(o: &mut CliOut, h: &Host, t: &super::config::TidyCfg) {
+    if t.naming_roots.is_empty() {
+        return;
+    }
+    if h.reach != "local" {
+        o.say(format!("naming report: skipped on {} (reach {}; it reads local folders)", h.name, h.reach));
+        return;
+    }
+    o.say(super::naming::report_block(t));
 }
