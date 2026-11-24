@@ -2,6 +2,15 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.4.2
+
+- The admission guard (docs/admission.md): `gatetrain chain --guard-config <hosts.toml>` (and `--min-free-disk PATH=GB`, `--probe URL`,
+  `--probe-max-ms`, `--probe-fails`, `--max-psi-mem`, `--max-psi-io`, `--max-psi-cpu`, `--max-load`, `--max-hold`) HOLDS new steps while a disk
+  is below its floor, a protected service is slow, 5xx or silent N probes in a row, or a set pressure/load threshold is passed; every reading is
+  a `GUARD_MONITOR` line. A hold is never a red; after `max_hold_s` the run goes on at par 1. The `[guard]` table of the hosts file is re-read
+  before every check (`GUARD_CONFIG changed: <diff>`). `gatetrain guard wait|monitor|status|env` for shell launchers; `[guard.caps]` holds
+  opt-in limits a launcher applies. Without a `[guard]` table or a flag nothing changes.
+
 ## 0.4.1
 
 - `gatetrain chain --tier <fast|slow>`: a complete run of a tier. It executes the closure of its steps (every step they need, from any tier, runs in the same run; those are listed as `ran_for_closure`), so each tier stamp stands alone. The stamp is `v2`, `partial`, reason `tier`, named `stamp-<sha>-<tiers>.json`, and names the tiers it covers; the pre-flight gate accepts a set of tier stamps that covers every tier on one commit and steps-file digest. A red run deletes the older green stamp of the same commit and tiers. Not with `--only`, `--skip`, `--hosts` or `--mode full` (docs/since.md).

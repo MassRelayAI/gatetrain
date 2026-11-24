@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "gatetrain-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "gatetrain-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "chrono",
  "gatetrain-core",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "gatetrain-testchild"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde_json",
 ]
