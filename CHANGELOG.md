@@ -2,6 +2,15 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.5.3
+
+Four ways past the archive's secret scan, closed (round 3 of the independent read).
+
+- Both scans (the staged diff and the unpushed commits) read with `--text --no-textconv --no-ext-diff`: a binary file, a UTF-16 file (NULs between the letters are ignored when matching), a `-diff` attribute, a textconv filter and an external diff driver can no longer hide or rewrite content.
+- The unpushed-commit scan also reads merge commits (`--diff-merges=first-parent`): content added while resolving a merge is scanned.
+- The secret FILE name rule is applied to every file in the unpushed commits too: a committed `stag.env` with unquoted values stops the run.
+- On a hit, the user's own staged state is restored exactly (the index tree is saved before staging and read back), instead of a blanket `git reset`.
+
 ## 0.5.2
 
 The archive's secret scan, widened (round 2 of the independent read of 0.5.0).
