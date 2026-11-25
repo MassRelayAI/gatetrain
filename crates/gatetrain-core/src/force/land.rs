@@ -82,6 +82,11 @@ fn out(rc: i32, text: String) -> LandOut {
     LandOut { rc, text, merged: None }
 }
 
+/// Plain path characters only: a name with a space, `$`, a quote, a backtick, `(`, `&`, `%` ... is not passed to a shell.
+fn unsafe_name(n: &str) -> bool {
+    n.is_empty() || !n.chars().all(|c| c.is_ascii_alphanumeric() || "_./@+=:,-".contains(c))
+}
+
 fn quote(f: &str) -> String {
     format!("\"{f}\"")
 }
@@ -156,6 +161,21 @@ pub fn land(e: &dyn Exec, cfg: &LandCfg, a: &LandArgs, l: Option<&mut Ledger>) -
             say(&mut text, format!("REFUSED: a SAFE change does not land without its proof\n{}", missing.join("\n")));
             return out(4, text);
         }
+    }
+    // a name that reaches a shell line is data, never syntax: a file or branch name with anything but plain path characters is refused when a
+    // check uses it (`{files}`, `{branch}`); the checks are the only gate a FAST change gets, so nothing is built from an odd name
+    let uses = |ph: &str| cfg.checks.iter().chain(gates.iter()).any(|c| c.contains(ph));
+    let mut odd: Vec<String> = vec![];
+    if uses("{files}") {
+        odd.extend(files.iter().filter(|f| unsafe_name(f)).cloned());
+    }
+    if uses("{branch}") && unsafe_name(&a.branch) {
+        odd.push(a.branch.clone());
+    }
+    if !odd.is_empty() {
+        say(&mut text, format!("REFUSED: unsafe name(s) would reach a shell line: {}
+rename them, or run the checks by hand and land with checks that do not use {{files}} or {{branch}}", odd.join(", ")));
+        return out(4, text);
     }
     // the scratch worktree
     let base = cfg.scratch_dir.clone().unwrap_or_else(|| {

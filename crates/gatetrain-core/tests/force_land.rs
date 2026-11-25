@@ -243,3 +243,49 @@ fn a_migration_renamed_into_docs_is_still_safe() {
     assert!(o.text.contains("mode: SAFE"), "{}", o.text);
     assert!(o.text.contains("apps/db/migrations/0001.sql") && o.text.contains("docs/0001.sql"), "both sides of the rename are classified:\n{}", o.text);
 }
+
+/// Records every shell line instead of running it.
+struct NoShell(std::cell::RefCell<Vec<String>>);
+impl Exec for NoShell {
+    fn run(&self, argv: &[String]) -> Out {
+        LocalExec.run(argv)
+    }
+    fn sh(&self, _cwd: &str, cmd: &str) -> Out {
+        self.0.borrow_mut().push(cmd.to_string());
+        Out::new(0, "")
+    }
+}
+
+#[test]
+fn a_file_name_with_shell_syntax_never_reaches_a_shell_line() {
+    // B4: `docs/x$(cmd).md` was put inside plain double quotes of the check line
+    let r = repo();
+    branch(&r, "feat", &["docs/x$(cmd).md"]);
+    let before = origin_main(&r);
+    let mut c = lcfg();
+    c.checks = vec!["lint {files}".into()];
+    let e = NoShell(Default::default());
+    let o = land(&e, &c, &args(&r, "feat", false), None);
+    assert_eq!(o.rc, 4, "{}", o.text);
+    assert!(o.text.contains("unsafe") && o.text.contains("docs/x$(cmd).md"), "{}", o.text);
+    assert!(e.0.borrow().is_empty(), "a check line was built from the name: {:?}", e.0.borrow());
+    assert_eq!(origin_main(&r), before);
+    assert_eq!(sh(&r.work, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
+}
+
+#[test]
+fn a_branch_name_with_shell_syntax_is_refused_when_a_check_uses_it() {
+    let r = repo();
+    branch(&r, "feat$(x)", &["docs/a.md"]);
+    let mut c = lcfg();
+    c.checks = vec!["lint {branch}".into()];
+    let e = NoShell(Default::default());
+    let o = land(&e, &c, &args(&r, "feat$(x)", false), None);
+    assert_eq!(o.rc, 4, "{}", o.text);
+    assert!(e.0.borrow().is_empty(), "{:?}", e.0.borrow());
+    // and a check that uses neither placeholder is not affected by an odd name
+    let mut c = lcfg();
+    c.checks = vec!["true".into()];
+    let o = land(&e, &c, &args(&r, "feat$(x)", false), None);
+    assert_eq!(o.rc, 0, "{}", o.text);
+}
