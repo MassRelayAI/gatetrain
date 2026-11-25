@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 fn wt(name: &str, dirty: &[&str]) -> WtState {
-    WtState { path: format!("F:/repos/proj-wt-{name}"), name: format!("proj-wt-{name}"), branch: Some(name.into()), head: format!("head-{name}"), locked: false, dirty: dirty.iter().map(|s| s.to_string()).collect(), ignored: vec![], is_main: false }
+    WtState { path: format!("F:/repos/proj-wt-{name}"), name: format!("proj-wt-{name}"), branch: Some(name.into()), head: format!("head-{name}"), locked: false, dirty: dirty.iter().map(|s| s.to_string()).collect(), ignored: vec![], ignored_skipped: vec![], is_main: false }
 }
 
 #[derive(Default)]
@@ -88,7 +88,7 @@ impl ForceHost for Stub {
 }
 
 fn main_wt() -> WtState {
-    WtState { path: "F:/repos/proj".into(), name: "proj".into(), branch: Some("main".into()), head: "head-main".into(), locked: false, dirty: vec![], ignored: vec![], is_main: true }
+    WtState { path: "F:/repos/proj".into(), name: "proj".into(), branch: Some("main".into()), head: "head-main".into(), locked: false, dirty: vec![], ignored: vec![], ignored_skipped: vec![], is_main: true }
 }
 
 fn base() -> Stub {
@@ -206,4 +206,18 @@ fn cargo_clean_runs_with_the_rustc_wrapper_unset_when_forced() {
     t.cargo_unset_wrapper = true;
     let forced = cargo_clean_argv(&t, None, "F:/build/t1");
     assert_eq!(forced, ["cargo", "clean", "--config", "build.rustc-wrapper=''", "--target-dir", "F:/build/t1"]);
+}
+
+#[test]
+fn skipped_build_output_is_printed_in_the_plan_never_silent() {
+    use gatetrain_core::force::tidyforce::parse_ignored_split;
+    let out = "!! node_modules/\0!! dist/x.js\0!! .env.local\0!! docs/notes.md\0?? other\0";
+    let (blocking, skipped) = parse_ignored_split(out);
+    assert_eq!(blocking, vec![".env.local".to_string(), "docs/notes.md".to_string()]);
+    assert_eq!(skipped, vec!["node_modules".to_string(), "dist/x.js".to_string()]);
+    let mut w = wt("a", &[]);
+    w.ignored_skipped = skipped;
+    let h = Stub { wts: vec![main_wt(), w], ..Default::default() };
+    let o = run(&h, None, false, DATE);
+    assert!(o.text.contains("build output") && o.text.contains("node_modules") && o.text.contains("not archived"), "{}", o.text);
 }

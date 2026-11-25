@@ -9,6 +9,7 @@ pub mod cfg;
 pub mod exec;
 pub mod land;
 pub mod mainwatch;
+pub mod secrets;
 pub mod measure;
 pub mod tidyforce;
 

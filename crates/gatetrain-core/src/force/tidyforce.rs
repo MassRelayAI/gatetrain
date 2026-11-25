@@ -7,6 +7,7 @@
 //! The orchestration here talks to a [`ForceHost`]; [`OpsHost`] is the real one, over the tidy machinery that already owns the link-safe
 //! removal, the main guard and the protect list. Tests hand it a stub that records.
 use crate::config::Host;
+use crate::force::secrets::{describe, scan_diff, secret_name};
 use crate::runner::Runner;
 use crate::tidy::apply::do_item;
 use crate::tidy::config::TidyCfg;
@@ -27,6 +28,8 @@ pub struct WtState {
     pub dirty: Vec<String>,
     /// ignored files that are not build output (`.env.local`, scratch notes): removal would delete them unarchived
     pub ignored: Vec<String>,
+    /// ignored paths skipped because they sit in a build-output folder (node_modules, target, dist ...); printed in the plan, never silent
+    pub ignored_skipped: Vec<String>,
     pub is_main: bool,
 }
 
@@ -48,6 +51,11 @@ pub trait ForceHost {
     /// Is `head` on some remote branch? An error is "cannot be proven".
     fn remote_contains(&self, head: &str) -> Result<bool, String>;
     /// Commit exactly the uncommitted paths of the worktree, by name; returns the new tip. Err when anything stays uncommitted.
+    /// Scan everything that is about to be pushed (the unpushed commits of the worktree, the archive commit included) for secrets. Err names file:line and the
+    /// kind, never the value.
+    fn scan_archive(&self, _wt: &WtState, _head: &str) -> Result<(), String> {
+        Ok(())
+    }
     fn commit_paths(&self, wt: &WtState, msg: &str) -> Result<String, String>;
     /// Push `head` as `refname` on the remote and read it back; Err unless the remote now holds `head`.
     fn push_archive(&self, wt: &WtState, head: &str, refname: &str) -> Result<(), String>;
@@ -130,7 +138,8 @@ pub fn run_with(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str
                 };
                 let n = if w.dirty.is_empty() { String::new() } else { format!("{} uncommitted; ", w.dirty.len()) };
                 let blocked = if w.ignored.is_empty() || include_ignored { String::new() } else { format!("BLOCKED: {} ignored file(s) would be deleted unarchived ({}); ", w.ignored.len(), w.ignored.iter().take(3).cloned().collect::<Vec<_>>().join(", ")) };
-                say!("  {:<34} {:<9} {blocked}{n}{steps}", w.name, "remove");
+                let skipped = if w.ignored_skipped.is_empty() { String::new() } else { format!("; ignored build output not archived: {}", w.ignored_skipped.iter().take(4).cloned().collect::<Vec<_>>().join(", ")) };
+                say!("  {:<34} {:<9} {blocked}{n}{steps}{skipped}", w.name, "remove");
                 todo.push(w);
             }
         }
@@ -186,6 +195,11 @@ pub fn run_with(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str
             },
         };
         if !on {
+            // everything about to be pushed is scanned first: the unpushed commits of the branch, the archive commit included
+            if let Err(e) = h.scan_archive(w, &head) {
+                say!("STOP {}: {e}; nothing was pushed or removed and nothing after it was touched", w.name);
+                return ForceOut { rc: 6, text: t };
+            }
             let r = format!("archive/{}", w.name);
             if let Err(e) = h.push_archive(w, &head, &r) {
                 say!("STOP {}: the tip could not be archived to the remote ({e}); the worktree is intact and nothing after it was touched", w.name);
@@ -233,46 +247,27 @@ const BUILD_DIRS: [&str; 16] = ["node_modules", "target", "dist", "build", "out"
 
 /// The `!! path` entries of `git status --ignored` that are not build output and not stackdump files.
 pub fn parse_ignored(out: &str) -> Vec<String> {
-    let mut v = vec![];
+    parse_ignored_split(out).0
+}
+
+/// (the ignored files that block the run, the ignored build output that is skipped and printed).
+pub fn parse_ignored_split(out: &str) -> (Vec<String>, Vec<String>) {
+    let (mut block, mut skipped) = (vec![], vec![]);
     let pieces: Vec<&str> = if out.contains('\0') { out.split('\0').collect() } else { out.lines().collect() };
     for e in pieces {
         let Some(p) = e.strip_prefix("!! ") else { continue };
         let p = unquote(p);
         let p = p.trim_end_matches('/').to_string();
-        if p.ends_with(".stackdump") || p.split('/').any(|c| BUILD_DIRS.contains(&c)) {
+        if p.ends_with(".stackdump") {
             continue;
         }
-        v.push(p);
+        if p.split('/').any(|c| BUILD_DIRS.contains(&c)) {
+            skipped.push(p);
+        } else {
+            block.push(p);
+        }
     }
-    v
-}
-
-fn secret_name(path: &str) -> bool {
-    let b = path.rsplit('/').next().unwrap_or("").to_lowercase();
-    let example = [".example", ".sample", ".template", ".dist"].iter().any(|x| b.ends_with(x));
-    (b == ".env" || b.starts_with(".env.")) && !example
-        || [".pem", ".key", ".pfx", ".p12", ".secret", ".secrets", ".kdbx"].iter().any(|x| b.ends_with(x))
-        || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials"].iter().any(|x| b.starts_with(x))
-        || b.starts_with("secrets.")
-        || b == "secrets"
-}
-
-fn secret_content(text: &str) -> Option<&'static str> {
-    use std::sync::OnceLock;
-    static RE: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        [
-            (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "a private key block"),
-            (r"AKIA[0-9A-Z]{16}", "an AWS access key id"),
-            (r"gh[pousr]_[A-Za-z0-9]{30,}", "a GitHub token"),
-            (r"sk-ant-[A-Za-z0-9_-]{20,}", "an Anthropic key"),
-            (r"xox[baprs]-[A-Za-z0-9-]{10,}", "a Slack token"),
-        ]
-        .iter()
-        .map(|(p, n)| (Regex::new(p).unwrap(), *n))
-        .collect()
-    });
-    re.iter().find(|(r, _)| r.is_match(text)).map(|(_, n)| *n)
+    (block, skipped)
 }
 
 /// `git status --porcelain` paths; stackdump files are not work.
@@ -372,17 +367,17 @@ impl ForceHost for OpsHost<'_> {
                 }
                 parse_status(&c.out)
             };
-            let ignored = if w.prunable || is_main {
-                vec![]
+            let (ignored, ignored_skipped) = if w.prunable || is_main {
+                (vec![], vec![])
             } else {
                 let c = ops.git(&w.path, &["status", "--porcelain", "-z", "--ignored=matching", "--untracked-files=normal"]).map_err(fs)?;
                 if !c.ok() {
                     return Err(format!("cannot read the ignored files of {}", w.path));
                 }
-                parse_ignored(&c.out)
+                parse_ignored_split(&c.out)
             };
             let name = norm(&w.path).rsplit('/').next().unwrap_or("").to_string();
-            v.push(WtState { path: w.path.clone(), name, branch: w.branch.clone(), head: w.head.clone().unwrap_or_default(), locked: w.locked, dirty, ignored, is_main });
+            v.push(WtState { path: w.path.clone(), name, branch: w.branch.clone(), head: w.head.clone().unwrap_or_default(), locked: w.locked, dirty, ignored, ignored_skipped, is_main });
         }
         Ok(v)
     }
@@ -445,24 +440,14 @@ impl ForceHost for OpsHost<'_> {
                 return Err(format!("{p} is a link (or cannot be probed); it cannot be archived by name. Ignore or remove the link, then run again"));
             }
         }
-        // the archive goes to a remote: an untracked file that looks like a secret is never committed (the secret scan of the repo is an editor hook, not a git hook)
+        // the archive goes to a remote: a file with a secret's name is never committed or pushed, whatever is inside
+        if let Some(p) = paths.iter().find(|p| secret_name(p.trim_end_matches('/'))) {
+            return Err(format!("secret scan: {p} has the name of a secret file; it is not committed or pushed. Move it out of the worktree, or delete it, then run again"));
+        }
+        // git reports an untracked folder as one entry: its files are named too
         let un = ops.git(&wt.path, &["ls-files", "--others", "--exclude-standard", "-z"]).map_err(fs)?;
-        for f in un.out.split('\0').filter(|f| !f.is_empty() && !f.ends_with(".stackdump")) {
-            if secret_name(f) {
-                return Err(format!("{f} looks like a secret (by its name); it is not committed or pushed. Move it out of the worktree, or delete it, then run again"));
-            }
-            if self.runner.is_local() {
-                let full = ops.join(&wt.path, f);
-                if let Ok(m) = std::fs::symlink_metadata(&full) {
-                    if m.is_file() && m.len() <= 2_000_000 {
-                        if let Ok(b) = std::fs::read(&full) {
-                            if let Some(what) = secret_content(&String::from_utf8_lossy(&b)) {
-                                return Err(format!("{f} looks like a secret (it holds {what}); it is not committed or pushed. Move it out of the worktree, or delete it, then run again"));
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(p) = un.out.split('\0').find(|f| !f.is_empty() && secret_name(f)) {
+            return Err(format!("secret scan: {p} has the name of a secret file; it is not committed or pushed. Move it out of the worktree, or delete it, then run again"));
         }
         for chunk in paths.chunks(25) {
             let mut a: Vec<&str> = vec!["add", "--"];
@@ -471,6 +456,16 @@ impl ForceHost for OpsHost<'_> {
             if !r.ok() {
                 return Err(format!("git add failed: {}", r.out.trim()));
             }
+        }
+        // the content of what is staged, read from git (so an ssh host is scanned too): untracked and modified files alike; on a hit the index is put back
+        let staged = ops.git(&wt.path, &["diff", "--cached", "-U0", "--no-color", "--no-renames"]).map_err(fs)?;
+        let hits = scan_diff(&staged.out);
+        if !staged.ok() || !hits.is_empty() {
+            let _ = ops.git(&wt.path, &["reset", "-q"]);
+            if !staged.ok() {
+                return Err("secret scan: the staged diff could not be read".into());
+            }
+            return Err(format!("secret scan: {}; nothing was committed or pushed (value not shown)", describe(&hits)));
         }
         let r = ops.git(&wt.path, &["commit", "-q", "-m", msg]).map_err(fs)?;
         if !r.ok() {
@@ -483,6 +478,21 @@ impl ForceHost for OpsHost<'_> {
         }
         let h = ops.git(&wt.path, &["rev-parse", "HEAD"]).map_err(fs)?;
         Ok(h.out.trim().to_string())
+    }
+
+    fn scan_archive(&self, wt: &WtState, head: &str) -> Result<(), String> {
+        let ops = self.ops();
+        let remotes = format!("--remotes={}", self.remote);
+        let log = ops.git(&wt.path, &["log", "-p", "-U0", "--no-color", "--no-renames", "--format=%H", head, "--not", &remotes]).map_err(fs)?;
+        if !log.ok() {
+            return Err("secret scan: the unpushed commits could not be read".into());
+        }
+        let hits = scan_diff(&log.out);
+        if hits.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("secret scan: {} in the commits that would be pushed (value not shown)", describe(&hits)))
+        }
     }
 
     fn push_archive(&self, wt: &WtState, head: &str, refname: &str) -> Result<(), String> {

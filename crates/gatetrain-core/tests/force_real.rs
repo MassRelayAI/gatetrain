@@ -239,3 +239,76 @@ fn a_junction_a_check_made_in_the_scratch_worktree_is_unlinked_never_followed() 
     assert_eq!(f.main_state(), before);
     assert_eq!(sh(&f.r.origin, &["rev-parse", "main"]), o.merged.unwrap());
 }
+
+// ---- R2-1: the archive's secret scan covers names, content, modified tracked files and unpushed commits ----
+
+fn j(parts: &[&str]) -> String {
+    parts.concat()
+}
+
+/// A synthetic AWS-shaped key, assembled here so the source holds no credential.
+fn fake_key() -> String {
+    j(&["AK", "IA", "ABCDEFGHIJKLMNOP"])
+}
+
+fn nothing_archived(f: &Fx, w: &Path, o: &tidyforce::ForceOut, value: &str) {
+    assert_eq!(o.rc, 6, "{}", o.text);
+    assert!(!o.text.contains(value), "the value was printed:\n{}", o.text);
+    assert!(!f.origin_has("refs/heads/archive/wt-a"), "something was pushed:\n{}", o.text);
+    assert!(f.r.origin.join("refs/heads").exists() && !sh(&f.r.origin, &["for-each-ref", "--format=%(refname)", "refs/heads/archive/"]).contains("wt-a"));
+    assert!(w.exists(), "the worktree must stay");
+}
+
+#[test]
+fn stag_env_and_prod_env_are_secret_files_by_name() {
+    let f = fx();
+    let w = f.add_wt("a");
+    write(&w, "stag.env", "X=1\n");
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, "X=1");
+    assert!(o.text.contains("secret") && o.text.contains("stag.env"), "{}", o.text);
+    std::fs::remove_file(w.join("stag.env")).unwrap();
+    write(&w, "deploy/prod.env", "X=1\n");
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, "X=1");
+    assert!(o.text.contains("prod.env"), "{}", o.text);
+}
+
+#[test]
+fn a_secret_pasted_into_a_modified_tracked_file_stops_the_run_and_leaves_nothing_staged() {
+    let f = fx();
+    let w = f.add_wt("a");
+    let key = fake_key();
+    std::fs::write(w.join("README.md"), format!("hello\nkey = {key}\n")).unwrap();
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, &key);
+    assert!(o.text.contains("README.md:2") && o.text.contains("aws_key"), "{}", o.text);
+    assert_eq!(sh(&w, &["diff", "--cached", "--name-only"]), "", "the index must be left as it was");
+    assert!(sh(&w, &["status", "--porcelain"]).contains("README.md"));
+    assert_eq!(sh(&w, &["rev-parse", "HEAD"]), sh(&f.r.work, &["rev-parse", "main"]), "no archive commit was made");
+}
+
+#[test]
+fn a_secret_in_an_unpushed_commit_already_on_the_branch_stops_the_run() {
+    let f = fx();
+    let w = f.add_wt("a");
+    let key = fake_key();
+    write(&w, "notes.txt", &format!("old note {key}\n"));
+    sh(&w, &["add", "notes.txt"]);
+    sh(&w, &["commit", "-m", "a note"]);
+    // the tree is clean now: only the history holds it
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, &key);
+    assert!(o.text.contains("notes.txt:1") && o.text.contains("aws_key"), "{}", o.text);
+}
+
+#[test]
+fn clean_changes_are_still_archived() {
+    let f = fx();
+    let w = f.add_wt("a");
+    std::fs::write(w.join("README.md"), "hello\nplain words\n").unwrap();
+    write(&w, "new.txt", "nothing secret\n");
+    let o = apply(&f);
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert!(f.origin_has("refs/heads/archive/wt-a") && !w.exists());
+}
