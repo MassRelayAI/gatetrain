@@ -4,6 +4,7 @@ use clap::Args;
 use gatetrain_core::config::{self, host_os, Config, Host};
 use gatetrain_core::force::cfg::{self, ForceCfg};
 use gatetrain_core::force::exec::{LocalExec, RunnerExec};
+use gatetrain_core::force::land::{self, LandArgs};
 use gatetrain_core::force::measure::{self, Measure};
 use gatetrain_core::force::tidyforce::{self, OpsHost};
 use gatetrain_core::ledger::Ledger;
@@ -136,6 +137,94 @@ pub fn tidy_force(config_path: &str, host: Option<&str>, keep: Option<&str>, app
     };
     match run() {
         Ok(rc) => ExitCode::from(rc as u8),
+        Err(e) => {
+            eprintln!("gatetrain: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- land, verdict
+
+#[derive(Args)]
+pub struct LandCmdArgs {
+    /// the branch to land (local, or on the remote)
+    branch: String,
+    /// the repository (default: the current folder)
+    #[arg(long, default_value = ".")]
+    repo: String,
+    #[arg(long, default_value = "hosts.toml")]
+    config: String,
+    /// the remote's main branch (default: [land] main, else main)
+    #[arg(long = "main")]
+    main_branch: Option<String>,
+    /// the remote (default: [land] remote, else origin)
+    #[arg(long)]
+    remote: Option<String>,
+    /// the ledger that records the landing and holds the verdicts
+    #[arg(long, default_value = "gatetrain.db")]
+    db: String,
+    /// print the mode and the matched rule per file, change nothing
+    #[arg(long)]
+    plan: bool,
+    /// who lands it (default: $GATETRAIN_WHO, $USERNAME, $USER)
+    #[arg(long)]
+    by: Option<String>,
+}
+
+pub fn land_cmd(a: LandCmdArgs) -> ExitCode {
+    let run = || -> Result<i32, String> {
+        let mut fc = force_cfg(&a.config)?;
+        if let Some(m) = &a.main_branch {
+            fc.land.main = m.clone();
+        }
+        if let Some(r) = &a.remote {
+            fc.land.remote = r.clone();
+        }
+        let mut l = if a.plan { ledger_ro(&a.db) } else { Some(ledger_rw(&a.db)?) };
+        let args = LandArgs { repo: a.repo.clone(), branch: a.branch.clone(), plan: a.plan, who: a.by.clone().unwrap_or_else(who) };
+        let o = land::land(&LocalExec, &fc.land, &args, l.as_mut());
+        print!("{}", o.text);
+        Ok(o.rc)
+    };
+    match run() {
+        Ok(rc) => ExitCode::from(rc as u8),
+        Err(e) => {
+            eprintln!("gatetrain: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[derive(Args)]
+pub struct VerdictArgs {
+    /// the commit the independent read covered (the branch tip)
+    sha: String,
+    /// who read it
+    #[arg(long)]
+    by: String,
+    /// the read found nothing blocking
+    #[arg(long, conflicts_with = "fail")]
+    pass: bool,
+    /// the read found a blocker
+    #[arg(long)]
+    fail: bool,
+    #[arg(long, default_value = "")]
+    note: String,
+    #[arg(long, default_value = "gatetrain.db")]
+    db: String,
+}
+
+pub fn verdict_cmd(a: VerdictArgs) -> ExitCode {
+    if a.pass == a.fail {
+        eprintln!("gatetrain: say --pass or --fail");
+        return ExitCode::from(2);
+    }
+    match ledger_rw(&a.db).and_then(|mut l| land::record_verdict(&mut l, &a.sha, &a.by, a.pass, &a.note).map_err(|e| e.to_string())) {
+        Ok(()) => {
+            println!("verdict recorded: {} {} by {}", a.sha, if a.pass { "pass" } else { "fail" }, a.by);
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("gatetrain: {e}");
             ExitCode::from(2)

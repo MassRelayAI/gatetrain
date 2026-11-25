@@ -6,6 +6,7 @@
 //! `[measure]` of hosts.toml; the older loader ignores top-level tables it does not know, so a file stays valid for both.
 pub mod cfg;
 pub mod exec;
+pub mod land;
 pub mod measure;
 pub mod tidyforce;
 
