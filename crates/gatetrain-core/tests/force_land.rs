@@ -224,3 +224,22 @@ fn a_rejected_push_is_fetched_re_merged_and_retried_without_force() {
     let _ = NewEntry::default();
     let _ = declog::GENESIS;
 }
+
+#[test]
+fn a_migration_renamed_into_docs_is_still_safe() {
+    // B3: `git diff --name-only` prints only the new name of a rename, and docs/** is FAST
+    let r = repo();
+    write(&r.work, "apps/db/migrations/0001.sql", "create table t(x int);\n");
+    sh(&r.work, &["add", "."]);
+    sh(&r.work, &["commit", "-m", "add a migration"]);
+    sh(&r.work, &["push", "origin", "main"]);
+    sh(&r.work, &["checkout", "-q", "-b", "mv", "main"]);
+    sh(&r.work, &["mv", "apps/db/migrations/0001.sql", "docs-0001.sql"]);
+    std::fs::create_dir_all(r.work.join("docs")).unwrap();
+    sh(&r.work, &["mv", "docs-0001.sql", "docs/0001.sql"]);
+    sh(&r.work, &["commit", "-am", "move it out of the migrations folder"]);
+    sh(&r.work, &["checkout", "-q", "main"]);
+    let o = land(&LocalExec, &lcfg(), &args(&r, "mv", true), None);
+    assert!(o.text.contains("mode: SAFE"), "{}", o.text);
+    assert!(o.text.contains("apps/db/migrations/0001.sql") && o.text.contains("docs/0001.sql"), "both sides of the rename are classified:\n{}", o.text);
+}

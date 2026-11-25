@@ -117,7 +117,7 @@ pub fn land(e: &dyn Exec, cfg: &LandCfg, a: &LandArgs, l: Option<&mut Ledger>) -
     if git(e, &a.repo, &["merge-base", "--is-ancestor", &tip, &mainref]).ok() {
         return out(0, format!("{} ({tip}) is already on {remote}/{}; nothing to land", a.branch, cfg.main));
     }
-    let d = git(e, &a.repo, &["diff", "--name-only", &format!("{mainref}...{tip}")]);
+    let d = git(e, &a.repo, &["diff", "--name-only", "--no-renames", &format!("{mainref}...{tip}")]);
     if !d.ok() {
         return out(2, format!("cannot list the changed files: {}", d.text().trim()));
     }
