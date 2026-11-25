@@ -25,6 +25,8 @@ pub struct WtState {
     pub locked: bool,
     /// the uncommitted paths (stackdump files excluded), as git names them
     pub dirty: Vec<String>,
+    /// ignored files that are not build output (`.env.local`, scratch notes): removal would delete them unarchived
+    pub ignored: Vec<String>,
     pub is_main: bool,
 }
 
@@ -91,6 +93,11 @@ fn mb(b: Option<i64>) -> String {
 
 /// Plan, and with `apply` execute. `date` (YYYY-MM-DD) goes into the wip commit message.
 pub fn run(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str) -> ForceOut {
+    run_with(h, keep, apply, date, false)
+}
+
+/// [`run`], with `include_ignored` accepting that ignored files are deleted with the worktree (STUB: not read yet).
+pub fn run_with(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str, _include_ignored: bool) -> ForceOut {
     let mut t = String::new();
     macro_rules! say {
         ($($a:tt)*) => {{ t.push_str(&format!($($a)*)); t.push('\n'); }};
@@ -268,7 +275,7 @@ impl<'a> OpsHost<'a> {
 impl ForceHost for OpsHost<'_> {
     fn fetch(&self) -> Result<(), String> {
         let m = self.main()?;
-        let c = self.ops().git(&m, &["fetch", "-q", &self.remote]).map_err(fs)?;
+        let c = self.ops().git(&m, &["fetch", "-q", "--prune", &self.remote]).map_err(fs)?;
         if c.ok() {
             Ok(())
         } else {
@@ -295,7 +302,7 @@ impl ForceHost for OpsHost<'_> {
                 parse_status(&c.out)
             };
             let name = norm(&w.path).rsplit('/').next().unwrap_or("").to_string();
-            v.push(WtState { path: w.path.clone(), name, branch: w.branch.clone(), head: w.head.clone().unwrap_or_default(), locked: w.locked, dirty, is_main });
+            v.push(WtState { path: w.path.clone(), name, branch: w.branch.clone(), head: w.head.clone().unwrap_or_default(), locked: w.locked, dirty, ignored: vec![], is_main });
         }
         Ok(v)
     }
@@ -321,13 +328,24 @@ impl ForceHost for OpsHost<'_> {
     }
 
     fn remote_contains(&self, head: &str) -> Result<bool, String> {
+        // the live remote is the proof, not the remote-tracking refs (a branch deleted there survives a plain fetch): every branch tip the remote
+        // lists now is compared with `head`; a tip whose object is not here cannot be an ancestor, which only means a push, never a loss
         let m = self.main()?;
-        let c = self.ops().git(&m, &["branch", "-r", "--contains", head]).map_err(fs)?;
-        if !c.ok() {
-            return Err(format!("git branch -r --contains {head} failed"));
+        let ops = self.ops();
+        let l = ops.git(&m, &["ls-remote", "--heads", &self.remote]).map_err(fs)?;
+        if !l.ok() {
+            return Err(format!("git ls-remote {} failed: {}", self.remote, l.out.trim()));
         }
-        let pre = format!("{}/", self.remote);
-        Ok(c.out.lines().any(|l| l.trim().starts_with(&pre)))
+        for line in l.out.lines() {
+            let sha = line.split_whitespace().next().unwrap_or("");
+            if sha.len() < 40 {
+                continue;
+            }
+            if sha == head || ops.git(&m, &["merge-base", "--is-ancestor", head, sha]).map_err(fs)?.ok() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn commit_paths(&self, wt: &WtState, msg: &str) -> Result<String, String> {
@@ -417,6 +435,20 @@ impl ForceHost for OpsHost<'_> {
             return Err(format!("{p} is held by a running process (or that could not be told)"));
         }
         let before = ops.snapshot_main().map_err(fs)?;
+        if wt.branch.is_none() {
+            // no branch holds a detached commit: once the folder goes, only a tag keeps it from gc
+            let h = ops.git(p, &["rev-parse", "HEAD"]).map_err(fs)?.out.trim().to_string();
+            if h.len() < 40 {
+                return Err(format!("cannot read HEAD of {p}"));
+            }
+            let tag = format!("archive/detached-{}", &h[..12]);
+            if !ops.git(&m, &["tag", &tag, &h]).map_err(fs)?.ok() {
+                let have = ops.git(&m, &["rev-parse", &format!("refs/tags/{tag}^{{commit}}")]).map_err(fs)?;
+                if have.out.trim() != h {
+                    return Err(format!("could not create the archive tag {tag} for {h}; the worktree is kept"));
+                }
+            }
+        }
         let (status, note) = ops.remove_dir_with(p, None).map_err(fs)?;
         if status != "ok" {
             return Err(format!("{status}: {note}"));

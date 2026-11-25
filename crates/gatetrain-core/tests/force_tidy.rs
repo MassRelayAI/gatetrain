@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 fn wt(name: &str, dirty: &[&str]) -> WtState {
-    WtState { path: format!("F:/repos/proj-wt-{name}"), name: format!("proj-wt-{name}"), branch: Some(name.into()), head: format!("head-{name}"), locked: false, dirty: dirty.iter().map(|s| s.to_string()).collect(), is_main: false }
+    WtState { path: format!("F:/repos/proj-wt-{name}"), name: format!("proj-wt-{name}"), branch: Some(name.into()), head: format!("head-{name}"), locked: false, dirty: dirty.iter().map(|s| s.to_string()).collect(), ignored: vec![], is_main: false }
 }
 
 #[derive(Default)]
@@ -88,7 +88,7 @@ impl ForceHost for Stub {
 }
 
 fn main_wt() -> WtState {
-    WtState { path: "F:/repos/proj".into(), name: "proj".into(), branch: Some("main".into()), head: "head-main".into(), locked: false, dirty: vec![], is_main: true }
+    WtState { path: "F:/repos/proj".into(), name: "proj".into(), branch: Some("main".into()), head: "head-main".into(), locked: false, dirty: vec![], ignored: vec![], is_main: true }
 }
 
 fn base() -> Stub {
