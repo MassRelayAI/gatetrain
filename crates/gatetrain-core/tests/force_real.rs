@@ -184,6 +184,39 @@ fn a_stale_remote_tracking_ref_is_not_proof_that_the_remote_holds_the_tip() {
 }
 
 #[test]
+fn ignored_files_are_listed_and_stop_the_run_unless_accepted() {
+    let f = fx();
+    let w = f.add_wt("a");
+    std::fs::OpenOptions::new().append(true).open(f.r.work.join(".git/info/exclude")).and_then(|mut x| std::io::Write::write_all(&mut x, b"*.local\n")).unwrap();
+    write(&w, ".env.local", "TOKEN=abc\n");
+    let o = apply(&f);
+    assert_eq!(o.rc, 6, "{}", o.text);
+    assert!(o.text.contains("ignored") && o.text.contains(".env.local") && o.text.contains("--include-ignored"), "{}", o.text);
+    assert!(w.join(".env.local").exists());
+    let o = tidyforce::run_with(&f.host(), None, true, DATE, true);
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert!(!w.exists());
+}
+
+#[test]
+fn an_untracked_file_that_looks_like_a_secret_is_never_pushed() {
+    let f = fx();
+    let w = f.add_wt("a");
+    write(&w, ".env.production", "X=1\n");
+    let o = apply(&f);
+    assert_eq!(o.rc, 6, "{}", o.text);
+    assert!(o.text.contains("secret") && o.text.contains(".env.production"), "{}", o.text);
+    assert!(!f.origin_has("refs/heads/archive/wt-a") && w.exists());
+    // by content too, whatever the name
+    std::fs::remove_file(w.join(".env.production")).unwrap();
+    write(&w, "notes.txt", &format!("-----BEGIN RSA {}-----\nabc\n", "PRIVATE KEY"));
+    let o = apply(&f);
+    assert_eq!(o.rc, 6, "{}", o.text);
+    assert!(o.text.contains("secret") && o.text.contains("notes.txt"), "{}", o.text);
+    assert!(!f.origin_has("refs/heads/archive/wt-a") && w.exists());
+}
+
+#[test]
 fn a_junction_a_check_made_in_the_scratch_worktree_is_unlinked_never_followed() {
     // B5: the checks (an install, a regenerator) may leave a node_modules link in the scratch worktree; its removal must not empty the target
     use gatetrain_core::force::cfg;

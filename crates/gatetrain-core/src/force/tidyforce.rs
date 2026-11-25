@@ -96,8 +96,8 @@ pub fn run(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str) -> 
     run_with(h, keep, apply, date, false)
 }
 
-/// [`run`], with `include_ignored` accepting that ignored files are deleted with the worktree (STUB: not read yet).
-pub fn run_with(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str, _include_ignored: bool) -> ForceOut {
+/// [`run`], with `include_ignored` accepting that ignored files (an `.env.local`, scratch notes) are deleted with the worktree: without it they are listed and the run STOPs at that worktree.
+pub fn run_with(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str, include_ignored: bool) -> ForceOut {
     let mut t = String::new();
     macro_rules! say {
         ($($a:tt)*) => {{ t.push_str(&format!($($a)*)); t.push('\n'); }};
@@ -129,7 +129,8 @@ pub fn run_with(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str
                     (Ok(_), false) => format!("{} uncommitted path(s) committed by name, push to archive/{}, remove", w.dirty.len(), w.name),
                 };
                 let n = if w.dirty.is_empty() { String::new() } else { format!("{} uncommitted; ", w.dirty.len()) };
-                say!("  {:<34} {:<9} {n}{steps}", w.name, "remove");
+                let blocked = if w.ignored.is_empty() || include_ignored { String::new() } else { format!("BLOCKED: {} ignored file(s) would be deleted unarchived ({}); ", w.ignored.len(), w.ignored.iter().take(3).cloned().collect::<Vec<_>>().join(", ")) };
+                say!("  {:<34} {:<9} {blocked}{n}{steps}", w.name, "remove");
                 todo.push(w);
             }
         }
@@ -149,6 +150,15 @@ pub fn run_with(h: &dyn ForceHost, keep: Option<&Regex>, apply: bool, date: &str
         return ForceOut { rc: 0, text: t };
     }
     for w in todo {
+        if !w.ignored.is_empty() && !include_ignored {
+            say!(
+                "STOP {}: {} ignored file(s) would be deleted with the worktree and are not archived ({}); copy them out, or rerun with --include-ignored to accept the loss. Nothing of it was removed and nothing after it was touched",
+                w.name,
+                w.ignored.len(),
+                w.ignored.join(", ")
+            );
+            return ForceOut { rc: 6, text: t };
+        }
         let mut head = w.head.clone();
         let mut known_on_remote = None;
         if !w.dirty.is_empty() {
@@ -216,6 +226,53 @@ fn fs(e: Fatal) -> String {
 fn unquote(s: &str) -> String {
     let t = s.trim_end();
     t.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(t).to_string()
+}
+
+/// Folders that are rebuilt, not work: an ignored path inside one of them is not listed.
+const BUILD_DIRS: [&str; 16] = ["node_modules", "target", "dist", "build", "out", ".next", ".turbo", ".cache", "__pycache__", ".venv", "venv", ".pytest_cache", ".gradle", "coverage", ".parcel-cache", ".nuxt"];
+
+/// The `!! path` entries of `git status --ignored` that are not build output and not stackdump files.
+pub fn parse_ignored(out: &str) -> Vec<String> {
+    let mut v = vec![];
+    let pieces: Vec<&str> = if out.contains('\0') { out.split('\0').collect() } else { out.lines().collect() };
+    for e in pieces {
+        let Some(p) = e.strip_prefix("!! ") else { continue };
+        let p = unquote(p);
+        let p = p.trim_end_matches('/').to_string();
+        if p.ends_with(".stackdump") || p.split('/').any(|c| BUILD_DIRS.contains(&c)) {
+            continue;
+        }
+        v.push(p);
+    }
+    v
+}
+
+fn secret_name(path: &str) -> bool {
+    let b = path.rsplit('/').next().unwrap_or("").to_lowercase();
+    let example = [".example", ".sample", ".template", ".dist"].iter().any(|x| b.ends_with(x));
+    (b == ".env" || b.starts_with(".env.")) && !example
+        || [".pem", ".key", ".pfx", ".p12", ".secret", ".secrets", ".kdbx"].iter().any(|x| b.ends_with(x))
+        || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials"].iter().any(|x| b.starts_with(x))
+        || b.starts_with("secrets.")
+        || b == "secrets"
+}
+
+fn secret_content(text: &str) -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        [
+            (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "a private key block"),
+            (r"AKIA[0-9A-Z]{16}", "an AWS access key id"),
+            (r"gh[pousr]_[A-Za-z0-9]{30,}", "a GitHub token"),
+            (r"sk-ant-[A-Za-z0-9_-]{20,}", "an Anthropic key"),
+            (r"xox[baprs]-[A-Za-z0-9-]{10,}", "a Slack token"),
+        ]
+        .iter()
+        .map(|(p, n)| (Regex::new(p).unwrap(), *n))
+        .collect()
+    });
+    re.iter().find(|(r, _)| r.is_match(text)).map(|(_, n)| *n)
 }
 
 /// `git status --porcelain` paths; stackdump files are not work.
@@ -315,8 +372,17 @@ impl ForceHost for OpsHost<'_> {
                 }
                 parse_status(&c.out)
             };
+            let ignored = if w.prunable || is_main {
+                vec![]
+            } else {
+                let c = ops.git(&w.path, &["status", "--porcelain", "-z", "--ignored=matching", "--untracked-files=normal"]).map_err(fs)?;
+                if !c.ok() {
+                    return Err(format!("cannot read the ignored files of {}", w.path));
+                }
+                parse_ignored(&c.out)
+            };
             let name = norm(&w.path).rsplit('/').next().unwrap_or("").to_string();
-            v.push(WtState { path: w.path.clone(), name, branch: w.branch.clone(), head: w.head.clone().unwrap_or_default(), locked: w.locked, dirty, ignored: vec![], is_main });
+            v.push(WtState { path: w.path.clone(), name, branch: w.branch.clone(), head: w.head.clone().unwrap_or_default(), locked: w.locked, dirty, ignored, is_main });
         }
         Ok(v)
     }
@@ -377,6 +443,25 @@ impl ForceHost for OpsHost<'_> {
             let full = ops.join(&wt.path, p.trim_end_matches('/'));
             if ops.is_link(&full).map_err(fs)? != Some(false) {
                 return Err(format!("{p} is a link (or cannot be probed); it cannot be archived by name. Ignore or remove the link, then run again"));
+            }
+        }
+        // the archive goes to a remote: an untracked file that looks like a secret is never committed (the secret scan of the repo is an editor hook, not a git hook)
+        let un = ops.git(&wt.path, &["ls-files", "--others", "--exclude-standard", "-z"]).map_err(fs)?;
+        for f in un.out.split('\0').filter(|f| !f.is_empty() && !f.ends_with(".stackdump")) {
+            if secret_name(f) {
+                return Err(format!("{f} looks like a secret (by its name); it is not committed or pushed. Move it out of the worktree, or delete it, then run again"));
+            }
+            if self.runner.is_local() {
+                let full = ops.join(&wt.path, f);
+                if let Ok(m) = std::fs::symlink_metadata(&full) {
+                    if m.is_file() && m.len() <= 2_000_000 {
+                        if let Ok(b) = std::fs::read(&full) {
+                            if let Some(what) = secret_content(&String::from_utf8_lossy(&b)) {
+                                return Err(format!("{f} looks like a secret (it holds {what}); it is not committed or pushed. Move it out of the worktree, or delete it, then run again"));
+                            }
+                        }
+                    }
+                }
             }
         }
         for chunk in paths.chunks(25) {
