@@ -2,6 +2,15 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.5.2
+
+The archive's secret scan, widened (round 2 of the independent read of 0.5.0).
+
+- `tidy --force`: secret FILE names are `*.env`, `.env*`, `*.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.age`, `id_*`, `credentials*`, `secrets*`, `.npmrc`, `.netrc`, `token*` (so `stag.env` and `prod.env` are caught). Content is scanned with the full pattern list of the project's own commit hook (AWS, generic `api_key|secret|password|token` assignments, private-key blocks, JWTs, GitHub, the DOKU shapes, base64 private-key headers, the project's env keys with a non-placeholder value) plus OpenAI, Anthropic, Stripe, Google, Hugging Face, Slack and `scheme://user:pass@` shapes.
+- The scan covers the whole archive: untracked files, modified tracked files (the staged diff; the index is put back on a hit) and the unpushed commits already on the branch (`git log -p` of what the push would send). Content is read from git's output, so an ssh host is scanned too, not only by name. A hit STOPs the run with nothing pushed and names `file:line (kind)`, never the value.
+- Ignored build output (`node_modules`, `target`, `dist`, `build`, `out` ...) is still skipped, but the plan now prints what was skipped.
+- `land`: `{files}` reaches a check after `--`, so a name that starts with a dash is not read as an option.
+
 ## 0.5.1
 
 Fixes from the independent read of 0.5.0 (docs/force.md).
