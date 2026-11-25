@@ -2,6 +2,14 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.5.1
+
+Fixes from the independent read of 0.5.0 (docs/force.md).
+
+- `tidy --force`: the archive proof is the live remote (`fetch --prune` and `ls-remote`), not remote-tracking refs a deleted branch leaves behind; a detached head also gets a local `archive/detached-<sha12>` tag. Ignored files that are not build output are listed and stop the run unless `--include-ignored`. Untracked files that look like secrets (by name or content) are never committed or pushed in an archive. A `*.stackdump` is neither committed nor blocking. The real destructive path now has tests on a throwaway repo with real git and real junctions (`tests/force_real.rs`).
+- `land`: both sides of a rename are classified (a migration moved into `docs/` is SAFE); a file or branch name with shell syntax is refused when a check uses `{files}` or `{branch}`; the scratch worktree is removed by tidy's link-safe removal, never by `git worktree remove` on a folder that may hold a junction.
+- `main-watch`: only a run whose recorded `CHAIN_MODE` is exactly `full`, for the exact sha, counts as the full chain; `runs::ingest` records the mode (table `run_modes`, created on first use).
+
 ## 0.5.0
 
 Forced, measured and landed work (docs/force.md). Everything can be measured, forced or cleaned; a merge that waits too long can be landed on main and post-fixed.

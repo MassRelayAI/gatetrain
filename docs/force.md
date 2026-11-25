@@ -9,7 +9,7 @@ Everything can be measured, forced or cleaned; if a merge waits too long, land i
 | `gatetrain tidy --force [--keep REGEX] [--apply]` | archive then remove every worktree but the main checkout and the kept ones; clean finished cargo targets (rustc wrapper blanked) and exited throwaway containers. Dry run by default |
 | `gatetrain land <branch> [--plan]` | merge onto the remote main tip in a scratch worktree, run the cheap checks, push (fetch, re-merge, retry; never force), record in the decision log, remove the scratch worktree |
 | `gatetrain verdict <sha> --by WHO --pass\|--fail` | record an independent read of a commit |
-| `gatetrain main-watch [--once] [--deploy-cmd CMD]` | start a full chain for a main commit that has none (through a pushed non-main branch), ingest it, list reds as post-fix items with an owner, run the deploy command only for a green sha; also prints the `[limits]` breaches |
+| `gatetrain main-watch [--once] [--deploy-cmd CMD]` | (only a run whose recorded mode is `full`, for the exact sha, counts as the full chain) start a full chain for a main commit that has none (through a pushed non-main branch), ingest it, list reds as post-fix items with an owner, run the deploy command only for a green sha; also prints the `[limits]` breaches |
 
 ## tidy --force
 
@@ -20,6 +20,10 @@ Per worktree, in order, and any failed step is a STOP (that worktree stays intac
 3. the folder is removed by the same link-safe removal `tidy` uses (links are unlinked first and never followed; the main checkout's tracked-file count and status are checked after);
 4. the branch is kept; the archive ref is the safety net.
 
+The proof that the remote holds a tip is the live remote (`fetch --prune`, then `ls-remote --heads`): a tip counts only when a branch the remote lists now equals it or contains it. A detached head also gets a local `archive/detached-<sha12>` tag.
+
+Ignored files that are not build output (`.env.local`, scratch notes; `node_modules`, `target`, `dist` and the like do not count) would be deleted unarchived: they are listed in the plan as BLOCKED and the run STOPs at that worktree unless `--include-ignored` accepts the loss. Untracked files that look like secrets (names such as `.env*`, `*.pem`, `*.key`, `id_rsa*`, `credentials*`; content with a private key block or an AWS, GitHub, Anthropic or Slack token) are never committed or pushed in an archive: the run STOPs and names the file.
+
 The main checkout, `--keep`, `keep_paths`, `protect`, `keep_lanes`, locked worktrees and a missing folder always win.
 
 ## land: FAST and SAFE
@@ -28,6 +32,8 @@ The mode comes from the path classifier in the config, never from the caller. A 
 
 * FAST: the cheap checks (`checks`), then push; post-fix on main (`main-watch`).
 * SAFE: the cheap checks, the full gates of the matched rules (`gates`, plus `safe_gates`), and a recorded `verdict` pass for the branch tip must exist BEFORE it lands. A missing item is named in the refusal (exit 4).
+
+Both sides of a rename are classified, so moving a migration into `docs/` is still SAFE. A changed file name or a branch name with anything but plain path characters (letters, digits, `_ . / @ + = : , -`) is refused (exit 4) when a check or gate uses `{files}` or `{branch}`, so no name is ever shell syntax. The scratch worktree is removed by tidy's link-safe removal (links unlinked first, never followed), then git is told it is gone.
 
 `land --plan` prints the mode and the matched rule per file and changes nothing. Exit codes: 0 landed or planned, 2 cannot read, 4 refused, 5 conflict, 6 a check is red, 7 the push never went through.
 
