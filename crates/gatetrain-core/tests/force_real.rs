@@ -312,3 +312,116 @@ fn clean_changes_are_still_archived() {
     assert_eq!(o.rc, 0, "{}", o.text);
     assert!(f.origin_has("refs/heads/archive/wt-a") && !w.exists());
 }
+
+// ---- round 3: bypasses of the scan itself ----
+
+/// Append a line to `.git/info/<name>` of the fixture repo (the folder may not exist yet).
+fn info_append(f: &Fx, name: &str, text: &str) {
+    let d = f.r.work.join(".git/info");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::OpenOptions::new().create(true).append(true).open(d.join(name)).and_then(|mut x| std::io::Write::write_all(&mut x, text.as_bytes())).unwrap();
+}
+
+fn utf16le(s: &str) -> Vec<u8> {
+    let mut v = vec![0xffu8, 0xfe];
+    for u in s.encode_utf16() {
+        v.extend_from_slice(&u.to_le_bytes());
+    }
+    v
+}
+
+#[test]
+fn a_binary_or_utf16_file_is_scanned_too() {
+    // git prints "Binary files differ" for a NUL byte, and a UTF-16 file has NULs throughout: the scan must read them as text
+    let f = fx();
+    let w = f.add_wt("a");
+    let key = fake_key();
+    let mut b = vec![0u8];
+    b.extend_from_slice(format!("\nkey = {key}\n").as_bytes());
+    std::fs::write(w.join("blob.cfg"), b).unwrap();
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, &key);
+    assert!(o.text.contains("blob.cfg") && o.text.contains("aws_key"), "{}", o.text);
+    std::fs::remove_file(w.join("blob.cfg")).unwrap();
+    std::fs::write(w.join("wide.cfg"), utf16le(&format!("key = {key}\r\n"))).unwrap();
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, &key);
+    assert!(o.text.contains("wide.cfg"), "{}", o.text);
+}
+
+#[test]
+fn a_diff_attribute_cannot_hide_content_from_the_scan() {
+    let f = fx();
+    let w = f.add_wt("a");
+    let key = fake_key();
+    info_append(&f, "attributes", "*.cfg -diff\n");
+    write(&w, "plain.cfg", &format!("key = {key}\n"));
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, &key);
+    assert!(o.text.contains("plain.cfg"), "{}", o.text);
+}
+
+#[test]
+fn a_textconv_or_an_external_diff_cannot_rewrite_what_the_scan_reads() {
+    let key = fake_key();
+    for (cfg_key, attr) in [("diff.scrub.textconv", true), ("diff.external", false)] {
+        let f = fx();
+        let w = f.add_wt("a");
+        sh(&f.r.work, &["config", cfg_key, "true"]);
+        if attr {
+            info_append(&f, "attributes", "*.cfg diff=scrub\n");
+        }
+        write(&w, "x.cfg", &format!("key = {key}\n"));
+        let o = apply(&f);
+        nothing_archived(&f, &w, &o, &key);
+        assert!(o.text.contains("x.cfg"), "{cfg_key}: {}", o.text);
+    }
+}
+
+#[test]
+fn content_added_by_a_merge_commit_is_scanned() {
+    let f = fx();
+    let w = f.add_wt("a");
+    let key = fake_key();
+    sh(&w, &["switch", "-q", "-c", "side", "main"]);
+    write(&w, "side.txt", "side\n");
+    sh(&w, &["add", "side.txt"]);
+    sh(&w, &["commit", "-m", "side"]);
+    sh(&w, &["switch", "-q", "a"]);
+    write(&w, "a.txt", "a\n");
+    sh(&w, &["add", "a.txt"]);
+    sh(&w, &["commit", "-m", "a"]);
+    sh(&w, &["merge", "--no-commit", "--no-ff", "side"]);
+    write(&w, "merged.txt", &format!("added while resolving {key}\n"));
+    sh(&w, &["add", "merged.txt"]);
+    sh(&w, &["commit", "-m", "merge side"]);
+    assert_eq!(sh(&w, &["status", "--porcelain"]), "");
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, &key);
+    assert!(o.text.contains("merged.txt"), "{}", o.text);
+}
+
+#[test]
+fn a_secret_file_name_in_an_unpushed_commit_stops_the_run_whatever_it_holds() {
+    let f = fx();
+    let w = f.add_wt("a");
+    write(&w, "stag.env", "DB_PASSWORD=hunter2hunter2\n"); // unquoted, no vendor shape: only the name gives it away
+    sh(&w, &["add", "-f", "stag.env"]);
+    sh(&w, &["commit", "-m", "oops"]);
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, "hunter2hunter2");
+    assert!(o.text.contains("stag.env") && o.text.contains("secret"), "{}", o.text);
+}
+
+#[test]
+fn on_a_hit_the_users_own_staged_state_is_restored_not_wiped() {
+    let f = fx();
+    let w = f.add_wt("a");
+    let key = fake_key();
+    write(&w, "mine.txt", "staged by me\n");
+    sh(&w, &["add", "mine.txt"]);
+    std::fs::write(w.join("README.md"), format!("hello\nkey = {key}\n")).unwrap();
+    let o = apply(&f);
+    nothing_archived(&f, &w, &o, &key);
+    assert_eq!(sh(&w, &["diff", "--cached", "--name-only"]), "mine.txt", "the staging was undone");
+}

@@ -105,3 +105,13 @@ fn the_diff_reader_names_the_file_and_line_and_never_carries_the_value() {
     let log = format!("0123456789012345678901234567890123456789\ndiff --git a/n.txt b/n.txt\nnew file mode 100644\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+{secret}\n");
     assert_eq!(scan_diff(&log), vec![Finding { file: "n.txt".into(), line: 1, name: "aws_key" }]);
 }
+
+#[test]
+fn text_with_nul_bytes_between_the_letters_is_read_as_text() {
+    // UTF-16 shown by `git diff --text` has a NUL after every ASCII character
+    let key = j(&["AK", "IA", "ABCDEFGHIJKLMNOP"]);
+    let wide: String = format!("key = {key}").chars().flat_map(|c| [c, '\0']).collect();
+    assert!(scan_text(&wide).contains(&"aws_key"));
+    let diff = format!("--- /dev/null\n+++ b/w.cfg\n@@ -0,0 +1 @@\n+{wide}\n");
+    assert_eq!(scan_diff(&diff).len(), 1);
+}

@@ -449,6 +449,9 @@ impl ForceHost for OpsHost<'_> {
         if let Some(p) = un.out.split('\0').find(|f| !f.is_empty() && secret_name(f)) {
             return Err(format!("secret scan: {p} has the name of a secret file; it is not committed or pushed. Move it out of the worktree, or delete it, then run again"));
         }
+        // the user's own staging is saved as a tree, to be put back exactly if the scan stops the run
+        let saved = ops.git(&wt.path, &["write-tree"]).map_err(fs)?;
+        let saved = if saved.ok() { Some(saved.out.trim().to_string()) } else { None };
         for chunk in paths.chunks(25) {
             let mut a: Vec<&str> = vec!["add", "--"];
             a.extend(chunk.iter().map(|s| s.as_str()));
@@ -458,10 +461,17 @@ impl ForceHost for OpsHost<'_> {
             }
         }
         // the content of what is staged, read from git (so an ssh host is scanned too): untracked and modified files alike; on a hit the index is put back
-        let staged = ops.git(&wt.path, &["diff", "--cached", "-U0", "--no-color", "--no-renames"]).map_err(fs)?;
+        let staged = ops.git(&wt.path, &["diff", "--cached", "-U0", "--no-color", "--no-renames", "--text", "--no-textconv", "--no-ext-diff"]).map_err(fs)?;
         let hits = scan_diff(&staged.out);
         if !staged.ok() || !hits.is_empty() {
-            let _ = ops.git(&wt.path, &["reset", "-q"]);
+            match &saved {
+                Some(t) => {
+                    let _ = ops.git(&wt.path, &["read-tree", t]);
+                }
+                None => {
+                    let _ = ops.git(&wt.path, &["reset", "-q"]);
+                }
+            }
             if !staged.ok() {
                 return Err("secret scan: the staged diff could not be read".into());
             }
@@ -483,11 +493,19 @@ impl ForceHost for OpsHost<'_> {
     fn scan_archive(&self, wt: &WtState, head: &str) -> Result<(), String> {
         let ops = self.ops();
         let remotes = format!("--remotes={}", self.remote);
-        let log = ops.git(&wt.path, &["log", "-p", "-U0", "--no-color", "--no-renames", "--format=%H", head, "--not", &remotes]).map_err(fs)?;
+        let log = ops.git(&wt.path, &["log", "-p", "-U0", "--no-color", "--no-renames", "--text", "--no-textconv", "--no-ext-diff", "--diff-merges=first-parent", "--format=%H", head, "--not", &remotes]).map_err(fs)?;
         if !log.ok() {
             return Err("secret scan: the unpushed commits could not be read".into());
         }
         let hits = scan_diff(&log.out);
+        // a file with a secret's name is refused wherever it is: also the ones already committed on the branch (a merge shows against its first parent)
+        let names = ops.git(&wt.path, &["log", "--name-only", "--no-renames", "--diff-merges=first-parent", "--format=", head, "--not", &remotes]).map_err(fs)?;
+        if !names.ok() {
+            return Err("secret scan: the names of the unpushed files could not be read".into());
+        }
+        if let Some(n) = names.out.lines().map(str::trim).find(|n| !n.is_empty() && secret_name(n)) {
+            return Err(format!("secret scan: {n} has the name of a secret file and is in the commits that would be pushed (value not shown)"));
+        }
         if hits.is_empty() {
             Ok(())
         } else {

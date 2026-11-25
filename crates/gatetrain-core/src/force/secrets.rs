@@ -99,6 +99,9 @@ fn is_placeholder(value: &str) -> bool {
 pub fn scan_text(text: &str) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = vec![];
     for line in text.lines() {
+        // UTF-16 read as text (`git diff --text`) has a NUL after every ASCII character
+        let line = line.replace('\u{0}', "");
+        let line = line.as_str();
         for (name, r) in shapes() {
             if !out.contains(name) && r.is_match(line) {
                 out.push(name);
