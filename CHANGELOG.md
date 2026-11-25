@@ -2,6 +2,16 @@
 
 The version is `workspace.package.version` in `Cargo.toml`; one entry per released version, newest first.
 
+## 0.5.0
+
+Forced, measured and landed work (docs/force.md). Everything can be measured, forced or cleaned; a merge that waits too long can be landed on main and post-fixed.
+
+- `gatetrain measure [--host H] [--json]`: what holds disk per host (worktrees, cargo targets, docker images, containers, volumes and cache, VM disk images, the recycle bin), each number with its method; a VM disk is sized by bytes allocated on disk, not its logical size.
+- `gatetrain tidy --force [--keep REGEX] [--apply]`: archive (uncommitted work committed by named paths, tip pushed as `archive/<worktree>`, STOP when that cannot be proven), then link-safe removal with the main-checkout guard, for every worktree but the main checkout and the kept ones; then finished cargo targets (rustc wrapper blanked) and exited throwaway containers. Dry run by default.
+- `gatetrain land <branch> [--plan]` and `gatetrain verdict <sha> --by WHO --pass|--fail`: merge onto the remote main in a scratch worktree, cheap checks, push (never force), record. FAST or SAFE by the `[land]` path rules; an unknown path is SAFE; SAFE needs the full gates and a recorded independent-read verdict first.
+- `gatetrain main-watch [--once] [--deploy-cmd CMD]`: a full chain for each main commit that has none (through a pushed non-main branch), steps ingested, each red a post-fix item with an owner, deploy only for a green sha.
+- `gatetrain branches [--json] [--check]`: every branch and worktree on every host and the remote with size, ahead/behind, content-on-main, uncommitted, age, owner and state; `[limits]` (`max_worktrees`, `max_idle_days`, `max_worktree_gb`, `max_unlanded_hours`) are checked by `--check` and on every `main-watch` pass, each breach with its fix.
+
 ## 0.4.4
 
 - `tidy`: a naming report. `[tidy.naming]` (`roots`, `exempt`) makes a dry run and `--apply` end with a block that flags worktrees not named

@@ -101,6 +101,11 @@ Commands:
   ledger     The ledger file
   check      Find leftovers: build targets, worktrees, containers, images, cache, recycle bin (read-only)
   tidy       Clean the leftovers `check` finds (dry run unless --apply or --auto)
+  measure    What holds disk per host, each number with its method: worktrees, cargo targets, docker, VM disk images by on-disk size, the trash (--json)
+  branches   Every branch and worktree on every host and the remote: size, ahead/behind, on main?, uncommitted, age, owner, state; --check exits 1 on a limit breach
+  land       Land a branch on the remote main: merge in a scratch worktree, cheap checks, push (never force), record; FAST or SAFE by path rules (--plan)
+  verdict    Record an independent read of a commit; a SAFE landing needs a pass for the branch tip
+  main-watch When main has a commit with no full chain: start one, ingest it, list each red as a post-fix item with an owner; --deploy-cmd only for a green sha
   chain      Run a steps file: fast then slow tier in parallel, full output per step, log-format lines on stdout, a stamp when green and clean
   privacy-check  Fail when any file of a repository holds a word on its hashed deny-list `.privacy-denylist` (a hit names the file and line, never the word)
   watch      Read a repository's lanes and say what to do next (read-only): live, merged awaiting tidy, stale, ready to stack, stackable, blocked, next assignments
