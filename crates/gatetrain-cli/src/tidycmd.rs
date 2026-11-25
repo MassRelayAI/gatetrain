@@ -33,6 +33,12 @@ pub struct TidyArgs {
     /// `docker load -i` of an image archived by `[tidy] image_archive`: an exact .tar directly inside <trash_dir>/docker-images, nothing else
     #[arg(long, value_name = "TAR")]
     restore_image: Option<String>,
+    /// everything but the main checkout and the kept or live worktrees: archive (commit by name, push as archive/<worktree>), remove link-safely, clean finished cargo targets and exited throwaway containers. Dry run unless --apply; keep_paths and protect still win
+    #[arg(long)]
+    force: bool,
+    /// with --force: a regex over the worktree name or path; matches are kept (live lanes)
+    #[arg(long, value_name = "REGEX")]
+    keep: Option<String>,
 }
 
 /// Each item is reported on stderr as soon as it is judged (`GATETRAIN_PROGRESS=0` turns it off): a long inventory is never silent.
@@ -61,6 +67,13 @@ pub fn run_check(a: CheckArgs) -> ExitCode {
 pub fn run_tidy(a: TidyArgs) -> ExitCode {
     if let Some(tar) = &a.restore_image {
         return emit(cmd_restore_image(&a.config, a.host.as_deref(), tar, &make_runner));
+    }
+    if a.force {
+        return crate::forcecmd::tidy_force(&a.config, a.host.as_deref(), a.keep.as_deref(), a.apply);
+    }
+    if a.keep.is_some() {
+        eprintln!("gatetrain: --keep needs --force");
+        return ExitCode::from(2);
     }
     stream_progress();
     emit(cmd_tidy(&a.config, a.host.as_deref(), a.apply, a.cls.as_deref(), a.auto, &make_runner, None))

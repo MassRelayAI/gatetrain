@@ -5,6 +5,7 @@ use gatetrain_core::config::{self, host_os, Config, Host};
 use gatetrain_core::force::cfg::{self, ForceCfg};
 use gatetrain_core::force::exec::{LocalExec, RunnerExec};
 use gatetrain_core::force::measure::{self, Measure};
+use gatetrain_core::force::tidyforce::{self, OpsHost};
 use gatetrain_core::ledger::Ledger;
 use gatetrain_core::tidy::config::{build_cfg, TidyCfg};
 use gatetrain_core::tidy::inventory::gather;
@@ -101,6 +102,40 @@ pub fn measure_cmd(a: MeasureArgs) -> ExitCode {
     };
     match run() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("gatetrain: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- tidy --force
+
+pub fn tidy_force(config_path: &str, host: Option<&str>, keep: Option<&str>, apply: bool) -> ExitCode {
+    let run = || -> Result<i32, String> {
+        let c = config::load(Path::new(config_path)).map_err(|e| format!("config error: {e}"))?;
+        let fc = force_cfg(config_path)?;
+        let keep = keep.map(regex::Regex::new).transpose().map_err(|e| format!("--keep: {e}"))?;
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let mut rc = 0;
+        for hc in hosts(&c, host)? {
+            let Some(r) = make_runner(hc.host) else {
+                println!("== {}\nskipped: reach {:?} is not local or ssh", hc.host.name, hc.host.reach);
+                continue;
+            };
+            println!("== {}", hc.host.name);
+            let oh = OpsHost::new(hc.host, r.as_ref(), &hc.tidy, &fc.land.remote);
+            let o = tidyforce::run(&oh, keep.as_ref(), apply, &date);
+            print!("{}", o.text);
+            rc = rc.max(o.rc);
+            if o.rc == 6 {
+                break;
+            }
+        }
+        Ok(rc)
+    };
+    match run() {
+        Ok(rc) => ExitCode::from(rc as u8),
         Err(e) => {
             eprintln!("gatetrain: {e}");
             ExitCode::from(2)

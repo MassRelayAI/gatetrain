@@ -7,5 +7,6 @@
 pub mod cfg;
 pub mod exec;
 pub mod measure;
+pub mod tidyforce;
 
 pub use exec::{Exec, LocalExec, Out, RunnerExec, StubExec};

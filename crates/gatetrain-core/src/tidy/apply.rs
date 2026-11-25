@@ -366,13 +366,7 @@ pub fn clean_target(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     }
     let before = ops.size(p)?;
     let fb = if before.is_none() { ops.free_gb(p)? } else { None }; // sizing failed: fall back to the disk's free space (L51)
-    let mut cmd: Vec<String> = vec!["cargo".into(), "clean".into()];
-    if let Some(m) = &cfg.main_checkout {
-        cmd.push("--manifest-path".into());
-        cmd.push(ops.join(m, "Cargo.toml"));
-    }
-    cmd.push("--target-dir".into());
-    cmd.push(p.to_string()); // never -q: a quiet clean can refuse and say nothing (L43)
+    let cmd = cargo_clean_argv(cfg, cfg.main_checkout.as_deref().map(|m| ops.join(m, "Cargo.toml")), p); // never -q: a quiet clean can refuse and say nothing (L43)
     let c = ops.run_argv(&cmd, Some(cfg.remove_timeout_s))?;
     if c.rc.is_none() {
         return Ok((None, "stopped", format!("cargo clean did not finish in {}s; not counted as done", fmt_g(cfg.remove_timeout_s))));
@@ -579,4 +573,21 @@ pub fn remove_worktree(ops: &Ops, cfg: &TidyCfg, it: &Item) -> R<Done> {
     }
     ops.assert_main(before)?;
     Ok((Some(0), "ok", format!("links unlinked, tagged {tag}, worktree and branch removed, main checkout unchanged")))
+}
+
+/// The `cargo clean` command of one target folder. With `cargo_unset_wrapper` (tidy --force) the rustc wrapper is blanked on the command line, so a dead
+/// sccache cannot make the clean fail. Never `-q`: a quiet clean can refuse and say nothing (L43).
+pub fn cargo_clean_argv(cfg: &TidyCfg, manifest: Option<String>, target: &str) -> Vec<String> {
+    let mut cmd: Vec<String> = vec!["cargo".into(), "clean".into()];
+    if cfg.cargo_unset_wrapper {
+        cmd.push("--config".into());
+        cmd.push("build.rustc-wrapper=''".into());
+    }
+    if let Some(m) = manifest {
+        cmd.push("--manifest-path".into());
+        cmd.push(m);
+    }
+    cmd.push("--target-dir".into());
+    cmd.push(target.to_string());
+    cmd
 }

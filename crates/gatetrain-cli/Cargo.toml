@@ -17,6 +17,8 @@ clap.workspace = true         # the command line
 anyhow.workspace = true       # error context
 ctrlc.workspace = true        # holder: release on a signal
 rusqlite.workspace = true     # diagnose reads step durations from a ledger
+regex.workspace = true       # tidy --force --keep
+chrono.workspace = true      # the date of the archive commit, the clock of branches
 sha2.workspace = true         # agent: the prepare key
 
 [dev-dependencies]

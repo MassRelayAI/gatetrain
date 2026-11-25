@@ -330,9 +330,11 @@ name = "gatetrain-cli"
 version = "0.4.4"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "ctrlc",
  "gatetrain-core",
+ "regex",
  "rusqlite",
  "serde_json",
  "sha2",

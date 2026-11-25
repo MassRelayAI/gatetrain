@@ -50,6 +50,8 @@ pub struct TidyCfg {
     pub min_idle_min: f64,
     /// keep | clean (a target whose lane has no branch)
     pub orphan_targets: String,
+    /// `tidy --force`: run `cargo clean` with `--config build.rustc-wrapper=''`, so a dead sccache cannot make it fail (never set by a config file)
+    pub cargo_unset_wrapper: bool,
     pub trash_dir: Option<String>,
     pub trash_days: f64,
     pub container_prefix: Option<String>,
@@ -106,6 +108,7 @@ impl Default for TidyCfg {
             worktree_prefix: String::new(),
             min_idle_min: 60.0,
             orphan_targets: "keep".into(),
+            cargo_unset_wrapper: false,
             trash_dir: None,
             trash_days: 7.0,
             container_prefix: None,
