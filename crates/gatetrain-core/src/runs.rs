@@ -43,9 +43,19 @@ pub fn ingest(l: &Ledger, db_name: &str, rid: &str, p: &ParsedLog, outcome: &str
     }
     if matches!(outcome, "green" | "red") {
         insert_final(l, rid, p, outcome, host)?;
+        record_mode(l, rid, p)?;
     }
     l.record_snapshot(rid, p, outcome, host, taken_at)?;
     Ok(Ingest::Done)
+}
+
+/// The mode of a finished run (`full`, `partial`, ... from its `CHAIN_MODE` line; `unknown` when the log has none). Only a run whose mode is exactly
+/// `full` can stand for "the full chain of this commit" (main-watch). A table of its own, created on first use, so the ledger version is unchanged;
+/// a run recorded by another path has no row here and so never counts as full.
+fn record_mode(l: &Ledger, rid: &str, p: &ParsedLog) -> crate::Result<()> {
+    l.conn.execute("CREATE TABLE IF NOT EXISTS run_modes (run_id TEXT PRIMARY KEY, mode TEXT NOT NULL)", [])?;
+    l.conn.execute("INSERT OR IGNORE INTO run_modes(run_id, mode) VALUES(?, ?)", params![rid, p.mode.clone().unwrap_or_else(|| "unknown".into())])?;
+    Ok(())
 }
 
 fn insert_final(l: &Ledger, rid: &str, p: &ParsedLog, outcome: &str, host: Option<&str>) -> crate::Result<()> {

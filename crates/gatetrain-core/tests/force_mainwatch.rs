@@ -168,3 +168,32 @@ fn without_a_chain_command_it_says_so_and_pushes_nothing() {
     assert!(o.text.contains("chain_cmd"), "{}", o.text);
     assert!(!e.runs.borrow().iter().any(|c| c.contains(" push ")));
 }
+
+fn ingest_elsewhere(l: &mut Ledger, rid: &str, text: &str) {
+    // another path (gatetrain ingest, tick) puts a run in the ledger; main-watch did not read that log
+    let p = gatetrain_core::logfmt::parse_log(text).unwrap();
+    let outcome = if p.red_summary.as_deref() == Some("none") { "green" } else { "red" };
+    let r = gatetrain_core::runs::ingest(l, "ledger", rid, &p, outcome, Some("pc"), false, "2026-11-25T10:10:00Z").unwrap();
+    assert!(matches!(r, gatetrain_core::runs::Ingest::Done));
+}
+
+#[test]
+fn a_partial_green_run_ingested_elsewhere_never_counts_as_the_full_chain() {
+    // B6: any finished chain run for the sha used to count, so a green --only run could trigger the deploy
+    let (r, sha) = setup();
+    let (e, mut l) = (Rec::new(), ledger());
+    ingest_elsewhere(&mut l, "only-lint", &log(&sha, "partial", &[], true));
+    ingest_elsewhere(&mut l, "no-mode", &log(&sha, "full", &[], true).replace("CHAIN_MODE full\n", ""));
+    let o = watch(&r, &e, &mut l, Some("deploy {sha}"), None);
+    assert!(!o.deployed && !e.shells.borrow().iter().any(|c| c.starts_with("deploy")), "deployed on a partial run: {}", o.text);
+    assert!(o.started, "a full chain is still wanted: {}", o.text);
+}
+
+#[test]
+fn a_full_run_ingested_elsewhere_does_count() {
+    let (r, sha) = setup();
+    let (e, mut l) = (Rec::new(), ledger());
+    ingest_elsewhere(&mut l, "full-run", &log(&sha, "full", &[], true));
+    let o = watch(&r, &e, &mut l, Some("deploy {sha}"), None);
+    assert!(!o.started && o.deployed, "{}", o.text);
+}

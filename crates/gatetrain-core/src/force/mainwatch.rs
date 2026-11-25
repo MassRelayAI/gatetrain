@@ -44,11 +44,12 @@ fn record(l: &mut Ledger, who: &str, kind: &str, subject: &str, outcome: &str, r
     let _ = declog::append(l, &NewEntry { at: runs::now_iso(), actor: who.into(), kind: kind.into(), subject: Some(subject.into()), outcome: outcome.into(), reason: reason.into(), evidence: Some(ev), ..Default::default() });
 }
 
-/// The finished chain run of a commit: (run id, outcome).
+/// The finished FULL chain run of a commit: (run id, outcome). A partial or `--only` run, a log with no CHAIN_MODE and a run recorded by a path
+/// that does not note its mode never count.
 fn finished(l: &Ledger, sha: &str) -> Option<(String, String)> {
     l.conn
         .query_row(
-            "SELECT id, outcome FROM runs WHERE kind='chain' AND outcome IN ('green','red') AND length(commit_sha) >= 7 AND substr(?1,1,length(commit_sha)) = commit_sha ORDER BY started_at DESC LIMIT 1",
+            "SELECT r.id, r.outcome FROM runs r JOIN run_modes m ON m.run_id = r.id WHERE r.kind='chain' AND r.outcome IN ('green','red') AND m.mode = 'full'              AND length(r.commit_sha) >= 10 AND substr(?1,1,length(r.commit_sha)) = r.commit_sha ORDER BY r.started_at DESC LIMIT 1",
             [sha],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
