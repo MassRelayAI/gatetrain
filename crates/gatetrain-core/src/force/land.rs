@@ -207,7 +207,7 @@ rename them, or run the checks by hand and land with checks that do not use {{fi
             result = (5, format!("merging {} onto {remote}/{} conflicts: {}", a.branch, cfg.main, m.text().trim()), None);
             break;
         }
-        let list = files.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" ");
+        let list = format!("-- {}", files.iter().map(|x| quote(x)).collect::<Vec<_>>().join(" "));
         let mut ran: Vec<(String, i32)> = vec![];
         for c in cfg.checks.iter().chain(gates.iter()) {
             let cmd = c.replace("{files}", &list).replace("{branch}", &a.branch).replace("{sha}", &tip);

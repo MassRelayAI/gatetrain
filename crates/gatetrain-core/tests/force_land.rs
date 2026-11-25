@@ -345,3 +345,16 @@ fn a_remover_that_refuses_leaves_the_scratch_folder_and_still_reports_the_landin
     assert_eq!(sh(&r.origin, &["rev-parse", "main"]), o.merged.unwrap());
     assert!(std::fs::read_dir(r.tmp.path()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("land-")), "the folder must not be force-deleted by anything else");
 }
+
+#[test]
+fn files_reach_a_check_after_a_double_dash() {
+    // a name that starts with a dash must not be read as an option by the check
+    let r = repo();
+    branch(&r, "feat", &["docs/-rf.md"]);
+    let mut c = lcfg();
+    c.checks = vec!["lint {files}".into()];
+    let e = NoShell(Default::default());
+    let o = land(&e, &c, &args(&r, "feat", false), None, &rm);
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert_eq!(e.0.borrow()[0], "lint -- \"docs/-rf.md\"");
+}
