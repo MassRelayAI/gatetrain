@@ -11,6 +11,7 @@ pub mod declog;
 pub mod diagnose;
 pub mod disk;
 pub mod evidence;
+pub mod force;
 pub mod doctor;
 pub mod history;
 pub mod hold;

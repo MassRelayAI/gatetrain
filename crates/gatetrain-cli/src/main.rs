@@ -9,6 +9,7 @@ use gatetrain_core::{analysis, config, declog, diagnose, history, ledger::Ledger
 mod advisecmd;
 mod agentcmd;
 mod chaincmd;
+mod forcecmd;
 mod guardcmd;
 mod probecmd;
 mod holdcmd;
@@ -103,6 +104,8 @@ enum Cmd {
     Check(tidycmd::CheckArgs),
     /// Clean the leftovers `check` finds (dry run unless --apply or --auto)
     Tidy(tidycmd::TidyArgs),
+    /// What holds disk, per host: worktrees, cargo targets, docker, VM disk images (by on-disk size), the recycle bin; each number with its method (--json for JSON)
+    Measure(Box<forcecmd::MeasureArgs>),
     /// Measure this host and its configured disks (durable writes, sequential, small files, rotational, CPU); stored in the ledger. Refused while a proof holds the host
     Probe(probecmd::ProbeArgs),
     /// Read the ledger and say which config change would save time, with evidence, minutes (or unknown) and confidence. Prints only; applies nothing
@@ -601,6 +604,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         }
         Cmd::Check(a) => Ok(tidycmd::run_check(a)),
         Cmd::Tidy(a) => Ok(tidycmd::run_tidy(a)),
+        Cmd::Measure(a) => Ok(forcecmd::measure_cmd(*a)),
         Cmd::Chain(a) => Ok(chaincmd::run(*a)),
         Cmd::Agent { cmd } => Ok(agentcmd::run(cmd)),
         Cmd::Guard { cmd } => Ok(guardcmd::run(cmd)),
