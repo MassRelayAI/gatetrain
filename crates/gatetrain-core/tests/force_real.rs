@@ -91,6 +91,73 @@ fn apply(f: &Fx) -> tidyforce::ForceOut {
 }
 
 #[test]
+fn a_dirty_worktree_is_committed_by_name_pushed_read_back_and_removed_link_safely() {
+    let f = fx();
+    let w = f.add_wt("a");
+    write(&w, "notes.txt", "work in progress\n");
+    write(&w, "dir/inner.txt", "more\n");
+    write(&w, "bash.exe.stackdump", "junk\n");
+    make_link(&w.join("node_modules"), &f.canary);
+    let before = f.main_state();
+    let o = apply(&f);
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert!(!w.exists(), "the worktree folder is gone:\n{}", o.text);
+    assert!(f.canary.join("keep.txt").exists(), "the junction's target was followed and emptied");
+    let tree = sh(&f.r.origin, &["ls-tree", "-r", "--name-only", "refs/heads/archive/wt-a"]);
+    assert!(tree.contains("notes.txt") && tree.contains("dir/inner.txt"), "{tree}");
+    assert!(!tree.contains("stackdump") && !tree.contains("node_modules"), "{tree}");
+    assert!(!sh(&f.r.work, &["worktree", "list"]).contains("wt-a"));
+    assert_eq!(f.main_state(), before, "the main checkout changed");
+    assert!(sh(&f.r.work, &["log", "-1", "--format=%s", "a"]).starts_with("wip(archive):"));
+}
+
+#[test]
+fn an_untracked_link_among_the_uncommitted_paths_stops_the_run_with_everything_intact() {
+    let f = fx();
+    let w = f.add_wt("a");
+    write(&w, "notes.txt", "x\n");
+    make_link(&w.join("shared"), &f.canary); // not ignored
+    let o = apply(&f);
+    assert_eq!(o.rc, 6, "{}", o.text);
+    assert!(o.text.contains("STOP wt-a") && o.text.contains("link"), "{}", o.text);
+    assert!(w.join("notes.txt").exists() && f.canary.join("keep.txt").exists());
+    assert!(!f.origin_has("refs/heads/archive/wt-a"), "nothing may be pushed when the commit step stopped");
+}
+
+#[test]
+fn a_worktree_with_only_a_stackdump_is_clean_and_is_removed() {
+    let f = fx();
+    let w = f.add_wt("s");
+    write(&w, "bash.exe.stackdump", "junk\n");
+    let o = apply(&f);
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert!(!w.exists(), "{}", o.text);
+    assert!(!o.text.contains("committed"), "a stackdump is not work: {}", o.text);
+}
+
+#[test]
+fn a_rejected_archive_push_uses_the_fallback_name_and_never_overwrites() {
+    let f = fx();
+    let w = f.add_wt("a");
+    write(&w, "n.txt", "x\n");
+    // somebody else already owns archive/wt-a with an unrelated history
+    sh(&f.r.work, &["checkout", "-q", "--orphan", "other"]);
+    sh(&f.r.work, &["rm", "-rf", "-q", "."]);
+    write(&f.r.work, "o.txt", "o\n");
+    sh(&f.r.work, &["add", "o.txt"]);
+    sh(&f.r.work, &["commit", "-m", "unrelated"]);
+    let other = sh(&f.r.work, &["rev-parse", "HEAD"]);
+    sh(&f.r.work, &["push", "origin", "other:refs/heads/archive/wt-a"]);
+    sh(&f.r.work, &["checkout", "-q", "-f", "main"]);
+    let o = apply(&f);
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert_eq!(sh(&f.r.origin, &["rev-parse", "refs/heads/archive/wt-a"]), other, "the other archive was overwritten");
+    let refs = sh(&f.r.origin, &["for-each-ref", "--format=%(refname)", "refs/heads/archive/"]);
+    assert!(refs.lines().any(|l| l.starts_with("refs/heads/archive/wt-a-")), "{refs}");
+    assert!(!w.exists());
+}
+
+#[test]
 fn a_stale_remote_tracking_ref_is_not_proof_that_the_remote_holds_the_tip() {
     // B1: the branch was deleted on the remote; a plain fetch keeps origin/tmpb, and `branch -r --contains` still lists it
     let f = fx();

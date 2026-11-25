@@ -417,8 +417,10 @@ impl ForceHost for OpsHost<'_> {
         if !ops.toplevel_ok(p).map_err(fs)? {
             return Err(format!("{p} is not the top level of its own worktree"));
         }
-        if ops.dirty(p).map_err(fs)? != Some(false) {
-            return Err(format!("{p} still has uncommitted work"));
+        // the same reading as the plan (`parse_status`): a *.stackdump is junk, not work; anything else that is uncommitted stops the removal
+        let st = ops.git(p, &["status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]).map_err(fs)?;
+        if !st.ok() || !parse_status(&st.out).is_empty() {
+            return Err(format!("{p} still has uncommitted work (or its status cannot be read)"));
         }
         match ops.worktrees().map_err(fs)?.into_iter().find(|w| norm(&w.path) == norm(p)) {
             None => return Err(format!("{p} is no longer a registered worktree")),
