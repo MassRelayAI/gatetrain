@@ -247,6 +247,20 @@ pub fn parse_status(out: &str) -> Vec<String> {
     v
 }
 
+/// A link-safe folder remover for [`crate::force::land::land`]: tidy's own removal (links unlinked first and never followed, link targets re-checked,
+/// the main checkout's tracked count and status asserted before and after). `cfg.main_checkout` must be the repository the folder belongs to.
+pub fn ops_remover<'a>(host: &'a Host, runner: &'a dyn Runner, cfg: &'a TidyCfg) -> impl Fn(&str) -> Result<(), String> + 'a {
+    move |p: &str| {
+        let ops = Ops::new(host, runner, cfg);
+        let (status, note) = ops.remove_dir_with(p, None).map_err(fs)?;
+        if status == "ok" {
+            Ok(())
+        } else {
+            Err(format!("{status}: {note}"))
+        }
+    }
+}
+
 pub struct OpsHost<'a> {
     pub host: &'a Host,
     pub runner: &'a dyn Runner,

@@ -91,12 +91,15 @@ fn quote(f: &str) -> String {
     format!("\"{f}\"")
 }
 
-/// Remove the scratch worktree we made (one exact path, named `land-*`), then it is gone from git too. Never a prune, never a recursive delete of ours.
-fn clean(e: &dyn Exec, repo: &str, path: &str) -> Result<(), String> {
+/// Remove the scratch worktree we made (one exact path, named `land-*`). The folder goes by the caller's `remover`, which must be link-safe (the
+/// checks may have created a node_modules junction, and `git worktree remove` can follow one: it once emptied a main checkout); git is then told the
+/// folder is gone. Never a prune, never a recursive delete of ours.
+fn clean(e: &dyn Exec, repo: &str, path: &str, remover: &dyn Fn(&str) -> Result<(), String>) -> Result<(), String> {
     let leaf = path.replace('\\', "/").rsplit('/').next().unwrap_or("").to_string();
     if !leaf.starts_with("land-") {
         return Err(format!("not removing {path}: it is not a land scratch worktree"));
     }
+    remover(path).map_err(|m| format!("scratch worktree {path} left in place (the link-safe removal said: {m}); remove it with `gatetrain tidy --force`"))?;
     let o = git(e, repo, &["worktree", "remove", "--force", path]);
     if o.ok() {
         Ok(())
@@ -105,7 +108,8 @@ fn clean(e: &dyn Exec, repo: &str, path: &str) -> Result<(), String> {
     }
 }
 
-pub fn land(e: &dyn Exec, cfg: &LandCfg, a: &LandArgs, l: Option<&mut Ledger>) -> LandOut {
+/// `remover` removes a folder without ever following a link in it (tidy's link-safe removal; see `tidyforce::ops_remover`).
+pub fn land(e: &dyn Exec, cfg: &LandCfg, a: &LandArgs, l: Option<&mut Ledger>, remover: &dyn Fn(&str) -> Result<(), String>) -> LandOut {
     let mut text = String::new();
     let remote = &cfg.remote;
     let f = git(e, &a.repo, &["fetch", "-q", remote]);
@@ -224,7 +228,7 @@ rename them, or run the checks by hand and land with checks that do not use {{fi
         }
         result = (7, format!("push to {remote}/{} failed: {}", cfg.main, p.text().trim()), None);
     }
-    if let Err(m) = clean(e, &a.repo, &scratch) {
+    if let Err(m) = clean(e, &a.repo, &scratch, remover) {
         say(&mut text, m);
     }
     let (rc, msg, landed) = result;

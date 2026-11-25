@@ -39,6 +39,9 @@ pub struct TidyArgs {
     /// with --force: a regex over the worktree name or path; matches are kept (live lanes)
     #[arg(long, value_name = "REGEX")]
     keep: Option<String>,
+    /// with --force: accept that ignored files that are not build output (`.env.local`, scratch notes) are deleted with the worktree, unarchived
+    #[arg(long)]
+    include_ignored: bool,
 }
 
 /// Each item is reported on stderr as soon as it is judged (`GATETRAIN_PROGRESS=0` turns it off): a long inventory is never silent.
@@ -69,7 +72,7 @@ pub fn run_tidy(a: TidyArgs) -> ExitCode {
         return emit(cmd_restore_image(&a.config, a.host.as_deref(), tar, &make_runner));
     }
     if a.force {
-        return crate::forcecmd::tidy_force(&a.config, a.host.as_deref(), a.keep.as_deref(), a.apply);
+        return crate::forcecmd::tidy_force(&a.config, a.host.as_deref(), a.keep.as_deref(), a.apply, a.include_ignored);
     }
     if a.keep.is_some() {
         eprintln!("gatetrain: --keep needs --force");

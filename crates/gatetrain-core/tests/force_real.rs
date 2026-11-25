@@ -183,3 +183,26 @@ fn a_stale_remote_tracking_ref_is_not_proof_that_the_remote_holds_the_tip() {
     assert_eq!(sh(&f.r.work, &["rev-parse", &format!("refs/tags/archive/detached-{}^{{commit}}", &tip[..12])]), tip);
 }
 
+#[test]
+fn a_junction_a_check_made_in_the_scratch_worktree_is_unlinked_never_followed() {
+    // B5: the checks (an install, a regenerator) may leave a node_modules link in the scratch worktree; its removal must not empty the target
+    use gatetrain_core::force::cfg;
+    use gatetrain_core::force::exec::LocalExec;
+    use gatetrain_core::force::land::{land, LandArgs};
+    let f = fx();
+    branch(&f.r, "feat", &["docs/x.md"]);
+    let mk = if cfg!(windows) { format!("mklink /J node_modules {}", f.canary.display()) } else { format!("ln -s {} node_modules", f.canary.display()) };
+    let mut c = cfg::parse("[[land.rules]]\nglob=\"docs/**\"\nmode=\"fast\"\n").unwrap().land;
+    c.checks = vec![mk];
+    let runner = LocalRunner;
+    let rm = tidyforce::ops_remover(&f.cfg.hosts[0], &runner, &f.tidy);
+    let a = LandArgs { repo: f.r.p(), branch: "feat".into(), plan: false, who: "t".into() };
+    let before = f.main_state();
+    let o = land(&LocalExec, &c, &a, None, &rm);
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert!(f.canary.join("keep.txt").exists(), "the junction's target was followed:\n{}", o.text);
+    assert!(!std::fs::read_dir(f.tmp()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("land-")), "scratch folder left:\n{}", o.text);
+    assert_eq!(sh(&f.r.work, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
+    assert_eq!(f.main_state(), before);
+    assert_eq!(sh(&f.r.origin, &["rev-parse", "main"]), o.merged.unwrap());
+}

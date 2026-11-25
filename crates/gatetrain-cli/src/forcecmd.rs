@@ -8,7 +8,7 @@ use gatetrain_core::force::exec::{LocalExec, RunnerExec};
 use gatetrain_core::force::land::{self, LandArgs};
 use gatetrain_core::force::mainwatch::{self, WatchArgs};
 use gatetrain_core::force::measure::{self, Measure};
-use gatetrain_core::force::tidyforce::{self, OpsHost};
+use gatetrain_core::force::tidyforce::{self, ops_remover, OpsHost};
 use gatetrain_core::ledger::Ledger;
 use gatetrain_core::tidy::config::{build_cfg, TidyCfg};
 use gatetrain_core::tidy::inventory::gather;
@@ -114,7 +114,7 @@ pub fn measure_cmd(a: MeasureArgs) -> ExitCode {
 
 // ---------------------------------------------------------------- tidy --force
 
-pub fn tidy_force(config_path: &str, host: Option<&str>, keep: Option<&str>, apply: bool) -> ExitCode {
+pub fn tidy_force(config_path: &str, host: Option<&str>, keep: Option<&str>, apply: bool, include_ignored: bool) -> ExitCode {
     let run = || -> Result<i32, String> {
         let c = config::load(Path::new(config_path)).map_err(|e| format!("config error: {e}"))?;
         let fc = force_cfg(config_path)?;
@@ -128,7 +128,7 @@ pub fn tidy_force(config_path: &str, host: Option<&str>, keep: Option<&str>, app
             };
             println!("== {}", hc.host.name);
             let oh = OpsHost::new(hc.host, r.as_ref(), &hc.tidy, &fc.land.remote);
-            let o = tidyforce::run(&oh, keep.as_ref(), apply, &date);
+            let o = tidyforce::run_with(&oh, keep.as_ref(), apply, &date, include_ignored);
             print!("{}", o.text);
             rc = rc.max(o.rc);
             if o.rc == 6 {
@@ -185,7 +185,19 @@ pub fn land_cmd(a: LandCmdArgs) -> ExitCode {
         }
         let mut l = if a.plan { ledger_ro(&a.db) } else { Some(ledger_rw(&a.db)?) };
         let args = LandArgs { repo: a.repo.clone(), branch: a.branch.clone(), plan: a.plan, who: a.by.clone().unwrap_or_else(who) };
-        let o = land::land(&LocalExec, &fc.land, &args, l.as_mut());
+        // the scratch worktree is removed by tidy's link-safe removal, on the first local host of the config (its main_checkout is this repository)
+        let cfgs = config::load(Path::new(&a.config)).ok();
+        let local = cfgs.as_ref().and_then(|c| c.hosts.iter().find(|h| h.enabled && h.reach == "local").and_then(|h| build_cfg(c, h).ok().map(|t| (h, t))));
+        let repo_abs = std::fs::canonicalize(&a.repo).map(|p| p.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/")).unwrap_or_else(|_| a.repo.clone());
+        let o = match local {
+            Some((h, mut t)) => {
+                t.main_checkout = Some(repo_abs);
+                let r = gatetrain_core::runner::LocalRunner;
+                let rm = ops_remover(h, &r, &t);
+                land::land(&LocalExec, &fc.land, &args, l.as_mut(), &rm)
+            }
+            None => land::land(&LocalExec, &fc.land, &args, l.as_mut(), &|_p: &str| Err("the config has no enabled local host for the link-safe removal".to_string())),
+        };
         print!("{}", o.text);
         Ok(o.rc)
     };

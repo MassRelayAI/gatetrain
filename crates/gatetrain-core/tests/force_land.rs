@@ -27,6 +27,11 @@ mode = "safe"
 gates = ["git log -1 --oneline"]
 "#;
 
+/// The scratch worktrees of these tests hold no links, so a plain removal of the folder is enough here; the link-safe one is tested in force_real.rs.
+fn rm(p: &str) -> Result<(), String> {
+    std::fs::remove_dir_all(p).map_err(|e| e.to_string())
+}
+
 fn lcfg() -> cfg::LandCfg {
     cfg::parse(CFG).unwrap().land
 }
@@ -88,7 +93,7 @@ fn plan_prints_the_mode_and_the_rule_per_file_and_changes_nothing() {
     let r = repo();
     branch(&r, "feat", &["docs/x.md", "crates/mr-kernel/a.rs"]);
     let before = origin_main(&r);
-    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", true), None);
+    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", true), None, &rm);
     assert_eq!(o.rc, 0, "{}", o.text);
     assert!(o.text.contains("mode: SAFE"), "{}", o.text);
     assert!(o.text.contains("docs/x.md") && o.text.contains("docs/**") && o.text.contains("crates/mr-kernel/**"), "{}", o.text);
@@ -100,7 +105,7 @@ fn a_fast_branch_lands_records_and_leaves_no_scratch_worktree() {
     let r = repo();
     let tip = branch(&r, "feat", &["docs/x.md"]);
     let mut l = ledger();
-    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), Some(&mut l));
+    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), Some(&mut l), &rm);
     assert_eq!(o.rc, 0, "{}", o.text);
     let merged = o.merged.clone().unwrap();
     assert_eq!(origin_main(&r), merged);
@@ -127,14 +132,14 @@ fn safe_without_a_verdict_is_refused_naming_the_missing_item() {
     let tip = branch(&r, "feat", &["crates/mr-kernel/a.rs"]);
     let before = origin_main(&r);
     let mut l = ledger();
-    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), Some(&mut l));
+    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), Some(&mut l), &rm);
     assert_eq!(o.rc, 4, "{}", o.text);
     assert!(o.text.contains("missing: independent-read verdict") && o.text.contains(&tip), "{}", o.text);
     assert_eq!(origin_main(&r), before);
     // a verdict for the tip lets it land; a later fail verdict takes it away again
     record_verdict(&mut l, &tip, "bob", true, "read the diff").unwrap();
     assert_eq!(verdict_for(&l, &tip).as_deref(), Some("bob"));
-    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), Some(&mut l));
+    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), Some(&mut l), &rm);
     assert_eq!(o.rc, 0, "{}", o.text);
     assert!(o.text.contains("mode: SAFE"), "{}", o.text);
     let tip2 = branch(&r, "feat2", &["tools/y.sh"]);
@@ -150,7 +155,7 @@ fn safe_with_no_gate_configured_is_refused_too() {
     let mut l = ledger();
     record_verdict(&mut l, &tip, "bob", true, "ok").unwrap();
     let c = cfg::parse("[land]\nchecks=[\"git status\"]\n").unwrap().land;
-    let o = land(&LocalExec, &c, &args(&r, "feat", false), Some(&mut l));
+    let o = land(&LocalExec, &c, &args(&r, "feat", false), Some(&mut l), &rm);
     assert_eq!(o.rc, 4, "{}", o.text);
     assert!(o.text.contains("missing: a full gate"), "{}", o.text);
 }
@@ -162,7 +167,7 @@ fn a_red_check_stops_before_the_push() {
     let before = origin_main(&r);
     let mut c = lcfg();
     c.checks = vec!["git no-such-subcommand".into()];
-    let o = land(&LocalExec, &c, &args(&r, "feat", false), None);
+    let o = land(&LocalExec, &c, &args(&r, "feat", false), None, &rm);
     assert_eq!(o.rc, 6, "{}", o.text);
     assert_eq!(origin_main(&r), before);
     assert_eq!(sh(&r.work, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
@@ -177,7 +182,7 @@ fn a_conflict_is_refused_and_cleaned() {
     sh(&r.work, &["commit", "-m", "main edits x"]);
     sh(&r.work, &["push", "origin", "main"]);
     let before = origin_main(&r);
-    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), None);
+    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), None, &rm);
     assert_eq!(o.rc, 5, "{}", o.text);
     assert_eq!(origin_main(&r), before);
     assert_eq!(sh(&r.work, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
@@ -215,7 +220,7 @@ fn a_rejected_push_is_fetched_re_merged_and_retried_without_force() {
     let other = r.tmp.path().join("other");
     sh(r.tmp.path(), &["clone", "-q", r.origin.to_str().unwrap(), "other"]);
     let race = Race { other: other.to_string_lossy().into_owned(), done: Cell::new(false), _r: &r };
-    let o = land(&race, &lcfg(), &args(&r, "feat", false), None);
+    let o = land(&race, &lcfg(), &args(&r, "feat", false), None, &rm);
     assert_eq!(o.rc, 0, "{}", o.text);
     let tree = sh(&r.origin, &["ls-tree", "-r", "--name-only", "main"]);
     assert!(tree.contains("docs/x.md") && tree.contains("other.txt"), "{tree}");
@@ -239,7 +244,7 @@ fn a_migration_renamed_into_docs_is_still_safe() {
     sh(&r.work, &["mv", "docs-0001.sql", "docs/0001.sql"]);
     sh(&r.work, &["commit", "-am", "move it out of the migrations folder"]);
     sh(&r.work, &["checkout", "-q", "main"]);
-    let o = land(&LocalExec, &lcfg(), &args(&r, "mv", true), None);
+    let o = land(&LocalExec, &lcfg(), &args(&r, "mv", true), None, &rm);
     assert!(o.text.contains("mode: SAFE"), "{}", o.text);
     assert!(o.text.contains("apps/db/migrations/0001.sql") && o.text.contains("docs/0001.sql"), "both sides of the rename are classified:\n{}", o.text);
 }
@@ -265,7 +270,7 @@ fn a_file_name_with_shell_syntax_never_reaches_a_shell_line() {
     let mut c = lcfg();
     c.checks = vec!["lint {files}".into()];
     let e = NoShell(Default::default());
-    let o = land(&e, &c, &args(&r, "feat", false), None);
+    let o = land(&e, &c, &args(&r, "feat", false), None, &rm);
     assert_eq!(o.rc, 4, "{}", o.text);
     assert!(o.text.contains("unsafe") && o.text.contains("docs/x$(cmd).md"), "{}", o.text);
     assert!(e.0.borrow().is_empty(), "a check line was built from the name: {:?}", e.0.borrow());
@@ -280,12 +285,63 @@ fn a_branch_name_with_shell_syntax_is_refused_when_a_check_uses_it() {
     let mut c = lcfg();
     c.checks = vec!["lint {branch}".into()];
     let e = NoShell(Default::default());
-    let o = land(&e, &c, &args(&r, "feat$(x)", false), None);
+    let o = land(&e, &c, &args(&r, "feat$(x)", false), None, &rm);
     assert_eq!(o.rc, 4, "{}", o.text);
     assert!(e.0.borrow().is_empty(), "{:?}", e.0.borrow());
     // and a check that uses neither placeholder is not affected by an odd name
     let mut c = lcfg();
     c.checks = vec!["true".into()];
-    let o = land(&e, &c, &args(&r, "feat$(x)", false), None);
+    let o = land(&e, &c, &args(&r, "feat$(x)", false), None, &rm);
     assert_eq!(o.rc, 0, "{}", o.text);
+}
+
+/// Remembers whether the remover has run; the git call that unregisters the scratch worktree must come after it.
+struct Order<'a> {
+    removed: &'a Cell<bool>,
+    seen: std::cell::RefCell<Vec<String>>,
+}
+impl Exec for Order<'_> {
+    fn run(&self, argv: &[String]) -> Out {
+        if argv.iter().any(|a| a == "worktree") && argv.iter().any(|a| a == "remove") {
+            self.seen.borrow_mut().push(format!("git worktree remove (folder removed first: {})", self.removed.get()));
+            assert!(self.removed.get(), "git worktree remove ran before the link-safe remover: {argv:?}");
+        }
+        LocalExec.run(argv)
+    }
+    fn sh(&self, cwd: &str, cmd: &str) -> Out {
+        LocalExec.sh(cwd, cmd)
+    }
+}
+
+#[test]
+fn the_scratch_folder_goes_by_the_link_safe_remover_before_git_unregisters_it() {
+    // B5: `git worktree remove` can follow a junction the checks created; the folder is removed by tidy's removal first
+    let r = repo();
+    branch(&r, "feat", &["docs/x.md"]);
+    let removed = Cell::new(false);
+    let e = Order { removed: &removed, seen: Default::default() };
+    let paths = std::cell::RefCell::new(vec![]);
+    let remover = |p: &str| -> Result<(), String> {
+        paths.borrow_mut().push(p.to_string());
+        let r = rm(p);
+        removed.set(true);
+        r
+    };
+    let o = land(&e, &lcfg(), &args(&r, "feat", false), None, &remover);
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert_eq!(paths.borrow().len(), 1);
+    assert!(paths.borrow()[0].replace('\\', "/").rsplit('/').next().unwrap().starts_with("land-"), "{:?}", paths.borrow());
+    assert_eq!(e.seen.borrow().len(), 1, "git was never told the worktree is gone");
+    assert_eq!(sh(&r.work, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
+}
+
+#[test]
+fn a_remover_that_refuses_leaves_the_scratch_folder_and_still_reports_the_landing() {
+    let r = repo();
+    branch(&r, "feat", &["docs/x.md"]);
+    let o = land(&LocalExec, &lcfg(), &args(&r, "feat", false), None, &|_p: &str| Err("a link target is gone".to_string()));
+    assert_eq!(o.rc, 0, "{}", o.text);
+    assert!(o.text.contains("left in place") && o.text.contains("a link target is gone"), "{}", o.text);
+    assert_eq!(sh(&r.origin, &["rev-parse", "main"]), o.merged.unwrap());
+    assert!(std::fs::read_dir(r.tmp.path()).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("land-")), "the folder must not be force-deleted by anything else");
 }
