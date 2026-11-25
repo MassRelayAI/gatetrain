@@ -2,7 +2,8 @@
 //! The logic is `gatetrain_core::force`; this file reads the arguments, the config and the hosts, and prints.
 use clap::Args;
 use gatetrain_core::config::{self, host_os, Config, Host};
-use gatetrain_core::force::cfg::{self, ForceCfg};
+use gatetrain_core::force::branches::{self, BranchRow, HostScan};
+use gatetrain_core::force::cfg::{self, ForceCfg, Limits};
 use gatetrain_core::force::exec::{LocalExec, RunnerExec};
 use gatetrain_core::force::land::{self, LandArgs};
 use gatetrain_core::force::measure::{self, Measure};
@@ -224,6 +225,78 @@ pub fn verdict_cmd(a: VerdictArgs) -> ExitCode {
         Ok(()) => {
             println!("verdict recorded: {} {} by {}", a.sha, if a.pass { "pass" } else { "fail" }, a.by);
             ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("gatetrain: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- branches
+
+#[derive(Args)]
+pub struct BranchesArgs {
+    #[arg(long, default_value = "hosts.toml")]
+    config: String,
+    #[arg(long)]
+    host: Option<String>,
+    #[arg(long, default_value = "gatetrain.db")]
+    db: String,
+    #[arg(long)]
+    json: bool,
+    /// exit 1 when a limit is breached (`[limits]`: max_worktrees, max_idle_days, max_worktree_gb, max_unlanded_hours)
+    #[arg(long)]
+    check: bool,
+    /// skip the folder-size walk (fast)
+    #[arg(long)]
+    no_size: bool,
+}
+
+fn collect(config_path: &str, host: Option<&str>, db: &str, sizes: bool) -> Result<(Vec<BranchRow>, Vec<branches::Breach>, Limits), String> {
+    let c = config::load(Path::new(config_path)).map_err(|e| format!("config error: {e}"))?;
+    let fc = force_cfg(config_path)?;
+    let l = ledger_ro(db);
+    let owner = |b: &str| l.as_ref().and_then(|l| branches::ledger_owner(l, b));
+    let now = chrono::Utc::now().timestamp();
+    let mut rows = vec![];
+    let mut first: Option<(String, String, String, bool)> = None;
+    for hc in hosts(&c, host)? {
+        let Some(r) = make_runner(hc.host) else { continue };
+        let Some(repo) = hc.tidy.main_checkout.clone() else {
+            eprintln!("{}: no main_checkout in [tidy]; skipped", hc.host.name);
+            continue;
+        };
+        let win = host_os(hc.host) == "windows";
+        let ex = RunnerExec(r.as_ref());
+        let hs = HostScan { host: &hc.host.name, e: &ex, repo: &repo, main: &hc.tidy.main_branch, remote: &fc.land.remote, prefix: &hc.tidy.worktree_prefix, win, stale_days: fc.limits.max_idle_days, sizes };
+        rows.extend(branches::scan(&hs, now, &owner).map_err(|e| e.to_string())?);
+        if first.is_none() {
+            first = Some((hc.host.name.clone(), repo, hc.tidy.main_branch.clone(), win));
+        }
+    }
+    if let Some((name, repo, main, win)) = first {
+        let h0 = hosts(&c, host)?.into_iter().find(|h| h.host.name == name).ok_or("host vanished")?;
+        if let Some(r) = make_runner(h0.host) {
+            let ex = RunnerExec(r.as_ref());
+            let skip: Vec<String> = rows.iter().filter_map(|r| r.branch.clone()).collect();
+            let hs = HostScan { host: &name, e: &ex, repo: &repo, main: &main, remote: &fc.land.remote, prefix: "", win, stale_days: fc.limits.max_idle_days, sizes: false };
+            rows.extend(branches::scan_remote(&hs, now, &skip, &owner).map_err(|e| e.to_string())?);
+        }
+    }
+    let b = branches::breaches(&rows, &fc.limits);
+    Ok((rows, b, fc.limits))
+}
+
+pub fn branches_cmd(a: BranchesArgs) -> ExitCode {
+    match collect(&a.config, a.host.as_deref(), &a.db, !a.no_size) {
+        Ok((rows, b, _)) => {
+            if a.json {
+                println!("{}", serde_json::to_string_pretty(&branches::to_json(&rows, &b)).unwrap());
+            } else {
+                print!("{}", branches::table(&rows, &b));
+            }
+            ExitCode::from(if a.check && !b.is_empty() { 1 } else { 0 })
         }
         Err(e) => {
             eprintln!("gatetrain: {e}");

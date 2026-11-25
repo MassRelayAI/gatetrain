@@ -4,6 +4,7 @@
 //! Every command here goes through [`Exec`] (an argument vector, never a shell string for git), so a test hands it a [`StubExec`] that
 //! records and answers, and a real run hands it the host's runner. The new config tables are `[land]`, `[mainwatch]`, `[limits]` and
 //! `[measure]` of hosts.toml; the older loader ignores top-level tables it does not know, so a file stays valid for both.
+pub mod branches;
 pub mod cfg;
 pub mod exec;
 pub mod land;
