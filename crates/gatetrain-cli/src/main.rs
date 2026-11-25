@@ -110,6 +110,8 @@ enum Cmd {
     Land(Box<forcecmd::LandCmdArgs>),
     /// Record an independent read (pass or fail) of a commit; a SAFE landing needs a pass for the branch tip
     Verdict(Box<forcecmd::VerdictArgs>),
+    /// When main has a commit with no full chain, start one, ingest it, list each red as a post-fix item with an owner; --deploy-cmd only for a green sha
+    MainWatch(Box<forcecmd::MainWatchArgs>),
     /// Every branch and worktree on every host and the remote: size, ahead/behind, on main?, uncommitted, age, owner, state; --check exits 1 on a limit breach
     Branches(Box<forcecmd::BranchesArgs>),
     /// Measure this host and its configured disks (durable writes, sequential, small files, rotational, CPU); stored in the ledger. Refused while a proof holds the host
@@ -613,6 +615,7 @@ fn run(cli: Cli, _raw: &[String]) -> Result<ExitCode> {
         Cmd::Measure(a) => Ok(forcecmd::measure_cmd(*a)),
         Cmd::Land(a) => Ok(forcecmd::land_cmd(*a)),
         Cmd::Verdict(a) => Ok(forcecmd::verdict_cmd(*a)),
+        Cmd::MainWatch(a) => Ok(forcecmd::main_watch_cmd(*a)),
         Cmd::Branches(a) => Ok(forcecmd::branches_cmd(*a)),
         Cmd::Chain(a) => Ok(chaincmd::run(*a)),
         Cmd::Agent { cmd } => Ok(agentcmd::run(cmd)),

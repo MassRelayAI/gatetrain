@@ -8,6 +8,7 @@ pub mod branches;
 pub mod cfg;
 pub mod exec;
 pub mod land;
+pub mod mainwatch;
 pub mod measure;
 pub mod tidyforce;
 

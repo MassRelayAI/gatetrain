@@ -6,6 +6,7 @@ use gatetrain_core::force::branches::{self, BranchRow, HostScan};
 use gatetrain_core::force::cfg::{self, ForceCfg, Limits};
 use gatetrain_core::force::exec::{LocalExec, RunnerExec};
 use gatetrain_core::force::land::{self, LandArgs};
+use gatetrain_core::force::mainwatch::{self, WatchArgs};
 use gatetrain_core::force::measure::{self, Measure};
 use gatetrain_core::force::tidyforce::{self, OpsHost};
 use gatetrain_core::ledger::Ledger;
@@ -305,3 +306,72 @@ pub fn branches_cmd(a: BranchesArgs) -> ExitCode {
     }
 }
 
+// ---------------------------------------------------------------- main-watch
+
+#[derive(Args)]
+pub struct MainWatchArgs {
+    #[arg(long, default_value = "hosts.toml")]
+    config: String,
+    #[arg(long, default_value = "gatetrain.db")]
+    db: String,
+    /// the repository (default: [mainwatch] repo, else the current folder)
+    #[arg(long)]
+    repo: Option<String>,
+    /// one pass, then exit (default: loop)
+    #[arg(long)]
+    once: bool,
+    /// seconds between passes without --once
+    #[arg(long, default_value_t = 300)]
+    interval_s: u64,
+    /// run for a sha whose full chain is green and only then ({sha} is replaced)
+    #[arg(long)]
+    deploy_cmd: Option<String>,
+    #[arg(long)]
+    host: Option<String>,
+}
+
+pub fn main_watch_cmd(a: MainWatchArgs) -> ExitCode {
+    let fc = match force_cfg(&a.config) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("gatetrain: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let repo = a.repo.clone().or(fc.watch.repo.clone()).unwrap_or_else(|| ".".into());
+    let mut worst = 0;
+    loop {
+        let rc = (|| -> Result<i32, String> {
+            let mut l = ledger_rw(&a.db)?;
+            let wa = WatchArgs { repo: repo.clone(), deploy_cmd: a.deploy_cmd.clone(), who: who() };
+            let o = mainwatch::watch_once(&LocalExec, &fc.land, &fc.watch, &wa, &mut l, &|p: &str| std::fs::read_to_string(p).ok());
+            print!("{}", o.text);
+            let mut rc = o.rc;
+            drop(l);
+            match collect(&a.config, a.host.as_deref(), &a.db, false) {
+                Ok((_, b, _)) => {
+                    for x in &b {
+                        println!("BREACH {} {} {}: {} -> {}", x.host, x.rule, x.item, x.detail, x.fix);
+                    }
+                    if !b.is_empty() {
+                        rc = rc.max(1);
+                    }
+                }
+                Err(e) => println!("limits: not checked ({e})"),
+            }
+            Ok(rc)
+        })();
+        match rc {
+            Ok(r) => worst = worst.max(r),
+            Err(e) => {
+                eprintln!("gatetrain: {e}");
+                worst = worst.max(2);
+            }
+        }
+        if a.once {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(a.interval_s));
+    }
+    ExitCode::from(worst as u8)
+}
